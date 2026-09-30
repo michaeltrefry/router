@@ -166,7 +166,11 @@ func checkWorker(ctx context.Context, binary, dsn, pubsubAddress, providerURL, t
 		}
 		select {
 		case <-readyCtx.Done():
-			return fmt.Errorf("worker did not become ready; inspect %s: %w", logFile.Name(), readyCtx.Err())
+			startupLogs, _ := os.ReadFile(logFile.Name())
+			if len(startupLogs) > 32<<10 {
+				startupLogs = startupLogs[len(startupLogs)-(32<<10):]
+			}
+			return fmt.Errorf("worker did not become ready; inspect %s: %w\n%s", logFile.Name(), readyCtx.Err(), startupLogs)
 		case <-ticker.C:
 		}
 	}
