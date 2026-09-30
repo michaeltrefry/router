@@ -17,6 +17,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"weave-os/router/internal/auth"
+	"weave-os/router/internal/health"
 	"weave-os/router/internal/observability"
 	"weave-os/router/internal/policyregistry"
 	"weave-os/router/internal/requestcontext"
@@ -44,6 +45,7 @@ type Handler struct {
 	transport   http.RoundTripper
 	products    *ProductSurfaces
 	testPlans   *policyregistry.TestPlanTools
+	capacity    *health.Capacity
 }
 
 // NewHandler requires authoritative storage and signed, IAM-authenticated forwarding.
@@ -70,11 +72,32 @@ func (h *Handler) WithTestPlans(tools *policyregistry.TestPlanTools) *Handler {
 	return h
 }
 
+// SetCapacity is called by composition before the handler starts serving.
+func (h *Handler) SetCapacity(capacity *health.Capacity) {
+	h.capacity = capacity
+}
+
 // ServeHTTP preserves original ordinary-request bytes and streams without replay or response buffering.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	grant, session := r.Header.Get(policyregistry.TestPlanGrantHeader), r.Header.Get(policyregistry.TestPlanSessionHeader)
 	r.Header.Del(policyregistry.TestPlanGrantHeader)
 	r.Header.Del(policyregistry.TestPlanSessionHeader)
+	var permit *health.Permit
+	if h.capacity != nil {
+		permit = h.capacity.TryAcquire()
+		if permit == nil {
+			surface, _ := inferenceSurface(r)
+			writeCapacityError(w, surface)
+			return
+		}
+		defer permit.Release()
+		// Feedback has a separate fixed-size reader and never buffers more than
+		// this small bound. Account its ReadAll growth as well as the final body.
+		if feedbackSurface(r) && !permit.ResizeBufferedBytes(3*(64*1024+1)) {
+			writeCapacityError(w, requestcontext.ConversationChat)
+			return
+		}
+	}
 	policyregistry.StripServingHeaders(r.Header)
 	if grant != "" && (h.testPlans == nil || !testPlanSurface(r)) {
 		writeError(w, requestcontext.ConversationChat, http.StatusForbidden, "Internal test launch is unavailable on this endpoint.")
@@ -103,14 +126,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, surface, err)
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, requestcontext.MaxRequestBodyBytes+1))
+	body, err := readRequestBody(r, permit)
 	if err != nil {
+		if errors.Is(err, errBufferCapacity) {
+			writeCapacityError(w, surface)
+			return
+		}
+		if errors.Is(err, errBodyTooLarge) {
+			writeError(w, surface, http.StatusRequestEntityTooLarge, "Request body too large.")
+			return
+		}
 		observability.FromContext(ctx).Debug("Gateway request body read failed", "surface", surface, "method", r.Method, "err", err)
 		writeError(w, surface, http.StatusBadRequest, "Failed to read request body.")
-		return
-	}
-	if len(body) > requestcontext.MaxRequestBodyBytes {
-		writeError(w, surface, http.StatusRequestEntityTooLarge, "Request body too large.")
 		return
 	}
 	if (r.Method == http.MethodPost || r.Method == http.MethodPatch) && (!gjson.ValidBytes(body) || !gjson.ParseBytes(body).IsObject()) {
@@ -167,6 +194,72 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.forward(w, r, surface, body, binding, assertion)
+}
+
+var (
+	errBufferCapacity = errors.New("gateway request buffer capacity exhausted")
+	errBodyTooLarge   = errors.New("gateway request body too large")
+)
+
+// Grow only after reserving the old and new live allocations. Content-Length
+// is a sizing hint, never authority to exceed the byte or per-request bound.
+func readRequestBody(r *http.Request, permit *health.Permit) ([]byte, error) {
+	if r.ContentLength > requestcontext.MaxRequestBodyBytes {
+		return nil, errBodyTooLarge
+	}
+	if r.Body == nil || r.Body == http.NoBody {
+		return nil, nil
+	}
+	bufferCapacity := int64(512)
+	if r.ContentLength > 0 {
+		bufferCapacity = r.ContentLength + 1
+	}
+	if !permit.ResizeBufferedBytes(bufferCapacity) {
+		return nil, errBufferCapacity
+	}
+	body := make([]byte, 0, bufferCapacity)
+	for {
+		if len(body) == cap(body) {
+			// A full unknown-length body may already be complete; don't force a
+			// second allocation just to observe EOF.
+			var next [1]byte
+			n, err := io.ReadFull(r.Body, next[:])
+			if n == 0 {
+				if errors.Is(err, io.EOF) {
+					return body, nil
+				}
+				return nil, err
+			}
+			if len(body) >= requestcontext.MaxRequestBodyBytes {
+				return nil, errBodyTooLarge
+			}
+			nextCapacity := min(int64(cap(body))*2, requestcontext.MaxRequestBodyBytes+1)
+			if !permit.ResizeBufferedBytes(int64(cap(body)) + nextCapacity) {
+				return nil, errBufferCapacity
+			}
+			grown := make([]byte, len(body)+1, nextCapacity)
+			copy(grown, body)
+			grown[len(body)] = next[0]
+			body = grown
+			permit.ResizeBufferedBytes(nextCapacity)
+		}
+		n, err := r.Body.Read(body[len(body):cap(body)])
+		body = body[:len(body)+n]
+		if len(body) > requestcontext.MaxRequestBodyBytes {
+			return nil, errBodyTooLarge
+		}
+		if errors.Is(err, io.EOF) {
+			return body, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+func writeCapacityError(w http.ResponseWriter, surface requestcontext.ConversationSurface) {
+	w.Header().Set("Retry-After", "1")
+	writeError(w, surface, http.StatusServiceUnavailable, "Router instance is at capacity; retry later.")
 }
 
 func (h *Handler) forward(w http.ResponseWriter, r *http.Request, surface requestcontext.ConversationSurface, body []byte, binding policyregistry.LaneBinding, assertion string) {

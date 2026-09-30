@@ -1,6 +1,6 @@
 {
   "schema_version": "inference_policy_registry_v2",
-  "registry_revision": "sha256:f4aeff840c5c90e7d0d6c16e590389c282e0e6b9d1a881f35a3b4a3becdf507f",
+  "registry_revision": "sha256:e5a20802b84707fb922c7318bd37a30120f099802bf1507c8f950ee49886e03e",
   "policies": [
     {
       "purpose": "agent_shadow_evaluation",
@@ -598,6 +598,35 @@
         "kind": "none"
       },
       "migration_status": "non_inference"
+    },
+    {
+      "purpose": "startup_warmup",
+      "dispatch_class": "auxiliary_inference",
+      "policy_id": "startup-model-warmup",
+      "policy_revision": "1",
+      "owner": "@steventohme",
+      "rationale": "Initialize each startup-known routable deployment model with one synthetic generation before admitting traffic; no customer billing, session state, or fallback.",
+      "selection_strategy": "client_authoritative",
+      "candidate_source": "request",
+      "hard_constraints": [
+        "catalog_binding",
+        "context_window",
+        "model_exclusions",
+        "provider_exclusions"
+      ],
+      "override_precedence": [
+        "request"
+      ],
+      "budget": {
+        "source": "policy",
+        "max_attempts": 1,
+        "timeout_millis": 30000,
+        "max_output_tokens": 1024
+      },
+      "fallback": {
+        "kind": "none"
+      },
+      "migration_status": "executor"
     },
     {
       "purpose": "sub_agent_dispatch",
