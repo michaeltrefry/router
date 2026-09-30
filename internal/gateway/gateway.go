@@ -93,7 +93,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer permit.Release()
 		// Feedback has a separate fixed-size reader and never buffers more than
 		// this small bound. Account its ReadAll growth as well as the final body.
-		if feedbackSurface(r) && !permit.ResizeBufferedBytes(3*(64*1024+1)) {
+		if feedbackSurface(r) && r.Body != http.NoBody && !permit.ResizeBufferedBytes(3*(64*1024+1)) {
 			writeCapacityError(w, requestcontext.ConversationChat)
 			return
 		}
@@ -207,7 +207,7 @@ func readRequestBody(r *http.Request, permit *health.Permit) ([]byte, error) {
 	if r.ContentLength > requestcontext.MaxRequestBodyBytes {
 		return nil, errBodyTooLarge
 	}
-	if r.Body == nil || r.Body == http.NoBody {
+	if r.Body == http.NoBody {
 		return nil, nil
 	}
 	bufferCapacity := int64(512)

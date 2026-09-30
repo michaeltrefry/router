@@ -23,7 +23,8 @@ type Authorizer struct {
 
 // NewAuthorizer retains audience-specific token sources for the process lifetime.
 func NewAuthorizer(ctx context.Context) *Authorizer {
-	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Timeout: 10 * time.Second})
+	// SIGTERM stops admission before in-flight requests finish forwarding.
+	ctx = context.WithValue(context.WithoutCancel(ctx), oauth2.HTTPClient, &http.Client{Timeout: 10 * time.Second})
 	return &Authorizer{ctx: ctx, sources: make(map[string]oauth2.TokenSource), newSource: func(ctx context.Context, audience string) (oauth2.TokenSource, error) {
 		return idtoken.NewTokenSource(ctx, audience)
 	}}

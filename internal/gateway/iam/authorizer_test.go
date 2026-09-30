@@ -76,3 +76,35 @@ func TestAuthorizerRetriesRejectedTokenSource(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "ready", token)
 }
+
+func TestAuthorizerRefreshesTokensWhileRequestsDrain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		processCtx, stop := context.WithCancel(context.Background())
+		defer stop()
+		authorizer := NewAuthorizer(processCtx)
+		tokens := 0
+		authorizer.newSource = func(ctx context.Context, audience string) (oauth2.TokenSource, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return tokenSourceFunc(func() (*oauth2.Token, error) {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				tokens++
+				return &oauth2.Token{AccessToken: audience, Expiry: time.Now().Add(time.Minute)}, nil
+			}), nil
+		}
+		_, err := authorizer.IdentityToken(context.Background(), "https://worker.example")
+		require.NoError(t, err)
+		stop()
+		time.Sleep(time.Minute + time.Second)
+		token, err := authorizer.IdentityToken(context.Background(), "https://worker.example")
+		require.NoError(t, err)
+		require.Equal(t, "https://worker.example", token)
+		token, err = authorizer.IdentityToken(context.Background(), "https://other.example")
+		require.NoError(t, err)
+		require.Equal(t, "https://other.example", token)
+		require.Equal(t, 3, tokens)
+	})
+}

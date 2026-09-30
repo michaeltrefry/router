@@ -455,6 +455,8 @@ still avoids its original classifier, as described below. Configured deployment
 provider transports receive credential-free HEAD requests through the actual
 serving clients. This proves DNS/TCP/TLS connectivity and retains reusable
 connections; HTTP errors do not prove provider credentials or model availability.
+Additional configured startup egress origins retain credential-free connectivity
+checks; these do not replace initialization of the actual serving clients.
 Each startup-known routable deployment model also executes one synthetic generation
 through the normal policy resolver and inference executor, with the same serving
 adapters and deployment credentials. The model set includes routable catalog
