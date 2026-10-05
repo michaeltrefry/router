@@ -179,6 +179,9 @@ func TestCallerRoutingStateFollowsRoutingPrecedence(t *testing.T) {
 		{name: "teams policy assigned overrides experiment passthrough", ctx: func(t *testing.T) context.Context {
 			return experiment(withPolicy(t, auth.RoutingPolicyAssigned, true), passthroughArm)
 		}, wantSource: callerRoutingSourceRoutingPolicy},
+		{name: "passthrough policy suppresses experiment router on arm", ctx: func(t *testing.T) context.Context {
+			return experiment(withPolicy(t, auth.RoutingPolicyPassthrough, false), auth.BlindExperimentState{Active: true, Arm: auth.BlindExperimentArmRouterOn})
+		}, wantPassthrough: true, wantSource: callerRoutingSourceRoutingPolicy},
 		{name: "inherit policy defers to experiment", ctx: func(t *testing.T) context.Context {
 			return experiment(withPolicy(t, auth.RoutingPolicyInherit, false), passthroughArm)
 		}, wantPassthrough: true, wantSource: callerRoutingSourceExperiment},

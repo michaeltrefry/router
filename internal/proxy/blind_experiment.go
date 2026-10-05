@@ -46,7 +46,6 @@ func callerModelPassthroughActive(ctx context.Context) bool {
 	return auth.RoutingPassthroughFrom(ctx) || blindExperimentPassthroughActive(ctx)
 }
 
-// callerRoutingSource names what decided whether a caller is routed or passed through.
 type callerRoutingSource string
 
 const (
