@@ -88,7 +88,7 @@ func taskDomainInput(ctx context.Context, env *translate.RequestEnvelope, apiKey
 	input := &taskdomain.Input{ConversationKey: hex.EncodeToString(conversation)}
 	var text []string
 	commandPrelude := false
-	for _, message := range env.ConversationMessages() {
+	for _, message := range env.ConversationMessagesWithClientText() {
 		if message.Role == string(translate.EscalationRoleSystem) || message.Role == string(translate.EscalationRoleDeveloper) {
 			continue
 		}
@@ -112,6 +112,9 @@ func taskDomainInput(ctx context.Context, env *translate.RequestEnvelope, apiKey
 			return input
 		}
 		if userText == "" {
+			if isTaskCommand(strings.TrimSpace(message.Text)) {
+				commandPrelude = true
+			}
 			continue
 		}
 		if isTaskCommand(userText) {
@@ -149,6 +152,13 @@ const (
 )
 
 func isTaskCommand(text string) bool {
+	for strings.HasPrefix(text, "<system-reminder>") {
+		_, remaining, complete := strings.Cut(text, "</system-reminder>")
+		if !complete {
+			return false
+		}
+		text = strings.TrimSpace(remaining)
+	}
 	if strings.HasPrefix(text, "<command-") || strings.HasPrefix(text, "<local-command-") {
 		return true
 	}

@@ -57,6 +57,11 @@ func TestTaskInputAcrossFormatsAndResume(t *testing.T) {
 		resume     bool
 	}{
 		{"anthropic", `{"messages":[{"role":"user","content":"Review parser"},{"role":"assistant","content":"Working"},{"role":"user","content":"follow up"}]}`, translate.ParseAnthropic, "Review parser", false},
+		{"anthropic command prelude", `{"messages":[{"role":"user","content":[{"type":"text","text":"<command-message>status</command-message>\n<command-name>/status</command-name>"}]},{"role":"assistant","content":"Status ready"},{"role":"user","content":"Review parser"}]}`, translate.ParseAnthropic, "Review parser", false},
+		{"anthropic injected task", `{"messages":[{"role":"user","content":[{"type":"text","text":"<system-reminder>workspace setup</system-reminder>"},{"type":"text","text":"Review parser"}]}]}`, translate.ParseAnthropic, "Review parser", false},
+		{"anthropic decorated command", `{"messages":[{"role":"user","content":[{"type":"text","text":"<system-reminder>workspace setup</system-reminder>"},{"type":"text","text":"<command-name>/status</command-name>"}]},{"role":"assistant","content":"Status ready"},{"role":"user","content":"Review parser"}]}`, translate.ParseAnthropic, "Review parser", false},
+		{"anthropic truncated", `{"messages":[{"role":"user","content":"<system-reminder>workspace setup</system-reminder>"},{"role":"assistant","content":"Earlier work"},{"role":"user","content":"continue"}]}`, translate.ParseAnthropic, "", true},
+		{"anthropic later command", `{"messages":[{"role":"assistant","content":"Earlier work"},{"role":"user","content":"<command-name>/status</command-name>"},{"role":"assistant","content":"Status ready"},{"role":"user","content":"continue"}]}`, translate.ParseAnthropic, "", true},
 		{"gemini", `{"contents":[{"role":"user","parts":[{"text":"Review parser"}]},{"role":"model","parts":[{"text":"Working"}]}]}`, translate.ParseGemini, "Review parser", false},
 		{"path", `{"messages":[{"role":"user","content":"/src/parser.go needs tests"}]}`, translate.ParseOpenAI, "/src/parser.go needs tests", false},
 		{"codex resume", `{"messages":[{"role":"user","content":"Another language model started to solve this problem and produced a summary of its thinking process. Summary: parser changes"}]}`, translate.ParseOpenAI, "", true},
