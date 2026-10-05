@@ -92,7 +92,7 @@ def test_warm_up_requires_valid_repeat_pass():
     warmed = ColdPredictor("0,1,0,1,0")
     warm_up(warmed, ("short", "long"))
     assert warmed.texts == ["short", "long", "short", "long"]
-    with pytest.raises(RuntimeError, match="invalid output"):
+    with pytest.raises(RuntimeError, match="invalid output for warmup input 0"):
         warm_up(ColdPredictor("1"), ("short", "long"))
 
 

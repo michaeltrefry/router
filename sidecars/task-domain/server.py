@@ -50,8 +50,8 @@ def main() -> None:
     model_path: Path = Path(os.environ["TASK_DOMAIN_MODEL_PATH"])
     release_sha256: str = verify_release(Path(os.environ["TASK_DOMAIN_RELEASE_PATH"]), model_path, os.environ["TASK_DOMAIN_RELEASE_SHA256"])
     predictor: QwenPredictor = QwenPredictor(model_path)
-    warm_up(predictor, WARMUP_TEXTS)
     app = create_app(predictor, release_sha256, os.environ["TASK_DOMAIN_BEARER"])
+    warm_up(predictor, WARMUP_TEXTS)
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8095")), access_log=False)
 
 

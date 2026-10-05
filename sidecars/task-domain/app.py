@@ -31,10 +31,10 @@ def warm_up(predictor: Predictor, texts: Sequence[str]) -> None:
     # The first CUDA pass is slow enough to truncate generation; listen only once a repeat pass is valid.
     for text in texts:
         predictor.predict(text)
-    for text in texts:
+    for index, text in enumerate(texts):
         output, _ = predictor.predict(text)
         if not OUTPUT.fullmatch(output):
-            raise RuntimeError("task classifier warmup produced invalid output")
+            raise RuntimeError(f"task classifier warmup produced invalid output for warmup input {index}")
 
 
 def create_app(predictor: Predictor, release_sha256: str, bearer: str) -> FastAPI:
