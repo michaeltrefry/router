@@ -102,14 +102,19 @@ def create_app(predictor: Predictor, release_sha256: str, bearer: str, service_t
             raise HTTPException(409, "release mismatch")
         if not classification.user_text or len(classification.user_text.encode()) > MAX_INPUT_BYTES:
             raise HTTPException(413, "input too large")
+        if not scheduler.reserve():
+            raise HTTPException(503, "classifier busy")
         try:
             tokens: list[int] = await run_in_threadpool(predictor.encode, classification.user_text)
         except ValueError:
+            scheduler.release()
             raise HTTPException(413, "input token limit exceeded") from None
+        except BaseException:
+            scheduler.release()
+            raise
         loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
         pending: PendingClassification = PendingClassification(tokens, deadline, loop.create_future(), loop)
-        if not scheduler.submit(pending):
-            raise HTTPException(503, "classifier busy")
+        scheduler.submit(pending)
         watcher: asyncio.Task[None] = asyncio.create_task(cancel_on_disconnect(request, pending.future))
         try:
             output: str = await pending.future

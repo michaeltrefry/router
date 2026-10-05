@@ -98,16 +98,33 @@ class BatchScheduler:
         self._predictor = predictor
         self._service_time = service_time
         self._queue: list[PendingClassification] = []
+        self._reserved: int = 0
         self._ready = threading.Condition()
         threading.Thread(target=self._run, name="task-domain-gpu", daemon=True).start()
 
-    def submit(self, pending: PendingClassification) -> bool:
+    def reserve(self) -> bool:
+        """Claims a queue slot before tokenization, so rejected requests cost no CPU."""
         with self._ready:
-            if len(self._queue) >= MAX_QUEUED:
+            now: float = time.monotonic()
+            for pending in self._queue:
+                if not pending.future.done() and pending.deadline <= now:
+                    _settle(pending, None, DeadlineExceeded())
+            # Abandoned or expired work must not hold capacity a live request needs.
+            self._queue = [p for p in self._queue if not p.future.done() and p.deadline > now]
+            if len(self._queue) + self._reserved >= MAX_QUEUED:
                 return False
+            self._reserved += 1
+            return True
+
+    def release(self) -> None:
+        with self._ready:
+            self._reserved -= 1
+
+    def submit(self, pending: PendingClassification) -> None:
+        with self._ready:
+            self._reserved -= 1
             self._queue.append(pending)
             self._ready.notify()
-            return True
 
     def _take_batch(self) -> list[PendingClassification]:
         with self._ready:

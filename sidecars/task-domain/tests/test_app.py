@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+import time
 
 import httpx
 import pytest
@@ -63,15 +64,21 @@ class Submissions:
 
 @pytest.fixture
 def submissions(monkeypatch):
-    """Counts scheduler submissions so a test releases the GPU only once its requests are queued."""
+    """Counts admission decisions so a test releases the GPU only once its requests are queued or rejected."""
     counter = Submissions()
-    submit = batching.BatchScheduler.submit
+    reserve, submit = batching.BatchScheduler.reserve, batching.BatchScheduler.submit
+
+    def counting_reserve(self):
+        reserved = reserve(self)
+        if not reserved:
+            counter.record()
+        return reserved
 
     def counting_submit(self, pending):
-        accepted = submit(self, pending)
+        submit(self, pending)
         counter.record()
-        return accepted
 
+    monkeypatch.setattr(batching.BatchScheduler, "reserve", counting_reserve)
     monkeypatch.setattr(batching.BatchScheduler, "submit", counting_submit)
     return counter
 
@@ -211,6 +218,49 @@ def test_full_queue_rejects_without_blocking_http_loop(monkeypatch, submissions)
     assert statuses == [(200, None), (503, "classifier busy")]
 
 
+def test_expired_and_cancelled_work_does_not_hold_queue_capacity(monkeypatch):
+    monkeypatch.setattr(batching, "MAX_QUEUED", 2)
+    predictor = GatedPredictor()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        scheduler = batching.BatchScheduler(predictor, batching.ServiceTimeModel())
+        assert scheduler.reserve()
+        scheduler.submit(batching.PendingClassification([0] * 5, time.monotonic() + 60, loop.create_future(), loop))
+        assert await asyncio.to_thread(predictor.started.wait, 2)
+        expired = batching.PendingClassification([0] * 6, time.monotonic() + 0.3, loop.create_future(), loop)
+        cancelled = batching.PendingClassification([0] * 7, time.monotonic() + 60, loop.create_future(), loop)
+        for pending in (expired, cancelled):
+            assert scheduler.reserve()
+            scheduler.submit(pending)
+        assert not scheduler.reserve()
+        cancelled.future.cancel()
+        await asyncio.sleep(0.35)
+        assert scheduler.reserve()
+        predictor.finish.set()
+        with pytest.raises(batching.DeadlineExceeded):
+            await expired.future
+
+    asyncio.run(scenario())
+
+
+def test_rejected_request_is_not_tokenized(monkeypatch):
+    monkeypatch.setattr(batching, "MAX_QUEUED", 0)
+
+    class CountingEncoder(Predictor):
+        encoded = 0
+
+        def encode(self, text):
+            CountingEncoder.encoded += 1
+            return super().encode(text)
+
+    client = TestClient(create_app(CountingEncoder(), RELEASE, "s" * 32, batching.ServiceTimeModel()))
+    response = client.post("/classify", json=REQUEST, headers=HEADERS)
+    assert response.status_code == 503
+    assert response.json()["detail"] == "classifier busy"
+    assert CountingEncoder.encoded == 0
+
+
 def test_queued_request_past_its_budget_is_dropped_before_inference(submissions):
     predictor = GatedPredictor()
     _, (expired,) = asyncio.run(post_while_gpu_busy(predictor, submissions, "5", ["8"], headers=HEADERS | {BUDGET_HEADER: "100"}, hold_seconds=0.2))
@@ -228,6 +278,8 @@ def test_cancelled_request_is_skipped_by_the_gpu_worker():
         first = batching.PendingClassification([0] * 5, loop.time() + 60, loop.create_future(), loop)
         abandoned = batching.PendingClassification([0] * 9, loop.time() + 60, loop.create_future(), loop)
         kept = batching.PendingClassification([0] * 7, loop.time() + 60, loop.create_future(), loop)
+        for pending in (first, abandoned, kept):
+            assert scheduler.reserve()
         scheduler.submit(first)
         assert await asyncio.to_thread(predictor.started.wait, 2)
         scheduler.submit(abandoned)
