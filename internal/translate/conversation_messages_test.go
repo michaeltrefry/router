@@ -29,7 +29,7 @@ func TestConversationMessagesStripsClaudeInjectedBlocks(t *testing.T) {
 	assert.Equal(t, "can you help me brainstorm a bit", messages[0].Text)
 	clientMessages := env.ConversationMessagesWithClientText()
 	require.Len(t, clientMessages, 1)
-	assert.Equal(t, "<system-reminder>internal reminder</system-reminder>\n<command-name>do-not-route-on-this</command-name>\ncan you help me brainstorm a bit", clientMessages[0].Text)
+	assert.Equal(t, "can you help me brainstorm a bit", clientMessages[0].Text)
 }
 
 func TestConversationMessagesGeminiMissingRoleDefaultsToUser(t *testing.T) {

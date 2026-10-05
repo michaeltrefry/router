@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -14,6 +15,37 @@ import (
 	"weave-os/router/internal/router/turntype"
 	"weave-os/router/internal/translate"
 )
+
+func TestTaskInputIgnoresInjectedBlocksWithoutChangingRoot(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ClientIdentityContextKey{}, ClientIdentity{SessionID: "synthetic-session"})
+	plain, err := translate.ParseAnthropic([]byte(`{"messages":[{"role":"user","content":"Review parser\n<requirements>Preserve XML</requirements>"}]}`))
+	require.NoError(t, err)
+	plainInput := taskDomainInput(ctx, plain, "key-a", turntype.MainLoop)
+	require.NotNil(t, plainInput)
+	for _, injected := range []string{
+		"<system-reminder>workspace setup</system-reminder>",
+		"<system-reminder>updated workspace setup</system-reminder>",
+		"<command-name>/status</command-name>",
+		"<local-command-stdout>Status ready</local-command-stdout>",
+	} {
+		for _, position := range []int{0, 1, 2} {
+			blocks := []map[string]string{
+				{"type": "text", "text": "Review parser"},
+				{"type": "text", "text": "<requirements>Preserve XML</requirements>"},
+			}
+			blocks = append(blocks[:position], append([]map[string]string{{"type": "text", "text": injected}}, blocks[position:]...)...)
+			body, err := json.Marshal(map[string]any{"messages": []any{map[string]any{"role": "user", "content": blocks}}})
+			require.NoError(t, err)
+			env, err := translate.ParseAnthropic(body)
+			require.NoError(t, err)
+			input := taskDomainInput(ctx, env, "key-a", turntype.MainLoop)
+			require.NotNil(t, input)
+			assert.Equal(t, "Review parser\n<requirements>Preserve XML</requirements>", input.UserText)
+			assert.Equal(t, plainInput.RootSHA256, input.RootSHA256)
+			assert.False(t, input.Resume)
+		}
+	}
+}
 
 func TestTaskInputLogicalRootAndIsolation(t *testing.T) {
 	ctx := context.WithValue(context.Background(), ClientIdentityContextKey{}, ClientIdentity{SessionID: "synthetic-session"})

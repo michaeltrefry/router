@@ -44,8 +44,9 @@ func (e *RequestEnvelope) ConversationMessages() []ConversationMessage {
 	}
 }
 
-// ConversationMessagesWithClientText retains client command wrappers so callers
+// ConversationMessagesWithClientText retains injected-only messages so callers
 // can distinguish command acknowledgements from truncated conversation history.
+// Messages with visible user text keep the normal injected-block filtering.
 func (e *RequestEnvelope) ConversationMessagesWithClientText() []ConversationMessage {
 	if e != nil && e.format == FormatAnthropic {
 		return e.anthropicConversationMessages(true)
@@ -65,7 +66,7 @@ func (e *RequestEnvelope) anthropicConversationMessages(includeClientText bool) 
 		}
 		content := msg.Get("content")
 		text := textForRole(role, content)
-		if includeClientText {
+		if includeClientText && text == "" {
 			text = contentTextGJSON(content)
 		}
 		out = append(out, ConversationMessage{
