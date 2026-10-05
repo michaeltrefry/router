@@ -332,3 +332,9 @@ data: {"type":"response.completed","response":{"id":"r","status":"completed","mo
 		assert.Equal(t, 300, sink.reasoning, "stream=%v", stream)
 	}
 }
+
+func TestOpenAIReasoningTokens_PrefersResponsesShapeWithoutDoubleCounting(t *testing.T) {
+	usage := gjson.Parse(`{"output_tokens_details":{"reasoning_tokens":21},"completion_tokens_details":{"reasoning_tokens":21}}`)
+	assert.Equal(t, 21, translate.OpenAIReasoningTokens(usage))
+	assert.Equal(t, 7, translate.OpenAIReasoningTokens(gjson.Parse(`{"completion_tokens_details":{"reasoning_tokens":7}}`)))
+}

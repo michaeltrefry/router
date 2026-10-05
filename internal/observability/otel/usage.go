@@ -491,12 +491,21 @@ func extractUsageGJSON(data []byte, provider string) (input, output, cacheCreati
 			output = int(usage.Get("output_tokens").Int())
 		}
 		cacheCreation, cacheRead = openaiCacheTokens(usage)
-		reasoning = int(usage.Get("output_tokens_details.reasoning_tokens").Int() + usage.Get("completion_tokens_details.reasoning_tokens").Int())
+		reasoning = openaiReasoningTokens(usage)
 	default:
 		return 0, 0, 0, 0, 0, false
 	}
 
 	return input, output, cacheCreation, cacheRead, reasoning, true
+}
+
+// openaiReasoningTokens mirrors translate.OpenAIReasoningTokens; duplicated for
+// the same import-cycle reason as openaiCacheTokens.
+func openaiReasoningTokens(usage gjson.Result) int {
+	if r := usage.Get("output_tokens_details.reasoning_tokens"); r.Exists() {
+		return int(r.Int())
+	}
+	return int(usage.Get("completion_tokens_details.reasoning_tokens").Int())
 }
 
 // openaiCacheTokens mirrors translate.OpenAICacheTokens. Duplicated here so

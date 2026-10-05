@@ -32,5 +32,8 @@ func OpenAICacheTokens(usage gjson.Result) (cacheWrite, cacheRead int) {
 // Responses (output_tokens_details) or Chat Completions
 // (completion_tokens_details) usage object.
 func OpenAIReasoningTokens(usage gjson.Result) int {
-	return int(usage.Get("output_tokens_details.reasoning_tokens").Int() + usage.Get("completion_tokens_details.reasoning_tokens").Int())
+	if r := usage.Get("output_tokens_details.reasoning_tokens"); r.Exists() {
+		return int(r.Int())
+	}
+	return int(usage.Get("completion_tokens_details.reasoning_tokens").Int())
 }
