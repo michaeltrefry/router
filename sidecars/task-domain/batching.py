@@ -1,4 +1,4 @@
-"""Single GPU worker that batches queued classifications and drops work its caller abandoned."""
+"""Only this module's worker thread touches the GPU; request handlers enqueue and await."""
 
 from __future__ import annotations
 
