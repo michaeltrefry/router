@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -79,10 +80,11 @@ func taskDomainInput(ctx context.Context, env *translate.RequestEnvelope, apiKey
 	if clientID == "" {
 		return nil
 	}
-	scope, _ := json.Marshal([]string{sessionCredentialIdentity(ctx, apiKeyID), clientID, taskdomain.ProjectionVersion})
-	// This namespaces record/subject IDs, never a password or API bearer secret.
-	digest := sha256.Sum256(scope) // lgtm[go/weak-sensitive-data-hashing]
-	conversation := requestcontext.ServingStateKey(ctx, digest[:])
+	scope, _ := json.Marshal([]string{clientID, taskdomain.ProjectionVersion})
+	// Match the credential-keyed HMAC boundary used by conversation preferences.
+	mac := hmac.New(sha256.New, []byte(sessionCredentialIdentity(ctx, apiKeyID)))
+	_, _ = mac.Write(scope)
+	conversation := requestcontext.ServingStateKey(ctx, mac.Sum(nil))
 	input := &taskdomain.Input{ConversationKey: hex.EncodeToString(conversation)}
 	var text []string
 	commandPrelude := false
