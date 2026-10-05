@@ -23,6 +23,8 @@ const (
 	MaxInputBytes            = 32_768
 	MaxInputTokens           = 8_192
 	Timeout                  = 3 * time.Second
+	// BudgetHeader carries the caller's remaining milliseconds so the service can drop work it would finish too late.
+	BudgetHeader = "X-Task-Domain-Budget-Ms"
 )
 
 // Profile distinguishes a valid all-zero prediction from absent evidence.

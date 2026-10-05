@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from contract import PROJECTION, REQUIRED_FILES, SCHEMA, SYSTEM_PROMPT, verify_release
+from contract import BUDGET_HEADER, PROJECTION, REQUIRED_FILES, SCHEMA, SYSTEM_PROMPT, verify_release
 
 
 def test_go_and_python_prompt_contract_match():
@@ -35,3 +35,8 @@ def test_release_pins_complete_model_inventory(tmp_path):
     (model / "tokenizer.json").write_text("tampered")
     with pytest.raises(ValueError, match="artifact digest mismatch"):
         verify_release(manifest, model, digest)
+
+
+def test_go_and_python_budget_header_match():
+    go_source = (Path(__file__).resolve().parents[3] / "internal/router/taskdomain/contracts.go").read_text()
+    assert f'BudgetHeader = "{BUDGET_HEADER}"' in go_source

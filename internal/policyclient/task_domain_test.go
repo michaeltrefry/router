@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,6 +59,31 @@ func TestTaskDomainTransportValidatesPinnedFacts(t *testing.T) {
 			assert.False(t, profile[taskdomain.UI])
 		})
 	}
+}
+
+func TestTaskDomainTransportSendsRemainingBudget(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	budgets := make(chan string, 2)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		budgets <- r.Header.Get(taskdomain.BudgetHeader)
+		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": taskdomain.SchemaVersion, "release_sha256": digest, "output": "0,1,0,1,0", "input_tokens": 10})
+	}))
+	defer server.Close()
+	client, err := NewTaskDomainClassifier(server.URL, strings.Repeat("s", 32), digest, server.Client())
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = client.Classify(ctx, "Review the deployment")
+	require.NoError(t, err)
+	budget, err := strconv.Atoi(<-budgets)
+	require.NoError(t, err)
+	assert.Greater(t, budget, 1000)
+	assert.LessOrEqual(t, budget, 2000)
+
+	_, err = client.Classify(context.Background(), "Review the deployment")
+	require.NoError(t, err)
+	assert.Empty(t, <-budgets, "no deadline means the service applies its default budget")
 }
 
 func TestTaskDomainTransportRejectsUnsafeConfiguration(t *testing.T) {
