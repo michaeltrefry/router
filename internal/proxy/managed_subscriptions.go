@@ -172,10 +172,11 @@ func (s *Service) leaseManagedSubscription(ctx context.Context, provider, model 
 	if !eligible || s.managedSubscriptions == nil || poolProvider == subscriptions.ProviderCodex && codexChatEndpoint(ctx) {
 		return ctx, subscriptions.Lease{}, false, nil
 	}
-	// Suppression means the caller's Codex plan is spent or rejected and the turn
-	// was moved to the Weave key; leasing a managed seat would bill the same
-	// ChatGPT account instead.
-	if poolProvider == subscriptions.ProviderCodex && codexSubscriptionSuppressed(ctx) {
+	// Suppression means the caller's plan is spent or rejected and the turn was
+	// moved to the Weave key; leasing a managed seat would bill the same
+	// subscription account instead.
+	if poolProvider == subscriptions.ProviderCodex && codexSubscriptionSuppressed(ctx) ||
+		poolProvider == subscriptions.ProviderClaude && claudeSubscriptionSuppressed(ctx) {
 		return ctx, subscriptions.Lease{}, false, nil
 	}
 	currentCredentials := CredentialsFromContext(ctx)

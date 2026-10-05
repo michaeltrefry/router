@@ -248,6 +248,34 @@ func TestLinkedFirstSpentManagedCodexPlanNeverLeasesSeat(t *testing.T) {
 	require.Nil(t, CredentialsFromContext(out))
 }
 
+// The Claude counterpart: a spent managed Claude plan must not be leased by any
+// later attempt on the turn, such as the baseline failover onto Anthropic.
+func TestLinkedFirstSpentManagedClaudePlanNeverLeasesSeat(t *testing.T) {
+	leaser := &scriptedSubscriptionLeaser{leases: []subscriptions.Lease{
+		{AccountID: "opaque-claude", AccessToken: "token-claude"},
+	}}
+	svc := newServiceWithProviders(t, nil).
+		WithManagedSubscriptions(leaser).
+		WithDeploymentKeyedProviders(map[string]struct{}{providers.ProviderAnthropic: {}})
+	ctx := billing.WithSubscriptionOnly(managedSubscriptionTestContext(), billing.SubscriptionOnlyLinkedFirst)
+	ctx = context.WithValue(ctx, ManagedSubscriptionPlanStatesContextKey{}, map[subscriptions.Provider]SubscriptionPlanState{
+		subscriptions.ProviderClaude: SubscriptionPlanStateExhausted,
+		subscriptions.ProviderCodex:  SubscriptionPlanStateActive,
+	})
+
+	ctx = svc.releaseLinkedFirstWhenPlanSpent(ctx, http.Header{}, routePathMessages)
+	require.False(t, linkedFirst(ctx), "the spent plan must release linked-first funding")
+
+	out, lease, managed, err := svc.leaseManagedSubscription(ctx, providers.ProviderAnthropic, "claude-opus-4-8")
+
+	require.NoError(t, err)
+	require.False(t, managed, "the turn must serve on the Weave key")
+	require.Empty(t, lease.AccountID)
+	require.Empty(t, leaser.providers, "no Claude seat may be leased for a spent plan")
+	require.Nil(t, CredentialsFromContext(out))
+	require.False(t, servedOnSubscription(out))
+}
+
 func TestLeaseManagedCodexSkipsSuppressedSubscription(t *testing.T) {
 	leaser := &scriptedSubscriptionLeaser{leases: []subscriptions.Lease{
 		{AccountID: "opaque-codex", AccessToken: "token-codex"},
