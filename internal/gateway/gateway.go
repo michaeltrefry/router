@@ -212,7 +212,7 @@ func readRequestBody(r *http.Request, permit *health.Permit) ([]byte, error) {
 	}
 	bufferCapacity := int64(512)
 	if r.ContentLength > 0 {
-		bufferCapacity = r.ContentLength + 1
+		bufferCapacity = r.ContentLength
 	}
 	if !permit.ResizeBufferedBytes(bufferCapacity) {
 		return nil, errBufferCapacity
