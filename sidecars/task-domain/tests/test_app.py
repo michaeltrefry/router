@@ -5,7 +5,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app import create_app
+from app import create_app, warm_up
 from contract import MAX_INPUT_BYTES, MAX_INPUT_TOKENS, PROJECTION, SCHEMA
 
 RELEASE = "a" * 64
@@ -77,3 +77,29 @@ def test_busy_inference_does_not_block_http_loop():
             assert (await client.post("/classify", json=REQUEST, headers=HEADERS)).status_code == 200
 
     asyncio.run(scenario())
+
+
+def test_warm_up_requires_valid_repeat_pass():
+    class ColdPredictor:
+        def __init__(self, repeat_output):
+            self.calls = 0
+            self.repeat_output = repeat_output
+
+        def predict(self, text):
+            self.calls += 1
+            return ("1" if self.calls <= 2 else self.repeat_output), 12
+
+    warmed = ColdPredictor("0,1,0,1,0")
+    warm_up(warmed, ("short", "long"))
+    assert warmed.calls == 4
+    with pytest.raises(RuntimeError, match="invalid output"):
+        warm_up(ColdPredictor("1"), ("short", "long"))
+
+
+def test_warm_up_propagates_inference_errors():
+    class BrokenPredictor:
+        def predict(self, text):
+            raise RuntimeError("Failed to find C compiler")
+
+    with pytest.raises(RuntimeError, match="C compiler"):
+        warm_up(BrokenPredictor(), ("short",))
