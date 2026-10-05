@@ -82,16 +82,16 @@ def test_busy_inference_does_not_block_http_loop():
 def test_warm_up_requires_valid_repeat_pass():
     class ColdPredictor:
         def __init__(self, repeat_output):
-            self.calls = 0
+            self.texts = []
             self.repeat_output = repeat_output
 
         def predict(self, text):
-            self.calls += 1
-            return ("1" if self.calls <= 2 else self.repeat_output), 12
+            self.texts.append(text)
+            return ("1" if len(self.texts) <= 2 else self.repeat_output), 12
 
     warmed = ColdPredictor("0,1,0,1,0")
     warm_up(warmed, ("short", "long"))
-    assert warmed.calls == 4
+    assert warmed.texts == ["short", "long", "short", "long"]
     with pytest.raises(RuntimeError, match="invalid output"):
         warm_up(ColdPredictor("1"), ("short", "long"))
 

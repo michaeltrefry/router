@@ -102,8 +102,9 @@ CUDA kernels; otherwise Qwen's rotary embedding JIT-compiles a Triton override o
 first use, which fails without a C compiler and adds compile latency to requests.
 Startup verifies the release, loads the model, then runs a priming pass and a
 verification pass over short and long synthetic inputs. The port opens only after
-every verification output is valid, so a TCP startup probe is a readiness probe;
-any warmup error exits the process instead of serving a cold or broken model.
+every verification output is valid, so a TCP startup probe succeeds only after
+warmup; there is no separate ongoing readiness endpoint. Any warmup error exits the
+process instead of serving a cold or broken model.
 
 Alternatively build the included Dockerfile from the repository root. Serve port
 8095 behind authenticated-network TLS termination; the Go client accepts HTTPS
