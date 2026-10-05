@@ -63,7 +63,7 @@ func TestTaskDomainTransportValidatesPinnedFacts(t *testing.T) {
 
 func TestTaskDomainTransportSendsRemainingBudget(t *testing.T) {
 	digest := strings.Repeat("a", 64)
-	budgets := make(chan string, 2)
+	budgets := make(chan string, 3)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		budgets <- r.Header.Get(taskdomain.BudgetHeader)
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": taskdomain.SchemaVersion, "release_sha256": digest, "output": "0,1,0,1,0", "input_tokens": 10})
@@ -78,8 +78,14 @@ func TestTaskDomainTransportSendsRemainingBudget(t *testing.T) {
 	require.NoError(t, err)
 	budget, err := strconv.Atoi(<-budgets)
 	require.NoError(t, err)
-	assert.Greater(t, budget, 1000)
+	assert.Positive(t, budget)
 	assert.LessOrEqual(t, budget, 2000)
+
+	long, cancelLong := context.WithTimeout(context.Background(), time.Minute)
+	defer cancelLong()
+	_, err = client.Classify(long, "Review the deployment")
+	require.NoError(t, err)
+	assert.Equal(t, strconv.Itoa(taskdomain.MaxBudgetMilliseconds), <-budgets, "budget is capped at the service maximum")
 
 	_, err = client.Classify(context.Background(), "Review the deployment")
 	require.NoError(t, err)

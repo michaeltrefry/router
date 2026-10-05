@@ -25,6 +25,8 @@ const (
 	Timeout                  = 3 * time.Second
 	// BudgetHeader carries the caller's remaining milliseconds so the service can drop work it would finish too late.
 	BudgetHeader = "X-Task-Domain-Budget-Ms"
+	// MaxBudgetMilliseconds is the largest budget the service accepts.
+	MaxBudgetMilliseconds = 10_000
 )
 
 // Profile distinguishes a valid all-zero prediction from absent evidence.

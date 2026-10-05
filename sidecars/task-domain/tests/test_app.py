@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 
 import httpx
@@ -45,11 +46,41 @@ class GatedPredictor(Predictor):
         return [self.output] * len(batch)
 
 
+class Submissions:
+    def __init__(self):
+        self.count = 0
+        self.changed = threading.Condition()
+
+    def record(self):
+        with self.changed:
+            self.count += 1
+            self.changed.notify_all()
+
+    def wait_for(self, count):
+        with self.changed:
+            return self.changed.wait_for(lambda: self.count >= count, 2)
+
+
+@pytest.fixture
+def submissions(monkeypatch):
+    """Counts scheduler submissions so a test releases the GPU only once its requests are queued."""
+    counter = Submissions()
+    submit = batching.BatchScheduler.submit
+
+    def counting_submit(self, pending):
+        accepted = submit(self, pending)
+        counter.record()
+        return accepted
+
+    monkeypatch.setattr(batching.BatchScheduler, "submit", counting_submit)
+    return counter
+
+
 def request_for(text):
     return REQUEST | {"user_text": text}
 
 
-async def post_while_gpu_busy(predictor, first_text, queued, headers=HEADERS):
+async def post_while_gpu_busy(predictor, submissions, first_text, queued, headers=HEADERS, hold_seconds=0.0):
     """Starts one request, waits until the GPU holds it, queues `queued`, then releases the GPU."""
     transport = httpx.ASGITransport(app=create_app(predictor, RELEASE, "s" * 32, batching.ServiceTimeModel()))
     async with httpx.AsyncClient(transport=transport, base_url="https://classifier.test") as client:
@@ -58,7 +89,8 @@ async def post_while_gpu_busy(predictor, first_text, queued, headers=HEADERS):
             assert await asyncio.to_thread(predictor.started.wait, 2)
             later = [asyncio.create_task(client.post("/classify", json=request_for(text), headers=headers))
                      for text in queued]
-            await asyncio.sleep(0.2)
+            assert await asyncio.to_thread(submissions.wait_for, 1 + len(queued))
+            await asyncio.sleep(hold_seconds)
         finally:
             predictor.finish.set()
         return await first, await asyncio.gather(*later)
@@ -87,7 +119,7 @@ def test_bad_requests(changes, status):
     assert client.post("/classify", json=REQUEST | changes, headers=HEADERS).status_code == status
 
 
-@pytest.mark.parametrize("budget", ["0", "-5", "1.5", "abc", "10001"])
+@pytest.mark.parametrize("budget", ["0", "-5", "1.5", "abc", "10001", b"\xb2", b"\xb9\xb2"])
 def test_invalid_budget_header(budget):
     client = TestClient(create_app(Predictor(), RELEASE, "s" * 32, batching.ServiceTimeModel()))
     response = client.post("/classify", json=REQUEST, headers=HEADERS | {BUDGET_HEADER: budget})
@@ -110,19 +142,19 @@ def test_token_limit_from_encoder_is_rejected():
     assert client.post("/classify", json=REQUEST, headers=HEADERS).status_code == 413
 
 
-def test_requests_queued_behind_busy_gpu_run_as_one_batch():
+def test_requests_queued_behind_busy_gpu_run_as_one_batch(submissions):
     predictor = GatedPredictor()
-    first, queued = asyncio.run(post_while_gpu_busy(predictor, "5", ["7", "9", "11"]))
+    first, queued = asyncio.run(post_while_gpu_busy(predictor, submissions, "5", ["7", "9", "11"]))
     assert first.status_code == 200
     assert [response.status_code for response in queued] == [200, 200, 200]
     assert [sorted(batch) for batch in predictor.batches] == [[5], [7, 9, 11]]
 
 
-def test_batch_respects_size_and_padded_token_budget(monkeypatch):
+def test_batch_respects_size_and_padded_token_budget(monkeypatch, submissions):
     monkeypatch.setattr(batching, "MAX_BATCH_SIZE", 2)
     monkeypatch.setattr(batching, "MAX_BATCH_TOKENS", 40)
     predictor = GatedPredictor()
-    _, queued = asyncio.run(post_while_gpu_busy(predictor, "5", ["10", "10", "10", "30"]))
+    _, queued = asyncio.run(post_while_gpu_busy(predictor, submissions, "5", ["10", "10", "10", "30"]))
     assert [response.status_code for response in queued] == [200] * 4
     assert sorted(sorted(batch) for batch in predictor.batches) == [[5], [10], [10, 10], [30]]
 
@@ -169,19 +201,19 @@ def test_request_that_cannot_finish_before_its_budget_is_dropped_without_inferen
     assert client.post("/classify", json=REQUEST, headers=HEADERS | {BUDGET_HEADER: "2000"}).status_code == 200
 
 
-def test_full_queue_rejects_without_blocking_http_loop(monkeypatch):
+def test_full_queue_rejects_without_blocking_http_loop(monkeypatch, submissions):
     monkeypatch.setattr(batching, "MAX_QUEUED", 1)
     predictor = GatedPredictor()
-    first, (queued, rejected) = asyncio.run(post_while_gpu_busy(predictor, "5", ["6", "7"]))
+    first, (queued, rejected) = asyncio.run(post_while_gpu_busy(predictor, submissions, "5", ["6", "7"]))
     assert first.status_code == 200
     statuses = sorted([(queued.status_code, queued.json().get("detail")),
                        (rejected.status_code, rejected.json().get("detail"))], key=lambda item: item[0])
     assert statuses == [(200, None), (503, "classifier busy")]
 
 
-def test_queued_request_past_its_budget_is_dropped_before_inference():
+def test_queued_request_past_its_budget_is_dropped_before_inference(submissions):
     predictor = GatedPredictor()
-    _, (expired,) = asyncio.run(post_while_gpu_busy(predictor, "5", ["8"], headers=HEADERS | {BUDGET_HEADER: "100"}))
+    _, (expired,) = asyncio.run(post_while_gpu_busy(predictor, submissions, "5", ["8"], headers=HEADERS | {BUDGET_HEADER: "100"}, hold_seconds=0.2))
     assert expired.status_code == 503
     assert expired.json()["detail"] == "classification deadline exceeded"
     assert predictor.batches == [[5]]
@@ -207,6 +239,72 @@ def test_cancelled_request_is_skipped_by_the_gpu_worker():
 
     asyncio.run(scenario())
     assert predictor.batches == [[5], [7]]
+
+
+def test_disconnected_caller_is_skipped_by_the_gpu_worker(submissions):
+    predictor = GatedPredictor()
+    app = create_app(predictor, RELEASE, "s" * 32, batching.ServiceTimeModel())
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="https://classifier.test") as client:
+            first = asyncio.create_task(client.post("/classify", json=request_for("5"), headers=HEADERS))
+            assert await asyncio.to_thread(predictor.started.wait, 2)
+            messages = [{"type": "http.request", "body": json.dumps(request_for("9")).encode(), "more_body": False}]
+            hung_up = asyncio.Event()
+
+            async def receive():
+                if messages:
+                    return messages.pop(0)
+                await hung_up.wait()
+                return {"type": "http.disconnect"}
+
+            sent = []
+
+            async def send(message):
+                sent.append(message)
+
+            headers = [(b"authorization", HEADERS["Authorization"].encode()), (b"content-type", b"application/json")]
+            scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+                     "scheme": "https", "path": "/classify", "raw_path": b"/classify", "query_string": b"",
+                     "root_path": "", "headers": headers, "client": ("caller", 1), "server": ("classifier.test", 443)}
+            abandoned = asyncio.create_task(app(scope, receive, send))
+            assert await asyncio.to_thread(submissions.wait_for, 2)
+            hung_up.set()
+            await abandoned
+            predictor.finish.set()
+            assert (await first).status_code == 200
+            return sent
+
+    sent = asyncio.run(scenario())
+    assert sent[0]["status"] == 503
+    assert predictor.batches == [[5]]
+
+
+def test_worker_survives_a_failure_while_selecting_a_batch():
+    class FlakyServiceTime(batching.ServiceTimeModel):
+        failed = False
+
+        def estimate(self, padded_tokens):
+            if not FlakyServiceTime.failed:
+                FlakyServiceTime.failed = True
+                raise RuntimeError("transient selection failure")
+            return super().estimate(padded_tokens)
+
+    client = TestClient(create_app(Predictor(), RELEASE, "s" * 32, FlakyServiceTime()))
+    assert client.post("/classify", json=REQUEST, headers=HEADERS).status_code == 200
+    assert client.post("/classify", json=REQUEST, headers=HEADERS).status_code == 200
+    assert FlakyServiceTime.failed
+
+
+def test_truncated_batches_do_not_train_the_service_time_model():
+    service_time = batching.ServiceTimeModel()
+    truncated = TestClient(create_app(Predictor(output="1"), RELEASE, "s" * 32, service_time))
+    assert truncated.post("/classify", json=REQUEST, headers=HEADERS).status_code == 503
+    assert service_time.estimate(1) == 0.0
+    complete = TestClient(create_app(Predictor(), RELEASE, "s" * 32, service_time))
+    assert complete.post("/classify", json=REQUEST, headers=HEADERS).status_code == 200
+    assert service_time.estimate(1) > 0
 
 
 def test_generate_failure_fails_every_request_in_the_batch():

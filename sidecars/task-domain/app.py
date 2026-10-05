@@ -66,9 +66,16 @@ def warm_up(predictor: Predictor, texts: Sequence[str], service_time: ServiceTim
 def request_deadline(budget_header: str | None) -> float:
     if budget_header is None:
         return time.monotonic() + DEFAULT_BUDGET_SECONDS
-    if not budget_header.isdigit() or not 1 <= int(budget_header) <= MAX_BUDGET_MILLISECONDS:
+    if not (budget_header.isascii() and budget_header.isdecimal()) or not 1 <= int(budget_header) <= MAX_BUDGET_MILLISECONDS:
         raise HTTPException(400, "invalid classification budget")
     return time.monotonic() + int(budget_header) / 1000
+
+
+async def cancel_on_disconnect(request: Request, future: asyncio.Future[str]) -> None:
+    """Cancels queued work once the caller hangs up, so the GPU worker skips it."""
+    while (await request.receive())["type"] != "http.disconnect":
+        pass
+    future.cancel()
 
 
 def create_app(predictor: Predictor, release_sha256: str, bearer: str, service_time: ServiceTimeModel) -> FastAPI:
@@ -103,12 +110,19 @@ def create_app(predictor: Predictor, release_sha256: str, bearer: str, service_t
         pending: PendingClassification = PendingClassification(tokens, deadline, loop.create_future(), loop)
         if not scheduler.submit(pending):
             raise HTTPException(503, "classifier busy")
+        watcher: asyncio.Task[None] = asyncio.create_task(cancel_on_disconnect(request, pending.future))
         try:
             output: str = await pending.future
+        except asyncio.CancelledError:
+            if not watcher.done():
+                raise
+            raise HTTPException(503, "caller disconnected") from None
         except DeadlineExceeded:
             raise HTTPException(503, "classification deadline exceeded") from None
         except Exception:
             raise HTTPException(503, "classifier unavailable") from None
+        finally:
+            watcher.cancel()
         if not OUTPUT.fullmatch(output) or not 1 <= len(tokens) <= MAX_INPUT_TOKENS:
             raise HTTPException(503, "invalid classifier output")
         return {"schema_version": SCHEMA, "release_sha256": release_sha256, "output": output, "input_tokens": len(tokens)}

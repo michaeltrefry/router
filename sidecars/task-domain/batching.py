@@ -11,7 +11,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Final, Protocol
 
-from contract import MAX_INPUT_TOKENS
+from contract import MAX_INPUT_TOKENS, OUTPUT
 
 MAX_BATCH_SIZE: Final = 8
 # Padded tokens (longest input x batch size) per generate call. One maximum-size input
@@ -86,7 +86,11 @@ def _settle(pending: PendingClassification, output: str | None, error: BaseExcep
         else:
             pending.future.set_exception(error)
 
-    pending.loop.call_soon_threadsafe(settle)
+    try:
+        pending.loop.call_soon_threadsafe(settle)
+    except RuntimeError:
+        # The request's event loop has closed (shutdown); nobody is awaiting this result.
+        return
 
 
 class BatchScheduler:
@@ -128,19 +132,29 @@ class BatchScheduler:
 
     def _run(self) -> None:
         while True:
-            batch: list[PendingClassification] = self._take_batch()
-            if not batch:
-                continue
-            started: float = time.monotonic()
-            max_seconds: float = min(MAX_GENERATION_SECONDS, max(p.deadline for p in batch) - started)
+            batch: list[PendingClassification] = []
             try:
-                outputs: list[str] = self._predictor.generate([p.tokens for p in batch], max_seconds)
-                if len(outputs) != len(batch):
-                    raise RuntimeError("batch output count mismatch")
-                self._service_time.observe(max(len(p.tokens) for p in batch) * len(batch), time.monotonic() - started)
+                batch = self._take_batch()
+                self._process(batch)
             except Exception as error:
+                # One failed batch must not stop the only GPU worker.
                 for pending in batch:
                     _settle(pending, None, error)
-                continue
-            for pending, output in zip(batch, outputs):
-                _settle(pending, output, None)
+
+    def _process(self, batch: list[PendingClassification]) -> None:
+        if not batch:
+            return
+        started: float = time.monotonic()
+        max_seconds: float = min(MAX_GENERATION_SECONDS, max(p.deadline for p in batch) - started)
+        if max_seconds <= 0:
+            for pending in batch:
+                _settle(pending, None, DeadlineExceeded())
+            return
+        outputs: list[str] = self._predictor.generate([p.tokens for p in batch], max_seconds)
+        if len(outputs) != len(batch):
+            raise RuntimeError("batch output count mismatch")
+        # A batch cut off by its time bound understates the real cost, so only complete batches train the estimate.
+        if all(OUTPUT.fullmatch(output) for output in outputs):
+            self._service_time.observe(max(len(p.tokens) for p in batch) * len(batch), time.monotonic() - started)
+        for pending, output in zip(batch, outputs):
+            _settle(pending, output, None)
