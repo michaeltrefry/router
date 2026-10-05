@@ -78,16 +78,16 @@ func TestGeminiToAnthropicChain_ReasoningTokensReachOuterSink(t *testing.T) {
 		}},
 	} {
 		sink := &fakeUsageSink{}
-		anthropicTr := translate.NewAnthropicSSETranslator(httptest.NewRecorder(), "gemini-3.8-flash", sink)
-		geminiTr := translate.NewGeminiToOpenAISSETranslator(anthropicTr, "gemini-3.8-flash", nil)
-		geminiTr.Header().Set("Content-Type", tc.contentType)
-		geminiTr.WriteHeader(http.StatusOK)
+		anthropicTranslator := translate.NewAnthropicSSETranslator(httptest.NewRecorder(), "gemini-3.8-flash", sink)
+		geminiTranslator := translate.NewGeminiToOpenAISSETranslator(anthropicTranslator, "gemini-3.8-flash", nil)
+		geminiTranslator.Header().Set("Content-Type", tc.contentType)
+		geminiTranslator.WriteHeader(http.StatusOK)
 		for _, c := range tc.chunks {
-			_, err := geminiTr.Write([]byte(c))
+			_, err := geminiTranslator.Write([]byte(c))
 			require.NoError(t, err, name)
 		}
-		require.NoError(t, geminiTr.Finalize(), name)
-		require.NoError(t, anthropicTr.Finalize(), name)
+		require.NoError(t, geminiTranslator.Finalize(), name)
+		require.NoError(t, anthropicTranslator.Finalize(), name)
 		assert.Equal(t, 257, sink.output, name)
 		assert.Equal(t, 250, sink.reasoning, name)
 	}
