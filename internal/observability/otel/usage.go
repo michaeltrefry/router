@@ -154,7 +154,6 @@ func (u *UsageExtractor) RecordCacheUsage(cacheCreationTokens, cacheReadTokens i
 	}
 }
 
-// RecordReasoningUsage sets the reasoning share of output tokens directly.
 func (u *UsageExtractor) RecordReasoningUsage(reasoningTokens int) {
 	if reasoningTokens > 0 {
 		u.reasoning = reasoningTokens
