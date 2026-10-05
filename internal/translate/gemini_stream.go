@@ -377,6 +377,11 @@ func (t *GeminiToOpenAISSETranslator) writeUsageJSON(usage map[string]int) {
 		sse.WriteJSONInt(t.bw, int64(cached))
 		t.bw.WriteByte('}')
 	}
+	if reasoning := usage["reasoning_tokens"]; reasoning > 0 {
+		t.bw.WriteString(`,"completion_tokens_details":{"reasoning_tokens":`)
+		sse.WriteJSONInt(t.bw, int64(reasoning))
+		t.bw.WriteByte('}')
+	}
 	t.bw.WriteByte('}')
 }
 
