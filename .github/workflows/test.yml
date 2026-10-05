@@ -25,6 +25,7 @@ jobs:
       statusline: ${{ steps.filter.outputs.statusline }}
       installer: ${{ steps.filter.outputs.installer }}
       hmm: ${{ steps.filter.outputs.hmm }}
+      task-domain: ${{ steps.filter.outputs.task-domain }}
       go: ${{ steps.go-relevance.outputs.go_changed }}
     steps:
       - name: Checkout
@@ -55,6 +56,11 @@ jobs:
               - 'Dockerfile'
               - 'docker-compose.yml'
               - 'Makefile'
+              - '.github/workflows/**'
+            task-domain:
+              - 'sidecars/task-domain/**'
+              - 'internal/router/taskdomain/**'
+              - 'internal/policyclient/task_domain*'
               - '.github/workflows/**'
 
       # Push and workflow_dispatch runs have no base SHA, so the classifier
@@ -208,6 +214,11 @@ jobs:
           ROUTER_TEST_DATABASE_URL: postgres://router:router@localhost:5432/router?sslmode=disable&search_path=router
         run: go run ./scripts/classifier_session_check
 
+      - name: Check task profile persistence on ephemeral Postgres
+        env:
+          ROUTER_TEST_DATABASE_URL: postgres://router:router@localhost:5432/router?sslmode=disable&search_path=router
+        run: go run ./scripts/task_domain_check
+
       - name: Check bounded database waits on ephemeral Postgres
         env:
           ROUTER_TEST_DATABASE_URL: postgres://router:router@localhost:5432/router?sslmode=disable&search_path=router
@@ -330,6 +341,23 @@ jobs:
         run: |
           make test-install
           bash install/pi-router/test/opencode_smoke.sh
+
+  test-task-domain:
+    name: Test task domain service contract
+    needs: changed-paths
+    if: ${{ needs.changed-paths.outputs.task-domain == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.28"
+          python-version: "3.12.3"
+          enable-cache: true
+          cache-dependency-glob: sidecars/task-domain/uv.lock
+      - name: Test without GPU or checkpoint downloads
+        run: uv run --no-env-file --project sidecars/task-domain --locked --extra test pytest -q sidecars/task-domain/tests
 
   test-hmm-sidecar:
     name: Test frozen HMM sidecar
