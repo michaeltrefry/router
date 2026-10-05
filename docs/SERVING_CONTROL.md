@@ -473,8 +473,9 @@ serving translation's larger reasoning floor. A valid response must contain text
 or measured reasoning; empty/malformed success responses fail boot. These calls
 incur provider charges, but create no customer billing, admission, learning events
 or normal request-attempt telemetry. Limits bound tokens and time, not a fixed USD
-amount. `ROUTER_STARTUP_EGRESS_ORIGINS` must match these
-serving clients or a dependency already initialized by its actual client (Pub/Sub).
+amount. `ROUTER_STARTUP_EGRESS_ORIGINS` entries that match these serving clients
+or a dependency already initialized by its actual client (Pub/Sub) warm that client.
+Any other HTTPS origin receives a credential-free `HEAD` connectivity check.
 Idle connections can expire; the contract is completed initialization, not permanent
 remote connection or third-party model warmth.
 

@@ -1,6 +1,7 @@
 package gateway_test
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"io"
@@ -107,7 +108,7 @@ func TestGatewayStartupRequiresActivatedBinding(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			forwarder := readinessFixtureWithArtifacts(t, policyregistry.EnvironmentStaging, test.registryError, test.artifactError, nil)
 			err := forwarder.Warmup(context.Background(), func(context.Context) error { return test.databaseError })
-			require.Error(t, err)
+			require.ErrorIs(t, err, cmp.Or(test.databaseError, test.registryError, test.artifactError))
 		})
 	}
 }
