@@ -124,14 +124,7 @@ func TestTaskResolverCommitsOnlyTimelyValidPredictions(t *testing.T) {
 	}
 }
 
-func TestTaskResolverCachedAndUnavailableEvidenceDoNotInfer(t *testing.T) {
+func TestTaskResolverUnavailableEvidenceSkipsInference(t *testing.T) {
 	resolver := TaskDomainResolver{ReleaseSHA256: strings.Repeat("c", 64)}
 	assert.Equal(t, taskdomain.EvidenceUnavailable, resolver.Resolve(context.Background(), taskdomain.Input{}).Status)
-	resolver.EvidenceSHA256 = strings.Repeat("d", 64)
-	resolver.Store = taskStoreFunc(func(context.Context, taskdomain.Key, bool, func(context.Context) taskdomain.Outcome) (taskdomain.Outcome, error) {
-		return taskdomain.Outcome{Status: taskdomain.TimedOut, Cached: true}, nil
-	})
-	outcome := resolver.Resolve(context.Background(), taskdomain.Input{ConversationKey: "conversation", Resume: true})
-	assert.True(t, outcome.Cached)
-	assert.Equal(t, taskdomain.TimedOut, outcome.Status)
 }

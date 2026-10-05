@@ -80,7 +80,8 @@ func taskDomainInput(ctx context.Context, env *translate.RequestEnvelope, apiKey
 		return nil
 	}
 	scope, _ := json.Marshal([]string{sessionCredentialIdentity(ctx, apiKeyID), clientID, taskdomain.ProjectionVersion})
-	digest := sha256.Sum256(scope)
+	// This namespaces record/subject IDs, never a password or API bearer secret.
+	digest := sha256.Sum256(scope) // lgtm[go/weak-sensitive-data-hashing]
 	conversation := requestcontext.ServingStateKey(ctx, digest[:])
 	input := &taskdomain.Input{ConversationKey: hex.EncodeToString(conversation)}
 	var text []string
