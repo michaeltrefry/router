@@ -218,6 +218,50 @@ func TestDispatchWithFallbackDoesNotCrossManagedProviderFamilies(t *testing.T) {
 	require.Empty(t, leaser.providers)
 }
 
+// A linked-first Codex turn whose managed plan is spent must move to the Weave
+// key for the whole turn. Releasing only the billing mark let dispatch lease the
+// same ChatGPT seat again, which then drew the owner's purchased credits.
+func TestLinkedFirstSpentManagedCodexPlanNeverLeasesSeat(t *testing.T) {
+	leaser := &scriptedSubscriptionLeaser{leases: []subscriptions.Lease{
+		{AccountID: "opaque-codex", AccessToken: "token-codex"},
+	}}
+	svc := newServiceWithProviders(t, nil).
+		WithManagedSubscriptions(leaser).
+		WithDeploymentKeyedProviders(map[string]struct{}{providers.ProviderOpenAI: {}})
+	ctx := billing.WithSubscriptionOnly(
+		managedSubscriptionContext(auth.SubscriptionProviderCodex), billing.SubscriptionOnlyLinkedFirst,
+	)
+	ctx = context.WithValue(ctx, ManagedSubscriptionPlanStatesContextKey{}, map[subscriptions.Provider]SubscriptionPlanState{
+		subscriptions.ProviderClaude: SubscriptionPlanStateActive,
+		subscriptions.ProviderCodex:  SubscriptionPlanStateExhausted,
+	})
+
+	ctx = svc.releaseLinkedFirstWhenPlanSpent(ctx, http.Header{}, routePathResponses)
+	require.False(t, linkedFirst(ctx), "the spent plan must release linked-first funding")
+
+	out, lease, managed, err := svc.leaseManagedSubscription(ctx, providers.ProviderOpenAI, "gpt-5.6-sol")
+
+	require.NoError(t, err)
+	require.False(t, managed, "the turn must serve on the Weave key")
+	require.Empty(t, lease.AccountID)
+	require.Empty(t, leaser.providers, "no ChatGPT seat may be leased for a spent plan")
+	require.Nil(t, CredentialsFromContext(out))
+}
+
+func TestLeaseManagedCodexSkipsSuppressedSubscription(t *testing.T) {
+	leaser := &scriptedSubscriptionLeaser{leases: []subscriptions.Lease{
+		{AccountID: "opaque-codex", AccessToken: "token-codex"},
+	}}
+	svc := newServiceWithProviders(t, nil).WithManagedSubscriptions(leaser)
+	ctx := withSuppressedCodexSubscription(managedSubscriptionContext(auth.SubscriptionProviderCodex))
+
+	_, _, managed, err := svc.leaseManagedSubscription(ctx, providers.ProviderOpenAI, "gpt-5.6-sol")
+
+	require.NoError(t, err)
+	require.False(t, managed)
+	require.Empty(t, leaser.providers)
+}
+
 func TestLeaseManagedCodexFallsBackAfterAllLinkedAccountsAreRejected(t *testing.T) {
 	leaser := &scriptedSubscriptionLeaser{leases: []subscriptions.Lease{
 		{AccountID: "opaque-codex", AccessToken: "token-codex"},

@@ -47,7 +47,14 @@ func (s *Service) releaseLinkedFirstWhenPlanSpent(ctx context.Context, headers h
 		return ctx
 	}
 	observability.FromContext(ctx).Info("Linked subscription plan window is spent; continuing on organization credits", "route_path", routePath)
-	return billing.ReleaseLinkedFirst(ctx)
+	ctx = billing.ReleaseLinkedFirst(ctx)
+	if routePath == routePathChatCompletions || routePath == routePathResponses {
+		// A spent ChatGPT plan still answers by drawing the owner's purchased
+		// ChatGPT credits, so neither the inbound token nor a managed seat for the
+		// same family may serve this turn.
+		ctx = withSuppressedCodexSubscription(ctx)
+	}
+	return ctx
 }
 
 // releaseUnservableLinkedFirst drops a linked-first mark after routing when the
