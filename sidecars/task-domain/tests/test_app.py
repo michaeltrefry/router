@@ -237,6 +237,7 @@ def test_expired_and_cancelled_work_does_not_hold_queue_capacity(monkeypatch):
         cancelled.future.cancel()
         await asyncio.sleep(0.35)
         assert scheduler.reserve()
+        assert scheduler.reserve()
         predictor.finish.set()
         with pytest.raises(batching.DeadlineExceeded):
             await expired.future
