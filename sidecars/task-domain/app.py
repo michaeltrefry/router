@@ -51,7 +51,10 @@ def warm_up(predictor: Predictor, texts: Sequence[str], service_time: ServiceTim
         outputs: list[str] = []
         for batch in batches:
             started: float = time.monotonic()
-            outputs.extend(predictor.generate(batch, MAX_GENERATION_SECONDS))
+            batch_outputs: list[str] = predictor.generate(batch, MAX_GENERATION_SECONDS)
+            if len(batch_outputs) != len(batch):
+                raise RuntimeError("task classifier warmup output count mismatch")
+            outputs.extend(batch_outputs)
             if observe:
                 service_time.observe(max(len(tokens) for tokens in batch) * len(batch), time.monotonic() - started)
         return outputs
@@ -115,11 +118,11 @@ def create_app(predictor: Predictor, release_sha256: str, bearer: str, service_t
         loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
         pending: PendingClassification = PendingClassification(tokens, deadline, loop.create_future(), loop)
         scheduler.submit(pending)
-        watcher: asyncio.Task[None] = asyncio.create_task(cancel_on_disconnect(request, pending.future))
+        disconnect_watcher: asyncio.Task[None] = asyncio.create_task(cancel_on_disconnect(request, pending.future))
         try:
             output: str = await pending.future
         except asyncio.CancelledError:
-            if not watcher.done():
+            if not disconnect_watcher.done():
                 raise
             raise HTTPException(503, "caller disconnected") from None
         except DeadlineExceeded:
@@ -127,7 +130,7 @@ def create_app(predictor: Predictor, release_sha256: str, bearer: str, service_t
         except Exception:
             raise HTTPException(503, "classifier unavailable") from None
         finally:
-            watcher.cancel()
+            disconnect_watcher.cancel()
         if not OUTPUT.fullmatch(output) or not 1 <= len(tokens) <= MAX_INPUT_TOKENS:
             raise HTTPException(503, "invalid classifier output")
         return {"schema_version": SCHEMA, "release_sha256": release_sha256, "output": output, "input_tokens": len(tokens)}

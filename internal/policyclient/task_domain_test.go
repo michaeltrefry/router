@@ -81,9 +81,9 @@ func TestTaskDomainTransportSendsRemainingBudget(t *testing.T) {
 	assert.Positive(t, budget)
 	assert.LessOrEqual(t, budget, 2000)
 
-	long, cancelLong := context.WithTimeout(context.Background(), time.Minute)
+	longTimeoutCtx, cancelLong := context.WithTimeout(context.Background(), time.Minute)
 	defer cancelLong()
-	_, err = client.Classify(long, "Review the deployment")
+	_, err = client.Classify(longTimeoutCtx, "Review the deployment")
 	require.NoError(t, err)
 	assert.Equal(t, strconv.Itoa(taskdomain.MaxBudgetMilliseconds), <-budgets, "budget is capped at the service maximum")
 

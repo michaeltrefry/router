@@ -47,7 +47,7 @@ class GatedPredictor(Predictor):
         return [self.output] * len(batch)
 
 
-class Submissions:
+class SubmissionCounter:
     def __init__(self):
         self.count = 0
         self.changed = threading.Condition()
@@ -65,7 +65,7 @@ class Submissions:
 @pytest.fixture
 def submissions(monkeypatch):
     """Counts admission decisions so a test releases the GPU only once its requests are queued or rejected."""
-    counter = Submissions()
+    counter = SubmissionCounter()
     reserve, submit = batching.BatchScheduler.reserve, batching.BatchScheduler.submit
 
     def counting_reserve(self):
@@ -391,6 +391,15 @@ def test_warm_up_requires_valid_repeat_pass():
     assert service_time.estimate(1) > 0, "the verification pass seeds the service-time model"
     with pytest.raises(RuntimeError, match="invalid output for warmup input 0"):
         warm_up(ColdPredictor("1"), ("short", "long"), batching.ServiceTimeModel())
+
+
+def test_warm_up_requires_one_output_per_input():
+    class ShortPredictor(Predictor):
+        def generate(self, batch, max_seconds):
+            return ["0,1,0,1,0"]
+
+    with pytest.raises(RuntimeError, match="output count mismatch"):
+        warm_up(ShortPredictor(), ("short", "long"), batching.ServiceTimeModel())
 
 
 def test_warm_up_propagates_inference_errors():
