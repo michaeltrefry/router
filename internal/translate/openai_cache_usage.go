@@ -27,3 +27,10 @@ func OpenAICacheTokens(usage gjson.Result) (cacheWrite, cacheRead int) {
 	}
 	return cacheWrite, cacheRead
 }
+
+// OpenAIReasoningTokens extracts the reasoning share of output tokens from a
+// Responses (output_tokens_details) or Chat Completions
+// (completion_tokens_details) usage object.
+func OpenAIReasoningTokens(usage gjson.Result) int {
+	return int(usage.Get("output_tokens_details.reasoning_tokens").Int() + usage.Get("completion_tokens_details.reasoning_tokens").Int())
+}

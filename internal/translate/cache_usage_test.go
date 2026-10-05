@@ -20,6 +20,7 @@ type fakeUsageSink struct {
 	output             int
 	cacheCreation      int
 	cacheRead          int
+	reasoning          int
 	outputLimitReached bool
 }
 
@@ -31,6 +32,10 @@ func (f *fakeUsageSink) RecordUsage(input, output int) {
 func (f *fakeUsageSink) RecordCacheUsage(creation, read int) {
 	f.cacheCreation = creation
 	f.cacheRead = read
+}
+
+func (f *fakeUsageSink) RecordReasoningUsage(reasoning int) {
+	f.reasoning = reasoning
 }
 
 func (f *fakeUsageSink) RecordOutputLimitReached() {
@@ -310,4 +315,20 @@ data: {"type":"response.completed","response":{"id":"r","status":"completed","mo
 	assert.Equal(t, 800, sink.cacheRead)
 	assert.Contains(t, rec.Body.String(), `"input_tokens":144`)
 	assert.Contains(t, rec.Body.String(), `"cache_creation_input_tokens":256`)
+}
+
+func TestResponsesToAnthropicWriter_ForwardsReasoningTokens(t *testing.T) {
+	const fixture = `event: response.completed
+data: {"type":"response.completed","response":{"id":"r","status":"completed","model":"gpt-6-luna","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}],"usage":{"input_tokens":1200,"output_tokens":340,"output_tokens_details":{"reasoning_tokens":300}}}}
+
+`
+	for _, stream := range []bool{true, false} {
+		sink := &fakeUsageSink{}
+		w := translate.NewResponsesToAnthropicWriter(httptest.NewRecorder(), "gpt-6-luna", sink)
+		require.NoError(t, w.Prelude(stream))
+		_, err := w.Write([]byte(fixture))
+		require.NoError(t, err)
+		require.NoError(t, w.Finalize())
+		assert.Equal(t, 300, sink.reasoning, "stream=%v", stream)
+	}
 }
