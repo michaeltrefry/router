@@ -22,6 +22,8 @@ exhausted, authorized API capacity serves the originally selected model. Committ
 streams are never replayed, and terminal upstream failures are accounted as errors.
 
 Native OpenAI Codex and Anthropic adapters accept subscription OAuth credentials.
+Anthropic-compatible bearer gateways do not advertise native Claude subscription
+support.
 An adapter's subscription capability describes transport support, not a guarantee
 that the provider cannot charge extra usage. Healthy accounts and accounts with
 no quota observation may serve; known exhausted or paid-overage accounts are

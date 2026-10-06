@@ -26,9 +26,10 @@ func TestNativeCodexSubscriptionWithDepletedCredits(t *testing.T) {
 			name = "managed"
 		}
 		t.Run(name, func(t *testing.T) {
-			var authorizations, paths []string
+			var authorizations, accountIDs, paths []string
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				authorizations = append(authorizations, r.Header.Get("Authorization"))
+				accountIDs = append(accountIDs, r.Header.Get("ChatGPT-Account-ID"))
 				paths = append(paths, r.URL.Path)
 				w.Header().Set("Content-Type", "text/event-stream")
 				_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"subscription answer\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"synthetic\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":11,\"output_tokens\":7}}}\n\n")
@@ -51,6 +52,7 @@ func TestNativeCodexSubscriptionWithDepletedCredits(t *testing.T) {
 			err := svc.ProxyOpenAIChatCompletion(ctx, []byte(body), recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
 			require.NoError(t, err)
 			require.Equal(t, []string{expectedBearer}, authorizations)
+			require.Equal(t, []string{codexTestAccountID}, accountIDs)
 			require.Equal(t, []string{"/responses"}, paths)
 			require.Contains(t, recorder.Body.String(), "subscription answer")
 			require.True(t, svc.costNeutralSubscriptionServed(ctx))

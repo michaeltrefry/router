@@ -51,7 +51,6 @@ type bypassFakeProvider struct {
 	capturedDec  router.Decision
 }
 
-// Synthetic provider never bills subscription extra usage.
 func (*bypassFakeProvider) SupportsSubscriptions() bool { return true }
 
 func (f *bypassFakeProvider) Proxy(ctx context.Context, decision router.Decision, prep providers.PreparedRequest, w http.ResponseWriter, r *http.Request) error {

@@ -51,7 +51,6 @@ type usageProvider struct {
 	cacheOut int
 }
 
-// Synthetic provider never bills subscription extra usage.
 func (*usageProvider) SupportsSubscriptions() bool { return true }
 
 func (p *usageProvider) Proxy(ctx context.Context, _ router.Decision, _ providers.PreparedRequest, w http.ResponseWriter, _ *http.Request) error {

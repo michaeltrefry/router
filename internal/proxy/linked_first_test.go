@@ -206,7 +206,6 @@ type headerObservingProvider struct {
 	inner   providers.Client
 }
 
-// Synthetic provider never bills subscription extra usage.
 func (*headerObservingProvider) SupportsSubscriptions() bool { return true }
 
 func (h *headerObservingProvider) Proxy(ctx context.Context, decision router.Decision, prep providers.PreparedRequest, w http.ResponseWriter, r *http.Request) error {

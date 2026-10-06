@@ -26,7 +26,7 @@ func TestVerificationNativeAnthropicSubscriptionPreferredToPaidAPI(t *testing.T)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				capturesMu.Lock()
 				defer capturesMu.Unlock()
-				if r.Header.Get("Authorization") != "" {
+				if r.Header.Get("Authorization") == "Bearer sk-ant-oat01-synthetic-subscription-token" {
 					subscriptionRequests++
 				} else if r.Header.Get("X-Api-Key") == "synthetic-api-key" {
 					apiRequests++
@@ -49,9 +49,7 @@ func TestVerificationNativeAnthropicSubscriptionPreferredToPaidAPI(t *testing.T)
 			svc := NewService(staticRouter{decision: router.Decision{Provider: providers.ProviderAnthropic, Model: "claude-opus-4-8", Reason: "test"}}, map[string]providers.Client{providers.ProviderAnthropic: client}, nil, false, nil, nil, false, providers.ProviderAnthropic, "claude-opus-4-8", nil).WithDeploymentKeyedProviders(keyed)
 			ctx := context.WithValue(context.Background(), AnthropicSubscriptionContextKey{}, "sk-ant-oat01-synthetic-subscription-token")
 			ctx = WithManagedSubscriptionUsage(ctx)
-			if !withAPI {
-				ctx = billing.WithSubscriptionOnly(ctx, billing.SubscriptionOnlyCreditsDepleted)
-			}
+			ctx = billing.WithSubscriptionOnly(ctx, billing.SubscriptionOnlyCreditsDepleted)
 			body := `{"model":"auto","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"synthetic billing"}],"tools":[{"name":"read_file","input_schema":{"type":"object"}}]}`
 			rec := httptest.NewRecorder()
 			err := svc.ProxyMessages(ctx, []byte(body), rec, httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body)))

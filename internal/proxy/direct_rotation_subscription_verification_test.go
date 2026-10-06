@@ -19,7 +19,7 @@ func TestVerificationNativeCodexSubscriptionPreferredToPaidAPI(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "Bearer synthetic-api-key" {
 			apiRequests++
-		} else {
+		} else if r.Header.Get("Authorization") == "Bearer "+codexTestToken {
 			subscriptionRequests++
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
