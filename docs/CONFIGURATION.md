@@ -279,7 +279,7 @@ substituted.
 A substituted turn logs `Mid-tier substitute served turn` with the original and
 substitute models, its completion line carries `substituted_from_model` and
 `substituted_from_provider` next to `decision_model`, and its routing marker
-reads `local substitute for <original model>`. Its policy outcome reports the
+reads `→ <substitute> (local) · local substitute for <original model>`. Its policy outcome reports the
 original model as the selection and is excluded from training
 (`training_exclusion_reason: mid_tier_substitute`).
 

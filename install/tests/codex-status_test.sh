@@ -85,6 +85,13 @@ printf '%s\n' '{"session_id":"session-local-badge","model":"gpt-5.6-terra","last
   exit 1
 }
 
+printf '%s\n' '{"session_id":"session-local-substitute","model":"gpt-5.6-terra","last_assistant_message":"✦ **Weave Router** → my-local (local) · local substitute for claude-sonnet-5"}' \
+  | XDG_CACHE_HOME="$cache" WEAVE_CODEX_STATUS_TITLE_FILE="$title_file" "$helper"
+[ "$(cat "$title_file")" = "Weave Router · my-local ← gpt-5.6-terra" ] || {
+  echo "mid-tier substitute marker did not publish the bare substitute id: $(cat "$title_file")" >&2
+  exit 1
+}
+
 XDG_CACHE_HOME="$cache" WEAVE_CODEX_STATUS_TITLE_FILE="$title_file" "$helper" --direct
 [ "$(cat "$title_file")" = "Codex · direct" ] || {
   echo "--direct did not reset the title" >&2

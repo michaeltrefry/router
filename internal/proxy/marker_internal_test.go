@@ -544,5 +544,5 @@ func TestRoutingMarkerNamesMidTierSubstituteOriginal(t *testing.T) {
 		PlannerDecision: planner.Decision{Reason: planner.ReasonNoPin},
 	}
 
-	assert.Equal(t, "✦ **Weave Router** → qwen · "+markerReasonMidTierSubstitute+" claude-sonnet-5\n\n", routingMarkerFor(turn))
+	assert.Equal(t, "✦ **Weave Router** → qwen (local) · "+markerReasonMidTierSubstitute+" claude-sonnet-5\n\n", routingMarkerFor(turn))
 }
