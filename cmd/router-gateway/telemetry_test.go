@@ -15,6 +15,7 @@ import (
 	commonv1 "go.opentelemetry.io/proto/otlp/common/v1"
 	"google.golang.org/protobuf/proto"
 
+	"weave-os/router/internal/config"
 	"weave-os/router/internal/gateway"
 	"weave-os/router/internal/observability/otel"
 )
@@ -33,9 +34,20 @@ func TestGatewayTelemetryExport(t *testing.T) {
 	}))
 	defer collector.Close()
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", collector.URL)
-	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "Authorization=Bearer synthetic")
+	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "Authorization=Bearer%20synthetic")
 	t.Setenv("OTEL_SERVICE_NAME", "router-gateway")
-	emitter, err := buildGatewayEmitter()
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.region=us%2Ccentral")
+	resourceAttributes, err := otel.ResourceAttributesFromEnvironment(context.Background())
+	require.NoError(t, err)
+	resourceAttributes["router.deployment_mode"] = "managed"
+	exporterHeaders, err := otel.ParseOTLPHeaders(config.GetOr("OTEL_EXPORTER_OTLP_HEADERS", ""))
+	require.NoError(t, err)
+	emitter, err := otel.NewEmitter(otel.EmitterConfig{
+		Endpoint:      config.GetOr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		Headers:       exporterHeaders,
+		ServiceName:   config.GetOr("OTEL_SERVICE_NAME", "router-gateway"),
+		ResourceAttrs: resourceAttributes,
+	})
 	require.NoError(t, err)
 	start := time.Now()
 	observeGatewayLatency(emitter)(gateway.LatencySample{RequestID: "gateway-id", WorkerRequestID: "worker-id", OrganizationID: "organization", Start: start, End: start.Add(time.Second), StatusCode: 201, Milliseconds: map[gateway.LatencyStage]float64{gateway.LatencySigning: .125, gateway.LatencyConnection: 0, gateway.LatencyDispatch: 7.25, gateway.LatencyFullResponse: 1000.75}})
@@ -54,6 +66,7 @@ func TestGatewayTelemetryExport(t *testing.T) {
 	resource := attrs(batch.ResourceSpans[0].Resource.Attributes)
 	assert.Equal(t, "router-gateway", resource["service.name"].GetStringValue())
 	assert.Equal(t, "managed", resource["router.deployment_mode"].GetStringValue())
+	assert.Equal(t, "us,central", resource["deployment.region"].GetStringValue())
 	span := batch.ResourceSpans[0].ScopeSpans[0].Spans[0]
 	assert.Equal(t, "router.gateway", span.Name)
 	values := attrs(span.Attributes)
@@ -70,11 +83,7 @@ func TestGatewayTelemetryExport(t *testing.T) {
 }
 
 func TestGatewayTelemetryDisabled(t *testing.T) {
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-	emitter, err := buildGatewayEmitter()
-	require.NoError(t, err)
-	require.Nil(t, emitter)
-	observeGatewayLatency(emitter)(gateway.LatencySample{})
+	observeGatewayLatency(nil)(gateway.LatencySample{})
 }
 
 func TestGatewayTelemetryFullAndFailedExportDoesNotBlockObservation(t *testing.T) {

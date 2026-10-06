@@ -19,6 +19,7 @@ import (
 	"weave-os/router/internal/gateway"
 	"weave-os/router/internal/gateway/iam"
 	"weave-os/router/internal/observability"
+	"weave-os/router/internal/observability/otel"
 	"weave-os/router/internal/policyregistry"
 	"weave-os/router/internal/postgres/dbbudget"
 	"weave-os/router/internal/postgres/pgtls"
@@ -36,9 +37,27 @@ func main() {
 func run() (runErr error) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	emitter, err := buildGatewayEmitter()
-	if err != nil {
-		return err
+	var emitter *otel.Emitter
+	if endpoint := config.GetOr("OTEL_EXPORTER_OTLP_ENDPOINT", ""); endpoint != "" {
+		resourceAttributes, resourceErr := otel.ResourceAttributesFromEnvironment(ctx)
+		if resourceErr != nil {
+			observability.FromContext(ctx).Warn("Some OpenTelemetry resource attributes were invalid; continuing with valid attributes")
+		}
+		resourceAttributes["router.deployment_mode"] = "managed"
+		exporterHeaders, headersErr := otel.ParseOTLPHeaders(config.GetOr("OTEL_EXPORTER_OTLP_HEADERS", ""))
+		if headersErr != nil {
+			observability.FromContext(ctx).Warn("Some OpenTelemetry exporter headers were invalid; continuing with valid headers")
+		}
+		gatewayEmitter, err := otel.NewEmitter(otel.EmitterConfig{
+			Endpoint:      endpoint,
+			Headers:       exporterHeaders,
+			ServiceName:   config.GetOr("OTEL_SERVICE_NAME", "router-gateway"),
+			ResourceAttrs: resourceAttributes,
+		})
+		if err != nil {
+			return err
+		}
+		emitter = gatewayEmitter
 	}
 	defer func() {
 		drainCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

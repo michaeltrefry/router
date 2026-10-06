@@ -53,22 +53,22 @@ func (h *Handler) SetLatencyObserver(observe func(LatencySample)) {
 }
 
 type latencyRecorder struct {
-	mu         sync.Mutex
-	clock      func() time.Time
-	sample     LatencySample
-	stage      LatencyStage
-	boundary   time.Time
-	wrote      time.Time
-	headers    bool
-	frozen     bool
-	operations map[string][]time.Time
+	mu                      sync.Mutex
+	clock                   func() time.Time
+	sample                  LatencySample
+	stage                   LatencyStage
+	boundary                time.Time
+	requestWrittenAt        time.Time
+	responseHeadersReceived bool
+	frozen                  bool
+	networkOperationStarts  map[string][]time.Time
 }
 
 func newLatencyRecorder(clock func() time.Time) *latencyRecorder {
 	start := clock()
 	return &latencyRecorder{clock: clock, stage: LatencySetup, boundary: start,
-		sample:     LatencySample{RequestID: uuid.NewString(), Start: start, Milliseconds: make(map[LatencyStage]float64)},
-		operations: make(map[string][]time.Time)}
+		sample:                 LatencySample{RequestID: uuid.NewString(), Start: start, Milliseconds: make(map[LatencyStage]float64)},
+		networkOperationStarts: make(map[string][]time.Time)}
 }
 
 func (l *latencyRecorder) begin(stage LatencyStage) {
@@ -93,19 +93,19 @@ func (l *latencyRecorder) networkStart(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.frozen {
-		l.operations[key] = append(l.operations[key], l.clock())
+		l.networkOperationStarts[key] = append(l.networkOperationStarts[key], l.clock())
 	}
 }
 
 func (l *latencyRecorder) networkDone(key string, stage LatencyStage) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	starts := l.operations[key]
+	starts := l.networkOperationStarts[key]
 	if l.frozen || len(starts) == 0 {
 		return
 	}
 	l.sample.Milliseconds[stage] += float64(l.clock().Sub(starts[0])) / float64(time.Millisecond)
-	l.operations[key] = starts[1:]
+	l.networkOperationStarts[key] = starts[1:]
 }
 
 func (l *latencyRecorder) trace() *httptrace.ClientTrace {
@@ -115,13 +115,13 @@ func (l *latencyRecorder) trace() *httptrace.ClientTrace {
 		WroteRequest: func(info httptrace.WroteRequestInfo) {
 			l.mu.Lock()
 			defer l.mu.Unlock()
-			if l.frozen || !l.wrote.IsZero() || info.Err != nil {
+			if l.frozen || !l.requestWrittenAt.IsZero() || info.Err != nil {
 				return
 			}
 			now := l.clock()
-			l.wrote = now
+			l.requestWrittenAt = now
 			l.sample.Milliseconds[LatencyDispatch] = float64(now.Sub(l.sample.Start)) / float64(time.Millisecond)
-			if !l.headers {
+			if !l.responseHeadersReceived {
 				l.transition(LatencyResponseHeaders, now)
 			}
 		},
@@ -137,7 +137,7 @@ func (l *latencyRecorder) trace() *httptrace.ClientTrace {
 func (l *latencyRecorder) connectionStage(stage LatencyStage) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if !l.frozen && l.wrote.IsZero() && !l.headers {
+	if !l.frozen && l.requestWrittenAt.IsZero() && !l.responseHeadersReceived {
 		l.transition(stage, l.clock())
 	}
 }
@@ -148,7 +148,7 @@ func (l *latencyRecorder) response(response *http.Response) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.headers = true
+	l.responseHeadersReceived = true
 	l.sample.WorkerRequestID = response.Header.Get("X-Request-Id")
 	l.sample.StatusCode = response.StatusCode
 	l.transition(LatencyResponseCopy, l.clock())

@@ -109,7 +109,17 @@ func TestLatencyConcurrentHooksFreeze(t *testing.T) {
 		})
 	}
 	sample := l.finish(false)
+	before := make(map[LatencyStage]float64, len(sample.Milliseconds))
+	for stage, value := range sample.Milliseconds {
+		before[stage] = value
+	}
 	hooks.Wait()
+	trace.GetConn("worker")
+	trace.GotConn(httptrace.GotConnInfo{})
+	trace.WroteRequest(httptrace.WroteRequestInfo{})
+	trace.ConnectStart("tcp", "worker")
+	trace.ConnectDone("tcp", "worker", nil)
+	assert.Equal(t, before, sample.Milliseconds)
 	require.NotEmpty(t, sample.RequestID)
 	assert.NotContains(t, sample.Milliseconds, LatencyFullResponse)
 }

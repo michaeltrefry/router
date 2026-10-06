@@ -642,7 +642,7 @@ func main() {
 	if escapeNormalize {
 		logger.Info("Edit-tool escape-sequence repair enabled (ROUTER_DEEPSEEK_ESCAPE_NORMALIZE=true)")
 	}
-	emitter, err := buildOtelEmitter(string(deploymentMode))
+	emitter, err := buildOtelEmitter(context.Background(), string(deploymentMode))
 	if err != nil {
 		logger.Error("Failed to create OTel emitter", "err", err)
 		panic(err)
@@ -1623,21 +1623,6 @@ func buildExploringRouter(rtr router.Router, logger *slog.Logger) router.Router 
 	return banditexplore.New(rtr, providerFor, epsilon)
 }
 
-// parseOtelHeaders parses a comma-separated key=value string into a map.
-func parseOtelHeaders(raw string) map[string]string {
-	if raw == "" {
-		return nil
-	}
-	out := make(map[string]string)
-	for _, pair := range strings.Split(raw, ",") {
-		k, v, ok := strings.Cut(strings.TrimSpace(pair), "=")
-		if ok && k != "" {
-			out[k] = v
-		}
-	}
-	return out
-}
-
 // buildClusterScorer constructs the cluster.Multiversion router, sharing one
 // ONNX embedder across versions. Errors force the caller to panic rather
 // than silently degrade to a default model. Also returns the default
@@ -1837,7 +1822,7 @@ func buildWIFTokenSource(logger *slog.Logger) auth.WIFTokenSource {
 
 // buildOtelEmitter constructs the OTel span emitter from environment
 // variables. Returns (nil, nil) when OTEL_EXPORTER_OTLP_ENDPOINT is unset.
-func buildOtelEmitter(deploymentMode string) (*otel.Emitter, error) {
+func buildOtelEmitter(ctx context.Context, deploymentMode string) (*otel.Emitter, error) {
 	logger := observability.Get()
 
 	endpoint := config.GetOr("OTEL_EXPORTER_OTLP_ENDPOINT", "")
@@ -1847,15 +1832,19 @@ func buildOtelEmitter(deploymentMode string) (*otel.Emitter, error) {
 
 	// router.deployment_mode lets the collector branch ingest behavior
 	// (e.g. redaction / content-opt-out) without inspecting per-record attrs.
-	resourceAttrs := parseOtelHeaders(config.GetOr("OTEL_RESOURCE_ATTRIBUTES", ""))
-	if resourceAttrs == nil {
-		resourceAttrs = map[string]string{}
+	resourceAttrs, resourceErr := otel.ResourceAttributesFromEnvironment(ctx)
+	if resourceErr != nil {
+		logger.Warn("Some OpenTelemetry resource attributes were invalid; continuing with valid attributes")
 	}
 	resourceAttrs["router.deployment_mode"] = deploymentMode
+	exporterHeaders, headersErr := otel.ParseOTLPHeaders(config.GetOr("OTEL_EXPORTER_OTLP_HEADERS", ""))
+	if headersErr != nil {
+		logger.Warn("Some OpenTelemetry exporter headers were invalid; continuing with valid headers")
+	}
 
 	cfg := otel.EmitterConfig{
 		Endpoint:      endpoint,
-		Headers:       parseOtelHeaders(config.GetOr("OTEL_EXPORTER_OTLP_HEADERS", "")),
+		Headers:       exporterHeaders,
 		ServiceName:   config.GetOr("OTEL_SERVICE_NAME", "router"),
 		ResourceAttrs: resourceAttrs,
 		Workers:       parseEnvInt("OTEL_EXPORT_WORKERS", 2),
