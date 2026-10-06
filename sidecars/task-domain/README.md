@@ -104,8 +104,10 @@ the engine (compile and CUDA-graph capture take minutes), then classifies short 
 long synthetic inputs alone and concurrently, twice. The port opens only after every
 second-pass output is valid, so a TCP startup probe succeeds only after warmup;
 there is no separate ongoing readiness endpoint. Any startup error exits the process
-instead of serving a cold or broken model. Plan for the startup time in deploys and
-autoscaling: keep a warm replica and roll new revisions before draining old ones.
+instead of serving a cold or broken model. Startup measured 1.5-4.5 minutes on an L4
+(less with a persisted `VLLM_CACHE_ROOT` compile cache), so keep a warm replica and
+roll new revisions before draining old ones. On SIGTERM the server drains and shuts
+the engine core down, releasing the GPU for the next start.
 
 Alternatively build the included Dockerfile from the repository root. Serve port
 8095 behind authenticated-network TLS termination; the Go client accepts HTTPS

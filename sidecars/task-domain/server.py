@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Final
 
 import uvicorn
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import TokensPrompt
@@ -32,13 +32,9 @@ MAX_NUM_SEQS: Final = 64
 
 
 class QwenPredictor:
-    def __init__(self, model_path: Path) -> None:
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=False)
-        self.engine = AsyncLLM.from_engine_args(AsyncEngineArgs(
-            model=str(model_path), tokenizer=str(model_path), trust_remote_code=False, dtype="bfloat16",
-            max_model_len=MAX_INPUT_TOKENS + MAX_NEW_TOKENS, max_num_seqs=MAX_NUM_SEQS,
-            gpu_memory_utilization=0.85, seed=0,
-        ))
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, engine: AsyncLLM) -> None:
+        self.tokenizer = tokenizer
+        self.engine = engine
         self.sampling = SamplingParams(temperature=0.0, max_tokens=MAX_NEW_TOKENS, skip_special_tokens=True)
 
     def encode(self, text: str) -> list[int]:
@@ -63,7 +59,14 @@ def exit_on_sigterm(signum: int, frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
-async def main() -> None:
+async def serve(predictor: QwenPredictor, release_sha256: str, bearer: str) -> None:
+    app = create_app(predictor, release_sha256, bearer)
+    await warm_up(predictor, WARMUP_TEXTS)
+    server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8095")), access_log=False))
+    await server.serve()
+
+
+if __name__ == "__main__":
     model_path: Path = Path(os.environ["TASK_DOMAIN_MODEL_PATH"])
     release_sha256: str = verify_release(Path(os.environ["TASK_DOMAIN_RELEASE_PATH"]), model_path, os.environ["TASK_DOMAIN_RELEASE_SHA256"])
     bearer: str = os.environ["TASK_DOMAIN_BEARER"]
@@ -72,17 +75,18 @@ async def main() -> None:
     # uvicorn re-raises SIGTERM after its graceful shutdown; with the default handler that
     # kills the process before the engine shutdown below can run.
     signal.signal(signal.SIGTERM, exit_on_sigterm)
-    predictor: QwenPredictor = QwenPredictor(model_path)
+    # Build the engine here in module scope, outside any function and before the event loop
+    # starts. Built inside a function (or inside the running loop) the same engine served
+    # concurrent requests about 2x slower on an L4 with vLLM 0.31.0, reproducibly.
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=False)
+    engine = AsyncLLM.from_engine_args(AsyncEngineArgs(
+        model=str(model_path), tokenizer=str(model_path), trust_remote_code=False, dtype="bfloat16",
+        max_model_len=MAX_INPUT_TOKENS + MAX_NEW_TOKENS, max_num_seqs=MAX_NUM_SEQS,
+        gpu_memory_utilization=0.85, seed=0,
+    ))
     try:
-        app = create_app(predictor, release_sha256, bearer)
-        await warm_up(predictor, WARMUP_TEXTS)
-        server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8095")), access_log=False))
-        await server.serve()
+        asyncio.run(serve(QwenPredictor(tokenizer, engine), release_sha256, bearer))
     finally:
         # The engine core is a child process holding the GPU; without this it outlives
         # a terminated server and the next start cannot allocate GPU memory.
-        predictor.engine.shutdown()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        engine.shutdown()
