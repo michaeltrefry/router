@@ -35,17 +35,19 @@ func TestGatewayTelemetryExport(t *testing.T) {
 	defer collector.Close()
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", collector.URL)
 	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "Authorization=Bearer%20synthetic")
-	t.Setenv("OTEL_SERVICE_NAME", "router-gateway")
-	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.region=us%2Ccentral")
+	t.Setenv("OTEL_SERVICE_NAME", "")
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.region=us%2Ccentral,service.name=router-gateway-from-resource")
 	resourceAttributes, err := otel.ResourceAttributesFromEnvironment(context.Background())
 	require.NoError(t, err)
+	serviceName := otel.ResolveServiceName(config.GetOr("OTEL_SERVICE_NAME", ""), resourceAttributes, "router-gateway")
+	delete(resourceAttributes, "service.name")
 	resourceAttributes["router.deployment_mode"] = "managed"
 	exporterHeaders, err := otel.ParseOTLPHeaders(config.GetOr("OTEL_EXPORTER_OTLP_HEADERS", ""))
 	require.NoError(t, err)
 	emitter, err := otel.NewEmitter(otel.EmitterConfig{
 		Endpoint:      config.GetOr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 		Headers:       exporterHeaders,
-		ServiceName:   config.GetOr("OTEL_SERVICE_NAME", "router-gateway"),
+		ServiceName:   serviceName,
 		ResourceAttrs: resourceAttributes,
 	})
 	require.NoError(t, err)
@@ -64,7 +66,7 @@ func TestGatewayTelemetryExport(t *testing.T) {
 		return values
 	}
 	resource := attrs(batch.ResourceSpans[0].Resource.Attributes)
-	assert.Equal(t, "router-gateway", resource["service.name"].GetStringValue())
+	assert.Equal(t, "router-gateway-from-resource", resource["service.name"].GetStringValue())
 	assert.Equal(t, "managed", resource["router.deployment_mode"].GetStringValue())
 	assert.Equal(t, "us,central", resource["deployment.region"].GetStringValue())
 	span := batch.ResourceSpans[0].ScopeSpans[0].Spans[0]

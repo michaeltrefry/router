@@ -34,24 +34,26 @@ func main() {
 	}
 }
 
-func run() (runErr error) {
+func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	var emitter *otel.Emitter
 	if endpoint := config.GetOr("OTEL_EXPORTER_OTLP_ENDPOINT", ""); endpoint != "" {
 		resourceAttributes, resourceErr := otel.ResourceAttributesFromEnvironment(ctx)
 		if resourceErr != nil {
-			observability.FromContext(ctx).Warn("Some OpenTelemetry resource attributes were invalid; continuing with valid attributes")
+			observability.FromContext(ctx).Warn("Some OpenTelemetry resource attributes were invalid; continuing with valid attributes", "err", resourceErr)
 		}
+		serviceName := otel.ResolveServiceName(config.GetOr("OTEL_SERVICE_NAME", ""), resourceAttributes, "router-gateway")
+		delete(resourceAttributes, "service.name")
 		resourceAttributes["router.deployment_mode"] = "managed"
 		exporterHeaders, headersErr := otel.ParseOTLPHeaders(config.GetOr("OTEL_EXPORTER_OTLP_HEADERS", ""))
 		if headersErr != nil {
-			observability.FromContext(ctx).Warn("Some OpenTelemetry exporter headers were invalid; continuing with valid headers")
+			observability.FromContext(ctx).Warn("Some OpenTelemetry exporter headers were invalid; continuing with valid headers", "err", headersErr)
 		}
 		gatewayEmitter, err := otel.NewEmitter(otel.EmitterConfig{
 			Endpoint:      endpoint,
 			Headers:       exporterHeaders,
-			ServiceName:   config.GetOr("OTEL_SERVICE_NAME", "router-gateway"),
+			ServiceName:   serviceName,
 			ResourceAttrs: resourceAttributes,
 		})
 		if err != nil {
@@ -62,7 +64,9 @@ func run() (runErr error) {
 	defer func() {
 		drainCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		runErr = errors.Join(runErr, emitter.Shutdown(drainCtx))
+		if err := emitter.Shutdown(drainCtx); err != nil {
+			observability.FromContext(ctx).Warn("OpenTelemetry exporter shutdown failed; continuing with gateway shutdown", "component", "router_gateway", "operation", "telemetry_shutdown", "err", err)
+		}
 	}()
 	environment := policyregistry.Environment(config.MustGet("ROUTER_SERVING_ENVIRONMENT"))
 	if err := policyregistry.ValidateEnvironment(environment); err != nil {

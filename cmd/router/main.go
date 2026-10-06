@@ -1834,18 +1834,20 @@ func buildOtelEmitter(ctx context.Context, deploymentMode string) (*otel.Emitter
 	// (e.g. redaction / content-opt-out) without inspecting per-record attrs.
 	resourceAttrs, resourceErr := otel.ResourceAttributesFromEnvironment(ctx)
 	if resourceErr != nil {
-		logger.Warn("Some OpenTelemetry resource attributes were invalid; continuing with valid attributes")
+		logger.Warn("Some OpenTelemetry resource attributes were invalid; continuing with valid attributes", "err", resourceErr)
 	}
+	serviceName := otel.ResolveServiceName(config.GetOr("OTEL_SERVICE_NAME", ""), resourceAttrs, "router")
+	delete(resourceAttrs, "service.name")
 	resourceAttrs["router.deployment_mode"] = deploymentMode
 	exporterHeaders, headersErr := otel.ParseOTLPHeaders(config.GetOr("OTEL_EXPORTER_OTLP_HEADERS", ""))
 	if headersErr != nil {
-		logger.Warn("Some OpenTelemetry exporter headers were invalid; continuing with valid headers")
+		logger.Warn("Some OpenTelemetry exporter headers were invalid; continuing with valid headers", "err", headersErr)
 	}
 
 	cfg := otel.EmitterConfig{
 		Endpoint:      endpoint,
 		Headers:       exporterHeaders,
-		ServiceName:   config.GetOr("OTEL_SERVICE_NAME", "router"),
+		ServiceName:   serviceName,
 		ResourceAttrs: resourceAttrs,
 		Workers:       parseEnvInt("OTEL_EXPORT_WORKERS", 2),
 		QueueSize:     parseEnvInt("OTEL_BSP_MAX_QUEUE_SIZE", 1000),
