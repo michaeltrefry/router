@@ -96,7 +96,7 @@ func (e *RequestEnvelope) PrepareGemini(_ http.Header, opts EmitOptions) (provid
 		stats.CCTaskRemindersStripped = ccFilter.TaskRemindersRemoved
 		// See buildOpenAIFromAnthropic: strip native server tools before the reminder gate so Stats reflects what actually reached upstream.
 		filtered, stats.ServerToolsStripped = websearch.StripServerTools(filtered)
-		filtered, err = applyAnthropicToolChanges(filtered, 0)
+		filtered, stats.ToolReferencesUnresolved, err = applyAnthropicToolChanges(filtered, 0)
 		if err != nil {
 			return providers.PreparedRequest{}, err
 		}

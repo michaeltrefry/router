@@ -14,7 +14,7 @@ func (e *RequestEnvelope) ToolDescriptors() []router.ToolDescriptor {
 	if e == nil {
 		return nil
 	}
-	tools := gjson.GetBytes(e.body, "tools")
+	tools := e.effectiveTools()
 	if !tools.IsArray() {
 		return nil
 	}
@@ -48,7 +48,7 @@ func (e *RequestEnvelope) AvailableToolNames() []string {
 	if e == nil {
 		return nil
 	}
-	tools := gjson.GetBytes(e.body, "tools")
+	tools := e.effectiveTools()
 	if !tools.IsArray() {
 		return nil
 	}

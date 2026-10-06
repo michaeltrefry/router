@@ -294,7 +294,7 @@ func (e *RequestEnvelope) HasTools() bool {
 // request has no tools (translators treat nil as syntax-check-only); cached
 // via toolcheck's LRU since sessions resend a byte-identical block every turn.
 func (e *RequestEnvelope) ToolValidator() *toolcheck.Validator {
-	tools := gjson.GetBytes(e.body, "tools")
+	tools := e.effectiveTools()
 	if !tools.IsArray() {
 		return nil
 	}

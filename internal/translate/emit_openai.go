@@ -317,7 +317,7 @@ func (e *RequestEnvelope) buildOpenAIFromAnthropic(opts EmitOptions) ([]byte, pr
 	// Anthropic executes web_search_*/web_fetch_* itself; passing them through
 	// writeOpenAIToolsFromAnthropic creates phantom function tools. Drop them.
 	body, stats.ServerToolsStripped = websearch.StripServerTools(body)
-	body, err = applyAnthropicToolChanges(body, openAIMaxTools)
+	body, stats.ToolReferencesUnresolved, err = applyAnthropicToolChanges(body, openAIMaxTools)
 	if err != nil {
 		return nil, stats, err
 	}

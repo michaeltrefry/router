@@ -2,6 +2,7 @@ package translate
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -16,10 +17,13 @@ import (
 // existing entry is appended. Order is otherwise preserved so the upstream's
 // cached prefix survives. With maxTools > 0 and the list over that cap, added
 // tools are kept ahead of others so the emitter's truncation cannot drop them.
-func applyAnthropicToolChanges(body []byte, maxTools int) ([]byte, error) {
+// tool_choice is reconciled with the resulting list. unresolved counts added
+// tools that have neither an existing entry nor an inline definition; they
+// are dropped since there is no definition to send.
+func applyAnthropicToolChanges(body []byte, maxTools int) (out []byte, unresolved int, err error) {
 	added, removed, inline := anthropicToolChangeState(gjson.GetBytes(body, "messages"))
 	if len(added) == 0 && len(removed) == 0 {
-		return body, nil
+		return body, 0, nil
 	}
 
 	var kept []string
@@ -41,12 +45,18 @@ func applyAnthropicToolChanges(body []byte, maxTools int) ([]byte, error) {
 		if _, ok := added[name]; !ok {
 			continue
 		}
+		present[name] = struct{}{}
 		kept = append(kept, inline.defs[name])
 		keptNames = append(keptNames, name)
 	}
+	for name := range added {
+		if _, ok := present[name]; !ok {
+			unresolved++
+		}
+	}
 
 	if len(kept) == 0 && !gjson.GetBytes(body, "tools").Exists() {
-		return body, nil
+		return body, unresolved, nil
 	}
 	if maxTools > 0 && len(kept) > maxTools {
 		budget := maxTools
@@ -55,25 +65,70 @@ func applyAnthropicToolChanges(body []byte, maxTools int) ([]byte, error) {
 				budget--
 			}
 		}
-		var capped []string
+		var capped, cappedNames []string
 		for i, name := range keptNames {
-			if _, ok := added[name]; ok {
-				capped = append(capped, kept[i])
-				continue
-			}
-			if budget > 0 {
-				capped = append(capped, kept[i])
+			if _, ok := added[name]; !ok {
+				if budget <= 0 {
+					continue
+				}
 				budget--
 			}
+			capped = append(capped, kept[i])
+			cappedNames = append(cappedNames, name)
 		}
-		kept = capped
+		kept, keptNames = capped, cappedNames
 	}
 
-	out, err := sjson.SetRawBytes(body, "tools", []byte("["+strings.Join(kept, ",")+"]"))
+	out, err = sjson.SetRawBytes(body, "tools", []byte("["+strings.Join(kept, ",")+"]"))
 	if err != nil {
-		return nil, fmt.Errorf("apply tool changes: %w", err)
+		return nil, 0, fmt.Errorf("apply tool changes: %w", err)
+	}
+	out, err = reconcileToolChoice(out, keptNames)
+	if err != nil {
+		return nil, 0, err
+	}
+	return out, unresolved, nil
+}
+
+// reconcileToolChoice keeps tool_choice valid against the post-change tools,
+// since non-Anthropic upstreams reject a tool_choice with no tools or one
+// naming an undeclared tool. With no tools left tool_choice is dropped; a
+// named choice whose tool is gone becomes "any", keeping the must-call intent.
+func reconcileToolChoice(body []byte, toolNames []string) ([]byte, error) {
+	kind, name := anthropicToolChoice(body)
+	if kind == toolChoiceAbsent {
+		return body, nil
+	}
+	if len(toolNames) == 0 {
+		out, err := sjson.DeleteBytes(body, "tool_choice")
+		if err != nil {
+			return nil, fmt.Errorf("drop tool_choice: %w", err)
+		}
+		return out, nil
+	}
+	if kind != toolChoiceNamed || slices.Contains(toolNames, name) {
+		return body, nil
+	}
+	out, err := sjson.SetBytes(body, "tool_choice.type", "any")
+	if err == nil {
+		out, err = sjson.DeleteBytes(out, "tool_choice.name")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("downgrade tool_choice: %w", err)
 	}
 	return out, nil
+}
+
+// effectiveTools returns the request's tools with Anthropic tool-change
+// blocks applied (uncapped), i.e. the set the model may actually call.
+func (e *RequestEnvelope) effectiveTools() gjson.Result {
+	body := e.body
+	if e.format == FormatAnthropic {
+		if applied, _, err := applyAnthropicToolChanges(body, 0); err == nil {
+			body = applied
+		}
+	}
+	return gjson.GetBytes(body, "tools")
 }
 
 type inlineToolDefs struct {
