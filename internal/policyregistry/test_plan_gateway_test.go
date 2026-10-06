@@ -20,7 +20,7 @@ import (
 type planGatewayCredential struct{ installation string }
 
 func (c planGatewayCredential) VerifyRoutingCredential(context.Context, string) (*auth.Installation, *auth.APIKey, error) {
-	return &auth.Installation{ID: c.installation}, &auth.APIKey{ID: "test-key"}, nil
+	return &auth.Installation{ID: c.installation, ExternalID: "test-plan-organization"}, &auth.APIKey{ID: "test-key"}, nil
 }
 
 type forbiddenOrdinaryAdmission struct{ calls int }
@@ -69,6 +69,8 @@ func TestGatewayTestLaunchSignsPinnedStableAndStripsClientAuthority(t *testing.T
 	handler, err := gateway.NewHandler(planGatewayCredential{repo.identity.InstallationID}, ordinary, store, signer, planGatewayIAM{}, worker.Client().Transport)
 	require.NoError(t, err)
 	handler.WithTestPlans(tools)
+	var latencySamples []gateway.LatencySample
+	handler.SetLatencyObserver(func(sample gateway.LatencySample) { latencySamples = append(latencySamples, sample) })
 	session := uuid.NewString()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"auto","metadata":{"user_id":"spoofed-customer"}}`))
 	request.Header.Set(auth.RouterKeyHeader, "rk_synthetic")
@@ -82,6 +84,11 @@ func TestGatewayTestLaunchSignsPinnedStableAndStripsClientAuthority(t *testing.T
 	handler.ServeHTTP(response, request)
 	require.Equal(t, http.StatusNoContent, response.Code)
 	require.Zero(t, ordinary.calls)
+	require.Len(t, latencySamples, 1)
+	require.Equal(t, "test-plan-organization", latencySamples[0].OrganizationID)
+	for _, stage := range []gateway.LatencyStage{gateway.LatencyAdmission, gateway.LatencyBinding, gateway.LatencySigning, gateway.LatencyIAM, gateway.LatencyDispatch, gateway.LatencyFullResponse} {
+		require.Contains(t, latencySamples[0].Milliseconds, stage)
+	}
 	seen := <-observations
 	require.NoError(t, seen.err)
 	require.Equal(t, policyregistry.ServingAssertionV2, seen.assertion.SchemaVersion)
@@ -102,4 +109,7 @@ func TestGatewayTestLaunchSignsPinnedStableAndStripsClientAuthority(t *testing.T
 	require.Equal(t, http.StatusServiceUnavailable, response.Code)
 	require.Empty(t, observations, "revoked launch must never reach the worker")
 	require.Zero(t, ordinary.calls)
+	require.Len(t, latencySamples, 2)
+	require.Contains(t, latencySamples[1].Milliseconds, gateway.LatencyAdmission)
+	require.NotContains(t, latencySamples[1].Milliseconds, gateway.LatencyDispatch)
 }

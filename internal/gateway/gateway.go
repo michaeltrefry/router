@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
 	"strings"
@@ -36,14 +37,15 @@ type RevisionAuthorizer interface {
 
 // Handler dependencies are assembled only by cmd/router-gateway.
 type Handler struct {
-	credentials CredentialVerifier
-	admissions  policyregistry.ServingAdmissionStore
-	registry    policyregistry.ServingStore
-	signer      *policyregistry.AssertionSigner
-	authorizer  RevisionAuthorizer
-	transport   http.RoundTripper
-	products    *ProductSurfaces
-	testPlans   *policyregistry.TestPlanTools
+	credentials    CredentialVerifier
+	admissions     policyregistry.ServingAdmissionStore
+	registry       policyregistry.ServingStore
+	signer         *policyregistry.AssertionSigner
+	authorizer     RevisionAuthorizer
+	transport      http.RoundTripper
+	products       *ProductSurfaces
+	testPlans      *policyregistry.TestPlanTools
+	observeLatency func(LatencySample)
 }
 
 // NewHandler requires authoritative storage and signed, IAM-authenticated forwarding.
@@ -72,6 +74,20 @@ func (h *Handler) WithTestPlans(tools *policyregistry.TestPlanTools) *Handler {
 
 // ServeHTTP preserves original ordinary-request bytes and streams without replay or response buffering.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var latency *latencyRecorder
+	var organizationID string
+	completed := false
+	if h.observeLatency != nil && latencySurface(r) {
+		clientContext := r.Context()
+		latency = newLatencyRecorder(time.Now)
+		defer func() {
+			sample := latency.finish(completed && clientContext.Err() == nil)
+			if organizationID != "" {
+				sample.OrganizationID = organizationID
+				h.observeLatency(sample)
+			}
+		}()
+	}
 	grant, session := r.Header.Get(policyregistry.TestPlanGrantHeader), r.Header.Get(policyregistry.TestPlanSessionHeader)
 	r.Header.Del(policyregistry.TestPlanGrantHeader)
 	r.Header.Del(policyregistry.TestPlanSessionHeader)
@@ -97,12 +113,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r = r.Clone(ctx)
 	credential := auth.RoutingTokenFromHeaders(r.Header)
 	authCtx, authCancel := context.WithTimeout(ctx, 10*time.Second)
+	latency.begin(LatencyAuth)
 	installation, key, err := h.credentials.VerifyRoutingCredential(authCtx, credential)
 	authCancel()
 	if err != nil {
 		h.fail(w, r, surface, err)
 		return
 	}
+	organizationID = installation.ExternalID
+	latency.begin(LatencyBodyRead)
 	body, err := io.ReadAll(io.LimitReader(r.Body, requestcontext.MaxRequestBodyBytes+1))
 	if err != nil {
 		observability.FromContext(ctx).Debug("Gateway request body read failed", "surface", surface, "method", r.Method, "err", err)
@@ -113,6 +132,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, surface, http.StatusRequestEntityTooLarge, "Request body too large.")
 		return
 	}
+	latency.begin(LatencyValidate)
 	if (r.Method == http.MethodPost || r.Method == http.MethodPatch) && (!gjson.ValidBytes(body) || !gjson.ParseBytes(body).IsObject()) {
 		writeError(w, surface, http.StatusBadRequest, "Request body must be a JSON object.")
 		return
@@ -122,6 +142,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		retired, err = translate.WriteRetiredBetaRequest(w, r, body, surface)
 	}
 	if retired {
+		organizationID = ""
 		if err != nil {
 			observability.FromContext(ctx).Debug("Retired beta response could not be delivered", "surface", surface, "method", r.Method, "err", err)
 		}
@@ -134,6 +155,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	conversationID := requestcontext.CanonicalConversationID(r.Header, body, surface)
 	admissionDecider := policyregistry.ServingAdmission{Store: h.registry}
+	latency.begin(LatencyAdmission)
 	var signed policyregistry.ServingAssertion
 	if grant != "" {
 		signed, err = h.testPlans.Admit(ctx, grant, installation.ID, key.ID, session)
@@ -154,6 +176,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, surface, err)
 		return
 	}
+	latency.begin(LatencyBinding)
 	prepareCtx, prepareCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer prepareCancel()
 	binding, err := policyregistry.ResolveAdmissionBinding(prepareCtx, h.registry, admission)
@@ -161,42 +184,58 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, surface, err)
 		return
 	}
+	latency.begin(LatencySigning)
 	assertion, err := h.signer.Sign(signed, r, body, credential)
 	if err != nil {
 		h.fail(w, r, surface, err)
 		return
 	}
-	h.forward(w, r, surface, body, binding, assertion)
+	completed = h.forward(w, r, surface, body, binding, assertion, latency)
 }
 
-func (h *Handler) forward(w http.ResponseWriter, r *http.Request, surface requestcontext.ConversationSurface, body []byte, binding policyregistry.LaneBinding, assertion string) {
+func (h *Handler) forward(w http.ResponseWriter, r *http.Request, surface requestcontext.ConversationSurface, body []byte, binding policyregistry.LaneBinding, assertion string, recorders ...*latencyRecorder) bool {
+	var latency *latencyRecorder
+	if len(recorders) > 0 {
+		latency = recorders[0]
+	}
+	latency.begin(LatencyIAM)
 	authorizeCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	identityToken, err := h.authorizer.IdentityToken(authorizeCtx, binding.Router.Audience)
 	if err != nil {
 		h.fail(w, r, surface, err)
-		return
+		return false
 	}
+	latency.begin(LatencyPrepare)
 	destination, err := url.Parse(binding.Router.URL)
 	if err != nil {
 		h.fail(w, r, surface, err)
-		return
+		return false
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
 	r.GetBody = nil
+	var responseBody *observedResponseBody
 	proxy := httputil.ReverseProxy{
 		Transport:     h.transport,
 		FlushInterval: -1,
 		Rewrite: func(request *httputil.ProxyRequest) {
 			// SetURL preserves path/query; never follow a worker redirect or a client target header.
 			request.SetURL(destination)
+			if latency != nil {
+				request.Out = request.Out.WithContext(httptrace.WithClientTrace(request.Out.Context(), latency.trace()))
+			}
 			request.Out.Header.Set(policyregistry.ServerlessAuthorizationHeader, "Bearer "+identityToken)
 			if assertion != "" {
 				request.Out.Header.Set(policyregistry.ServingAssertionHeader, assertion)
 			}
 		},
 		ModifyResponse: func(response *http.Response) error {
+			latency.response(response)
+			if latency != nil {
+				responseBody = &observedResponseBody{ReadCloser: response.Body}
+				response.Body = responseBody
+			}
 			policyregistry.StripServingHeaders(response.Header)
 			return nil
 		},
@@ -205,6 +244,7 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, surface reques
 		},
 	}
 	proxy.ServeHTTP(w, r)
+	return responseBody != nil && responseBody.eof
 }
 
 // catalogListingRequest matches GET /v1/router/models?scope=catalog: the one

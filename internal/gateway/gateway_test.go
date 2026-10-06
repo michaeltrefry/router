@@ -30,7 +30,7 @@ const registryRoot = "gs://test-bucket/registry"
 type credentialVerifier struct{ failure error }
 
 func (v credentialVerifier) VerifyRoutingCredential(context.Context, string) (*auth.Installation, *auth.APIKey, error) {
-	return &auth.Installation{ID: "installation"}, &auth.APIKey{ID: "key"}, v.failure
+	return &auth.Installation{ID: "installation", ExternalID: "organization"}, &auth.APIKey{ID: "key"}, v.failure
 }
 
 type admissionStore struct {

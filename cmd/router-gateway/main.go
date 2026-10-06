@@ -33,9 +33,18 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (runErr error) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	emitter, err := buildGatewayEmitter()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		drainCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		runErr = errors.Join(runErr, emitter.Shutdown(drainCtx))
+	}()
 	environment := policyregistry.Environment(config.MustGet("ROUTER_SERVING_ENVIRONMENT"))
 	if err := policyregistry.ValidateEnvironment(environment); err != nil {
 		return err
@@ -87,6 +96,9 @@ func run() error {
 	forwarder, err := gateway.NewHandler(credentials, admissions, registry, signer, iam.Authorizer{}, transport, products)
 	if err != nil {
 		return err
+	}
+	if emitter != nil {
+		forwarder.SetLatencyObserver(observeGatewayLatency(emitter))
 	}
 	if strings.EqualFold(config.GetOr("ROUTER_TEST_PLANS_ENABLED", "false"), "true") {
 		if environment != policyregistry.EnvironmentProd {
