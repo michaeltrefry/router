@@ -13,11 +13,13 @@ Tracks the most recent rate-limit utilization each subscription backend reports 
 
 Quota observations guide temporary account cooldown and reset. They never prove included-only billing: provider-enforced prevention is required before any OAuth dispatch.
 
-## Consumers (both in package `proxy`)
+## Consumers (all in package `proxy`)
 
 - **Subscription source selection** ([`../subscription_observation.go`](../subscription_observation.go)): observes quota to rotate eligible physical accounts in personal/shared order; no catalog cost discount or optimistic cold-start funding bonus.
 - **Per-installation strict pass-through gate** ([`../usage_bypass.go`](../usage_bypass.go)): when an installation has `usage_bypass_enabled` and the requested model is covered by the caller's Claude or Codex subscription below `usage_bypass_threshold` (or nothing has been observed yet — cold start) and the provider transport enforces included-only subscription dispatch, the request passes straight through to that model — no routing, no substitution, no billing debit. It takes precedence over pins, the planner, and a policy sidecar's `authoritative_per_turn_selection` (which settles which model serves a *routed* turn, not whether the turn is routed at all). Unsupported adapters fall through to normal routing or refusal. Once that subscription crosses the threshold the normal routing path (including physical-account selection) resumes. Strict opt-in: off until the customer enables it in the dashboard.
 - **Claude overage and exhaustion fallback** ([`../usage_bypass.go`](../usage_bypass.go) `claudeSubscriptionExhausted`): either an exhausted window or the plain paid overage claim suppresses the caller's Claude token. The latter is a successful but customer-billable lane, so it must leave the subscription even without a 429. Codex exhaustion uses [`../codex_failover.go`](../codex_failover.go). Managed accounts observed on paid overage are always skipped without persisting quota exhaustion; there is no last-resort overage seat, so the turn goes to another subscription, authorized API capacity, or fails. Paid overage is excluded from cost-neutral `subscription_served` telemetry and analytics.
+
+- **Caller-scoped usage read** ([`../subscription_usage.go`](../subscription_usage.go), served by `GET /v1/subscriptions/usage`): reports each window, its reset and exhaustion (including paid overage via `OverageInUse`) for credentials the caller presents, was observed using under its router key, or can be dispatched onto. It derives keys from those credentials only; there is no enumeration of the observer. The router-key index keeps at most a few keys per router key and drops an entry once its observation here expires.
 
 ## Why it exists
 

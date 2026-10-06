@@ -55,6 +55,13 @@ type Window struct {
 
 func (w Window) present() bool { return w.WindowMinutes > 0 || w.UsedPercent > 0 }
 
+// Reported reports whether the upstream reported this window at all.
+func (w Window) Reported() bool { return w.present() }
+
+// ExhaustedAsOf reports whether this window is spent at now: at/above the
+// exhaustion fraction and its reported reset (if any) has not yet passed.
+func (w Window) ExhaustedAsOf(now time.Time) bool { return windowExhausted(w, now) }
+
 // Snapshot is the most recent observation for one credential: a short rolling
 // window (primary, ~5h) and a long window (secondary, weekly). Either may be
 // zero if the upstream didn't report it.
@@ -209,6 +216,10 @@ func (o *Observer) freshFor(s Snapshot) time.Duration {
 	}
 	return horizon
 }
+
+// Now returns the observer's injected clock reading, so readers judge
+// exhaustion against the same instant freshness is judged against.
+func (o *Observer) Now() time.Time { return o.now() }
 
 // Key derives the CredentialKey for a token under this observer's salt.
 func (o *Observer) Key(token []byte) CredentialKey { return KeyFor(o.salt, token) }
