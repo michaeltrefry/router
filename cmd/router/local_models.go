@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -91,6 +92,9 @@ type localModelEntry struct {
 	Agentic         string `yaml:"agentic"`
 	ImageInput      bool   `yaml:"image_input"`
 	ReasoningFormat string `yaml:"reasoning_format"`
+	// ResponseHeaderTimeout is a Go duration ("15s"); empty keeps the
+	// openaicompat default.
+	ResponseHeaderTimeout string `yaml:"response_header_timeout"`
 }
 
 // localModel is one validated entry, ready to register.
@@ -100,6 +104,8 @@ type localModel struct {
 	apiKey   string
 	keyEnv   string
 	model    catalog.Model
+	// headerTimeout is zero when the entry keeps the client default.
+	headerTimeout time.Duration
 }
 
 // parseLocalModels decodes and validates a local-models file. Unknown keys are
@@ -260,12 +266,20 @@ func validateLocalModel(entry localModelEntry, getenv func(string) string) (loca
 	default:
 		return localModel{}, fmt.Errorf("%w: reasoning_format %q (want reasoning_content or think_tags)", errLocalModelInvalidField, entry.ReasoningFormat)
 	}
+	var headerTimeout time.Duration
+	if entry.ResponseHeaderTimeout != "" {
+		headerTimeout, err = time.ParseDuration(entry.ResponseHeaderTimeout)
+		if err != nil || headerTimeout <= 0 {
+			return localModel{}, fmt.Errorf("%w: response_header_timeout %q (want a positive duration such as 15s)", errLocalModelInvalidField, entry.ResponseHeaderTimeout)
+		}
+	}
 	return localModel{
-		provider: provider,
-		baseURL:  entry.BaseURL,
-		apiKey:   apiKey,
-		keyEnv:   entry.APIKeyEnv,
-		model:    model,
+		provider:      provider,
+		baseURL:       entry.BaseURL,
+		apiKey:        apiKey,
+		keyEnv:        entry.APIKeyEnv,
+		model:         model,
+		headerTimeout: headerTimeout,
 	}, nil
 }
 
@@ -317,7 +331,8 @@ func registerLocalModels(
 			return err
 		}
 		providerMap[m.provider] = openaiCompatProvider.NewClientWithModelIDMap(
-			m.apiKey, m.baseURL, map[string]string{m.model.ID: m.model.Providers[0].UpstreamID})
+			m.apiKey, m.baseURL, map[string]string{m.model.ID: m.model.Providers[0].UpstreamID},
+			openaiCompatProvider.WithResponseHeaderTimeout(m.headerTimeout))
 		envKeyedProviders[m.provider] = struct{}{}
 		logger.Info("Local model provider enabled",
 			"provider", m.provider, "model", m.model.ID, "base_url", m.baseURL, "tier", m.model.Tier.String())

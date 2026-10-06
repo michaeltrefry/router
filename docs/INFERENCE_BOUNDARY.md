@@ -38,6 +38,8 @@ The mid-tier substitute (`proxy.Service.WithMidTierSubstitute`, configured by `m
 
 The subscription exhaustion fallback (`proxy.Service.WithSubscriptionLocalFallback`, configured by `subscription_fallback` in the local-models file) is a rescue in the existing dispatch chain, not a new purpose: after a subscription's pre-commit limit refusal outlives every other rescue, `ProxyMessages` and `ProxyOpenAIChatCompletion` retarget a copy of the refused decision onto the local model and run it through `dispatchWithFallback` under the turn's surface or utility purpose with the `deployment` override source. Like the mid-tier substitute it adds no `target_construction` exception; the plan resolver remains the only authorization for the local target, and usage and policy outcome are recorded under the refused selection.
 
+The local failure fallback (`proxy.Service` with `local_failure_fallback.go`) adds no purpose and no target construction either: when a local-turn-routed or mid-tier substituted turn fails before commit, `ProxyMessages` and `ProxyOpenAIChatCompletion` dispatch the turn's normal routing result (the substituted decision, or the turn loop re-run with local rules disabled) through `dispatchWithFallback` under that result's own purpose and origin. It is a second walk rather than a plan alternative because a plan's alternatives are bindings of one catalog model, while the normal target is another model with its own prepared request, purpose and origin.
+
 The generated static registry in [`POLICY_INFERENCE.md`](POLICY_INFERENCE.md) is the authoritative review projection for policy IDs, rationale, constraints, budgets, fallback, owner, and migration status.
 
 ## Direct Provider Calls

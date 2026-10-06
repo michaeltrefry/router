@@ -18,6 +18,9 @@ models:
     image_input: false
     # reasoning_content (OpenAI-compatible field) | think_tags (inline <think>)
     reasoning_format: reasoning_content
+    # How long to wait for response headers before treating the server as
+    # down and serving the turn on its normal route. Default 30s.
+    response_header_timeout: 30s
 
 # Optional: serve these turn types on one of the models above. Omit the block to
 # keep every turn on normal routing. A turn falls back to normal routing when the

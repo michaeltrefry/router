@@ -804,6 +804,11 @@ func (t *ResponsesWriter) SetBadgeText(text string) {
 	t.badgeText = text + "\n\n"
 }
 
+// ClearBadgeText drops the routing badge so the turn renders none.
+func (t *ResponsesWriter) ClearBadgeText() {
+	t.badgeText = ""
+}
+
 // SetRoutedModel updates the model reported by terminal response envelopes.
 func (t *ResponsesWriter) SetRoutedModel(model string) {
 	t.model = model
