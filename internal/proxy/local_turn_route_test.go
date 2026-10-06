@@ -228,3 +228,28 @@ func TestLocalTurnRoute_RequestTheModelCannotCarryRoutesAsBefore(t *testing.T) {
 		assert.Equal(t, "claude-opus-4-7", rec.Header().Get(proxy.HeaderRouterModel))
 	})
 }
+
+// A sub-agent continuation (tool_result after the sub-agent's own tool_use)
+// stays local without a session pin because it still classifies as a
+// sub-agent turn.
+func TestLocalTurnRoute_SubAgentToolResultContinuationStaysLocal(t *testing.T) {
+	const body = `{"model":"claude-opus-4-7","max_tokens":1024,` +
+		`"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.141.bb8; cc_entrypoint=cli; cc_is_subagent=true; cch=54d19;\nYou are a file search specialist."}],` +
+		`"tools":[{"name":"Read","description":"read a file","input_schema":{"type":"object"}}],` +
+		`"messages":[` +
+		`{"role":"user","content":"list go files"},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"go.mod"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"module weave-os/router"}]}]}`
+	f := newLocalTurnFixture(t, "test-local-subagent-continuation", true, nil)
+
+	rec := f.serve(t, authedCtx(uuid.New().String()), body, nil)
+
+	assert.Equal(t, f.model, rec.Header().Get(proxy.HeaderRouterModel))
+	assert.Len(t, f.local.proxyBodies, 1, "the local upstream serves the continuation")
+	assert.Empty(t, f.anthropic.proxyBodies)
+	f.store.mu.Lock()
+	defer f.store.mu.Unlock()
+	for _, pin := range f.store.upserts {
+		assert.NotEqual(t, f.model, pin.Model, "no session pin may name the local model")
+	}
+}
