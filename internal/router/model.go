@@ -102,33 +102,6 @@ func StripDateSuffix(model string) string {
 	return dateSuffix.ReplaceAllString(model, "")
 }
 
-// advisorRank orders Claude models for Anthropic's advisor tool, which
-// rejects an advisor that ranks below the request model. Values mirror Claude
-// Code's model catalog (advisor_rank).
-var advisorRank = map[string]int{
-	"claude-haiku-4-5":  1,
-	"claude-sonnet-4-6": 2,
-	"claude-opus-4-6":   3,
-	"claude-sonnet-5":   4,
-	"claude-opus-4-7":   5,
-	"claude-opus-4-8":   5,
-	"claude-sonnet-5-5": 6,
-	"claude-opus-5":     7,
-	"claude-opus-5-5":   7,
-	"claude-fable-5":    8,
-	"claude-fable-5-1":  9,
-}
-
-// AdvisorRank returns model's advisor-tool rank; dated variants fall back to
-// the base model.
-func AdvisorRank(model string) (int, bool) {
-	if rank, ok := advisorRank[model]; ok {
-		return rank, true
-	}
-	rank, ok := advisorRank[StripDateSuffix(model)]
-	return rank, ok
-}
-
 // Lookup returns the spec for a known model ID. Dated variants (e.g.
 // "-20251001") fall back to the base model; unknown models get zero-value.
 func Lookup(model string) ModelSpec {

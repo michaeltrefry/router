@@ -1055,7 +1055,7 @@ func routingKnobsForRequest(ctx context.Context) *router.Overrides {
 func (s *Service) safetyExcludedModels(env *translate.RequestEnvelope, outputReserve int, enabledProviders map[string]struct{}) map[string]struct{} {
 	_, overflowed := excludeContextOverflowModels(env.ContextOverflowTokenEstimate(), env.SignatureTokenSavings(), outputReserve, enabledProviders, nil, s.availableModels)
 	_, geminiUnsigned := excludeGemini3xOnUnsignedHistory(env, nil, s.availableModels)
-	_, advisorOutranking := excludeAdvisorOutrankingModels(env, nil, s.availableModels)
+	_, advisorOutranking := excludeAdvisorOutrankingModels(env, nil, s.routableUniverse())
 	if len(overflowed) == 0 && len(geminiUnsigned) == 0 && len(advisorOutranking) == 0 {
 		return nil
 	}
@@ -3711,9 +3711,9 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			"excluded_models", strings.Join(geminiUnsigned, ","),
 		)
 	}
-	excluded, advisorOutranking := excludeAdvisorOutrankingModels(env, excluded, s.availableModels)
+	excluded, advisorOutranking := excludeAdvisorOutrankingModels(env, excluded, s.routableUniverse())
 	if len(advisorOutranking) > 0 {
-		log.Info("advisor pre-filter: excluded models that outrank the advisor tool model",
+		log.Info("advisor pre-filter: excluded models the advisor tool cannot advise",
 			"advisor_model", env.AdvisorToolModel(),
 			"excluded_models", strings.Join(advisorOutranking, ","),
 		)

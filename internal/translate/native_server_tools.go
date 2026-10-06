@@ -36,7 +36,7 @@ func (e *RequestEnvelope) NativeServerTools() []NativeServerTool {
 // AdvisorToolModel returns the advisor model declared by an Anthropic
 // advisor_* server tool, or "" when the request carries none.
 func (e *RequestEnvelope) AdvisorToolModel() string {
-	if e == nil || e.format != FormatAnthropic {
+	if e.format != FormatAnthropic {
 		return ""
 	}
 	model := ""

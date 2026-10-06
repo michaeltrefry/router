@@ -9,20 +9,22 @@ import (
 	"weave-os/router/internal/translate"
 )
 
-func TestExcludeAdvisorOutrankingModels_ExcludesModelsAboveAdvisor(t *testing.T) {
+func TestExcludeAdvisorOutrankingModels_ExcludesModelsTheAdvisorCannotAdvise(t *testing.T) {
 	available := map[string]struct{}{
-		"claude-fable-5-1": {},
-		"claude-fable-5":   {},
-		"claude-opus-5-5":  {},
-		"claude-sonnet-5":  {},
-		"gpt-5.5":          {},
+		"claude-fable-5-1":  {},
+		"claude-fable-5":    {},
+		"claude-opus-5-5":   {},
+		"claude-sonnet-5":   {},
+		"claude-sonnet-4-5": {},
+		"gpt-5.5":           {},
 	}
-	env, err := translate.ParseAnthropic([]byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}],"tools":[{"name":"Bash","input_schema":{"type":"object"}},{"type":"advisor_20260301","name":"advisor","model":"claude-opus-5-5"}]}`))
+	env, err := translate.ParseAnthropic([]byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}],"tools":[{"name":"Bash","input_schema":{"type":"object"}},{"type":"advisor_20260301","name":"advisor","model":"claude-opus-5-5-20260801"}]}`))
 	require.NoError(t, err)
 
-	out, added := excludeAdvisorOutrankingModels(env, map[string]struct{}{"gpt-5.5": {}}, available)
-	assert.Equal(t, []string{"claude-fable-5", "claude-fable-5-1"}, added)
-	assert.Equal(t, map[string]struct{}{"gpt-5.5": {}, "claude-fable-5": {}, "claude-fable-5-1": {}}, out)
+	out, unadvisable := excludeAdvisorOutrankingModels(env, map[string]struct{}{"claude-fable-5": {}}, available)
+	assert.Equal(t, []string{"claude-fable-5", "claude-fable-5-1", "claude-sonnet-4-5"}, unadvisable,
+		"already-excluded and unranked Claude models are reported so later re-admission keeps them out")
+	assert.Equal(t, map[string]struct{}{"claude-fable-5": {}, "claude-fable-5-1": {}, "claude-sonnet-4-5": {}}, out)
 }
 
 func TestExcludeAdvisorOutrankingModels_NoAdvisorIsNoop(t *testing.T) {
