@@ -27,3 +27,18 @@ func TestRegisterLocalModels_RejectsInvalidRowsWithoutMutating(t *testing.T) {
 	_, found := catalog.ByID("local-a")
 	assert.False(t, found, "a rejected batch registers nothing")
 }
+
+func TestUnregisterLocalModels_RemovesOnlyLocalRows(t *testing.T) {
+	before := len(catalog.Models)
+	require.NoError(t, catalog.RegisterLocalModels(catalog.Model{ID: "local-unreg", Providers: []catalog.ProviderBinding{{Provider: "local_x"}}}))
+	_, found := catalog.ByID("local-unreg")
+	require.True(t, found)
+
+	catalog.UnregisterLocalModels("local-unreg", "claude-sonnet-4-6")
+
+	_, found = catalog.ByID("local-unreg")
+	assert.False(t, found, "the local row leaves the ID index")
+	assert.Len(t, catalog.Models, before, "the local row leaves Models")
+	_, found = catalog.ByID("claude-sonnet-4-6")
+	assert.True(t, found, "a static row is never removed")
+}

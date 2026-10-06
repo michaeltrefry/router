@@ -77,6 +77,9 @@ func TestParseLocalModels_RejectsInvalidEntries(t *testing.T) {
 		{"uppercase id is unforceable", localEntryYAML("Qwen-Local", "http://localhost:1/v1", "KEY_A"), errLocalModelInvalidID},
 		{"non-http base url", localEntryYAML("m1", "ftp://localhost/v1", "KEY_A"), errLocalModelInvalidBaseURL},
 		{"unknown tier", strings.Replace(localEntryYAML("m1", "http://localhost:1/v1", "KEY_A"), "tier: mid", "tier: sonnet", 1), errLocalModelInvalidField},
+		{"unknown reasoning format", localEntryYAML("m1", "http://localhost:1/v1", "KEY_A") + "    reasoning_format: bogus\n", errLocalModelInvalidField},
+		{"unknown tool use rating", localEntryYAML("m1", "http://localhost:1/v1", "KEY_A") + "    tool_use: high\n", errLocalModelInvalidField},
+		{"unknown agentic rating", localEntryYAML("m1", "http://localhost:1/v1", "KEY_A") + "    agentic: high\n", errLocalModelInvalidField},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,6 +87,24 @@ func TestParseLocalModels_RejectsInvalidEntries(t *testing.T) {
 			require.ErrorIs(t, err, tc.want)
 		})
 	}
+}
+
+func TestParseLocalModels_NonDefaultCapabilities(t *testing.T) {
+	doc := "models:\n" + localEntryYAML("m1", "http://localhost:1/v1", "KEY_A") +
+		"    tool_use: low\n" +
+		"    agentic: low\n" +
+		"    image_input: true\n" +
+		"    reasoning_format: think_tags\n"
+
+	models, err := parseLocalModels(strings.NewReader(doc), envFrom(map[string]string{"KEY_A": "a"}))
+
+	require.NoError(t, err)
+	require.Len(t, models, 1)
+	m := models[0].model
+	assert.Equal(t, catalog.ToolUseLow, m.ToolUseQuality)
+	assert.Equal(t, catalog.AgenticLow, m.AgenticUse)
+	assert.NotEqual(t, catalog.ImageInputUnsupported, m.ImageInput)
+	assert.True(t, m.ThinkTagReasoning)
 }
 
 func TestParseLocalModels_RejectsUnknownField(t *testing.T) {
@@ -187,6 +208,12 @@ func localModelService(t *testing.T, id string, upstream *localUpstream) (*proxy
 	require.NoError(t, loadLocalModels(
 		envFrom(map[string]string{localModelsFileEnv: path, "LOCAL_TEST_KEY": "local-secret"}),
 		providerMap, keyed, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	t.Cleanup(func() {
+		catalog.UnregisterLocalModels(id)
+		provider := providers.LocalProviderName(id)
+		delete(providers.ProviderFamilies, provider)
+		delete(providers.APIKeyEnvVars, provider)
+	})
 	rtr := &unusedRouter{}
 	svc := proxy.NewService(rtr, providerMap, nil, false, nil, nil, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
 		WithDeploymentKeyedProviders(keyed)
@@ -245,4 +272,24 @@ func TestLocalModel_ClaudeSubscriptionStillEnrollsAnthropic(t *testing.T) {
 	upstream.mu.Lock()
 	defer upstream.mu.Unlock()
 	assert.Empty(t, upstream.bodies)
+}
+
+// An unkeyed OpenAI-surface caller's own bearer belongs to another upstream;
+// a forced local model must still authenticate with its configured key.
+func TestLocalModel_UnkeyedOpenAICallerKeyNeverReachesLocalUpstream(t *testing.T) {
+	const id = "test-local-unkeyed"
+	upstream := newLocalUpstream(t)
+	svc, _, _ := localModelService(t, id, upstream)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r.Header.Set("Authorization", "Bearer sk-openai-test")
+	r.Header.Set(proxy.ForceModelHeader, id)
+	body := `{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hello"}]}`
+	rec := httptest.NewRecorder()
+	require.NoError(t, svc.ProxyOpenAIChatCompletion(context.Background(), []byte(body), rec, r))
+
+	upstream.mu.Lock()
+	defer upstream.mu.Unlock()
+	require.Len(t, upstream.authz, 1, "the forced local model must be served by its own upstream")
+	assert.Equal(t, "Bearer local-secret", upstream.authz[0])
 }
