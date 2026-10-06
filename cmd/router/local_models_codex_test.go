@@ -29,13 +29,21 @@ type recordingOpenAI struct {
 	mu     sync.Mutex
 	calls  int
 	bodies [][]byte
+	models []string
 }
 
-func (o *recordingOpenAI) record(body []byte) {
+func (o *recordingOpenAI) record(model string, body []byte) {
 	o.mu.Lock()
 	o.calls++
 	o.bodies = append(o.bodies, body)
+	o.models = append(o.models, model)
 	o.mu.Unlock()
+}
+
+func (o *recordingOpenAI) servedModels() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.models...)
 }
 
 func (o *recordingOpenAI) count() int {
@@ -44,15 +52,15 @@ func (o *recordingOpenAI) count() int {
 	return o.calls
 }
 
-func (o *recordingOpenAI) Proxy(_ context.Context, _ router.Decision, prep providers.PreparedRequest, w http.ResponseWriter, _ *http.Request) error {
-	o.record(prep.Body)
+func (o *recordingOpenAI) Proxy(_ context.Context, decision router.Decision, prep providers.PreparedRequest, w http.ResponseWriter, _ *http.Request) error {
+	o.record(decision.Model, prep.Body)
 	w.Header().Set("Content-Type", "application/json")
 	_, err := io.WriteString(w, `{"id":"resp_1","object":"response","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"subscription"}]}]}`)
 	return err
 }
 
 func (o *recordingOpenAI) Passthrough(_ context.Context, prep providers.PreparedRequest, _ http.ResponseWriter, _ *http.Request) error {
-	o.record(prep.Body)
+	o.record("", prep.Body)
 	return providers.ErrNotImplemented
 }
 
@@ -68,7 +76,12 @@ func (r *codexRouter) Route(context.Context, router.Request) (router.Decision, e
 // OpenAI client; extraYAML extends the model entry or adds top-level keys.
 func codexLocalService(t *testing.T, id string, upstream *localUpstream, extraYAML string) (*proxy.Service, *recordingOpenAI, *codexRouter) {
 	t.Helper()
-	path := writeLocalModelsFile(t, localEntryYAML(id, upstream.baseURL, "LOCAL_TEST_KEY")+extraYAML)
+	return codexLocalServiceFromEntry(t, id, localEntryYAML(id, upstream.baseURL, "LOCAL_TEST_KEY"), extraYAML)
+}
+
+func codexLocalServiceFromEntry(t *testing.T, id, entryYAML, extraYAML string) (*proxy.Service, *recordingOpenAI, *codexRouter) {
+	t.Helper()
+	path := writeLocalModelsFile(t, entryYAML+extraYAML)
 	openAIClient := &recordingOpenAI{}
 	providerMap := map[string]providers.Client{providers.ProviderOpenAI: openAIClient}
 	keyed := map[string]struct{}{providers.ProviderOpenAI: {}}
@@ -372,4 +385,45 @@ func TestLocalModel_CodexNonSpawnThreadsStayOnSubscription(t *testing.T) {
 	assert.Empty(t, upstream.bodies, "no non-spawn thread reaches the local upstream")
 	assert.Equal(t, 3, openAIClient.count())
 	assert.Equal(t, 3, rtr.calls, "each thread is scored as it was without a local route")
+}
+
+// A spawned sub-agent the local model cannot take routes exactly as with no
+// local route: under a sub-agent override it is scored on the subscription
+// rather than gaining the sub-agent hard pin.
+func TestLocalModel_CodexSpawnLocalModelCannotTakeRoutesAsWithoutRoute(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry func(id, baseURL string) string
+		extra func(id string) string
+	}{
+		{
+			name:  "no local route",
+			entry: func(id, baseURL string) string { return localEntryYAML(id, baseURL, "LOCAL_TEST_KEY") },
+			extra: func(string) string { return "" },
+		},
+		{
+			name: "context window too small",
+			entry: func(id, baseURL string) string {
+				return strings.Replace(localEntryYAML(id, baseURL, "LOCAL_TEST_KEY"), "context_window: 262144", "context_window: 8", 1)
+			},
+			extra: turnRoutingYAML,
+		},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id := "test-local-codex-spawn-" + string(rune('a'+i))
+			upstream := newLocalUpstream(t)
+			svc, openAIClient, rtr := codexLocalServiceFromEntry(t, id, tc.entry(id, upstream.baseURL), tc.extra(id))
+			svc.WithSubAgentOverride(providers.ProviderOpenAI, "gpt-5.6-luna")
+
+			ctx, r := codexRequest(t, map[string]string{"x-openai-subagent": "collab_spawn"})
+			require.NoError(t, svc.ProxyOpenAIResponses(ctx, []byte(codexMainTurn), httptest.NewRecorder(), r))
+
+			upstream.mu.Lock()
+			assert.Empty(t, upstream.bodies, "the local upstream is not dispatched")
+			upstream.mu.Unlock()
+			assert.Equal(t, 1, rtr.calls, "the spawned sub-agent is scored")
+			assert.Equal(t, []string{"gpt-5.6-sol"}, openAIClient.servedModels(), "the scored subscription model serves the turn")
+		})
+	}
 }

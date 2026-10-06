@@ -6732,9 +6732,6 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 
 	// OpenAI signals sub-agent identity via x-weave-subagent-type (no metadata.user_id).
 	subAgentHint := r.Header.Get("x-weave-subagent-type")
-	if subAgentHint == "" {
-		subAgentHint = s.codexLocalSubAgentHint(ctx, r.Header)
-	}
 
 	enabledProviders := s.enabledProvidersForRequest(ctx, providers.ProviderOpenAI, r.Header)
 

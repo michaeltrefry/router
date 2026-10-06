@@ -193,3 +193,34 @@ func StripRouterReasoningFromResponsesInput(body []byte) ([]byte, error) {
 	}
 	return replaceResponsesRawField(body, "input", []byte("["+strings.Join(kept, ",")+"]"))
 }
+
+// splitThinkTagText separates a complete content string into its visible text
+// and the reasoning carried in <think>…</think> blocks.
+func splitThinkTagText(content string) (visible, thinking string) {
+	var splitter thinkTagSplitter
+	var v, th strings.Builder
+	for _, seg := range append(splitter.Feed(content), splitter.Flush()...) {
+		if seg.kind == segThinking {
+			th.WriteString(seg.text)
+			continue
+		}
+		v.WriteString(seg.text)
+	}
+	return v.String(), th.String()
+}
+
+// thinkTagCompletionHasUsableOutput reports whether a buffered Chat
+// Completions body from a think-tag model carries visible text or a named
+// tool call once its <think> blocks are set aside as reasoning.
+func thinkTagCompletionHasUsableOutput(body []byte) bool {
+	message := gjson.GetBytes(body, "choices.0.message")
+	if visible, _ := splitThinkTagText(chatContentText(message.Get("content"))); visible != "" {
+		return true
+	}
+	for _, toolCall := range message.Get("tool_calls").Array() {
+		if toolCall.Get("function.name").String() != "" {
+			return true
+		}
+	}
+	return false
+}

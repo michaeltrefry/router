@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"weave-os/router/internal/providers"
 	"weave-os/router/internal/translate"
 
 	"github.com/stretchr/testify/assert"
@@ -115,6 +116,68 @@ func TestResponsesWriter_NonStreamingChatReasoningLeadsOutput(t *testing.T) {
 	assert.Equal(t, "reasoning", output[0].Get("type").String())
 	assert.Equal(t, "Because.", output[0].Get("summary.0.text").String())
 	assert.Equal(t, "Yes.", output[1].Get("content.0.text").String())
+}
+
+func TestResponsesWriter_NonStreamingThinkTagOnlyIsEmptyCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		message string
+		empty   bool
+	}{
+		{"think block only", `{"role":"assistant","content":"<think>x</think>"}`, true},
+		{"think block then text", `{"role":"assistant","content":"<think>x</think>Yes."}`, false},
+		{"think block then tool call", `{"role":"assistant","content":"<think>x</think>","tool_calls":[{"id":"call_1","type":"function","function":{"name":"shell","arguments":"{}"}}]}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			w := translate.NewResponsesWriter(rec, "")
+			w.SetBadgeText("badge")
+			w.SetThinkTagReasoning(true)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, err := w.Write([]byte(`{"choices":[{"index":0,"message":` + tc.message + `,"finish_reason":"stop"}]}`))
+			require.NoError(t, err)
+
+			err = w.Finalize()
+			if tc.empty {
+				require.ErrorIs(t, err, providers.ErrUpstreamEmptyCompletion)
+				assert.Empty(t, rec.Body.String(), "nothing is committed to the client")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, "completed", gjson.GetBytes(rec.Body.Bytes(), "status").String())
+		})
+	}
+}
+
+// Text and reasoning that follow a tool call keep the output_index they
+// streamed at in the completed envelope.
+func TestResponsesWriter_CompletedOutputFollowsOutputIndexAfterToolCall(t *testing.T) {
+	rec := httptest.NewRecorder()
+	w := translate.NewResponsesWriter(rec, "")
+	writeChatStream(t, w,
+		`{"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"shell","arguments":"{}"}}]},"finish_reason":null}]}`,
+		`{"choices":[{"index":0,"delta":{"reasoning_content":"Now answer."},"finish_reason":null}]}`,
+		`{"choices":[{"index":0,"delta":{"content":"Done."},"finish_reason":null}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	)
+
+	events := parseSSEEvents(t, rec.Body.Bytes())
+	streamed := map[float64]string{}
+	for _, event := range events {
+		if event["type"] == "response.output_item.done" {
+			streamed[event["output_index"].(float64)] = event["item"].(map[string]any)["type"].(string)
+		}
+	}
+	require.Equal(t, map[float64]string{0: "function_call", 1: "reasoning", 2: "message"}, streamed, rec.Body.String())
+
+	final := events[len(events)-1]
+	require.Equal(t, "response.completed", final["type"])
+	output := final["response"].(map[string]any)["output"].([]any)
+	require.Len(t, output, 3)
+	for i, item := range output {
+		assert.Equal(t, streamed[float64(i)], item.(map[string]any)["type"], "output[%d]", i)
+	}
 }
 
 func TestStripRouterReasoningFromResponsesInput(t *testing.T) {

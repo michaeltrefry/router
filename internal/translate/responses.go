@@ -1174,7 +1174,7 @@ func (t *ResponsesWriter) Finalize() error {
 		_, _ = t.inner.Write([]byte(`{"error":{"message":"translation failed","type":"api_error"}}`))
 		return err
 	}
-	if !chatCompletionHasUsableOutput(body) {
+	if !chatCompletionHasUsableOutput(body) || (t.thinkTags && !thinkTagCompletionHasUsableOutput(body)) {
 		return emptyCompletionOpenAIError()
 	}
 	t.inner.Header().Set("Content-Type", "application/json")
@@ -2642,13 +2642,13 @@ func (t *ResponsesWriter) assembleOutput() []any {
 		index int
 		item  any
 	}
-	leading := make([]indexedOutput, 0, len(t.retiredTextItems)+len(t.reasoningItems)+1)
+	entries := make([]indexedOutput, 0, len(t.retiredTextItems)+len(t.reasoningItems)+len(t.toolItems)+1)
 	textItems := t.retiredTextItems
 	if t.textItem != nil {
 		textItems = append(textItems[:len(textItems):len(textItems)], t.textItem)
 	}
 	for _, item := range textItems {
-		leading = append(leading, indexedOutput{item.outputIndex, map[string]any{
+		entries = append(entries, indexedOutput{item.outputIndex, map[string]any{
 			"id":     item.itemID,
 			"type":   "message",
 			"status": "completed",
@@ -2661,23 +2661,9 @@ func (t *ResponsesWriter) assembleOutput() []any {
 		}})
 	}
 	for _, item := range t.reasoningItems {
-		leading = append(leading, indexedOutput{item.outputIndex, item.output()})
+		entries = append(entries, indexedOutput{item.outputIndex, item.output()})
 	}
-	sort.SliceStable(leading, func(i, j int) bool { return leading[i].index < leading[j].index })
-	out := make([]any, 0, len(leading)+len(t.toolItems))
-	for _, entry := range leading {
-		out = append(out, entry.item)
-	}
-	// Tool items in upstream index order. Upstream indices may be
-	// non-contiguous (e.g. {0, 2}), so iterate the sorted keys rather than
-	// counting up to len.
-	indices := make([]int, 0, len(t.toolItems))
-	for idx := range t.toolItems {
-		indices = append(indices, idx)
-	}
-	sort.Ints(indices)
-	for _, idx := range indices {
-		item := t.toolItems[idx]
+	for _, item := range t.toolItems {
 		if len(t.toolMappings) > 0 && !item.opened {
 			continue
 		}
@@ -2697,7 +2683,7 @@ func (t *ResponsesWriter) assembleOutput() []any {
 			if item.mapping.Namespace != "" {
 				call["namespace"] = item.mapping.Namespace
 			}
-			out = append(out, call)
+			entries = append(entries, indexedOutput{item.outputIndex, call})
 			continue
 		}
 		call := map[string]any{
@@ -2711,7 +2697,14 @@ func (t *ResponsesWriter) assembleOutput() []any {
 		if item.mapping.Namespace != "" {
 			call["namespace"] = item.mapping.Namespace
 		}
-		out = append(out, call)
+		entries = append(entries, indexedOutput{item.outputIndex, call})
+	}
+	// Every item carries the output_index it streamed at, so the assembled
+	// output matches the order the client already saw.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].index < entries[j].index })
+	out := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, entry.item)
 	}
 	return out
 }
@@ -2744,16 +2737,9 @@ func chatCompletionToResponse(body []byte, responseID, model string, createdAt i
 	reasoning := chatDeltaReasoning(choice)
 	content := chatContentText(choice.Get("content"))
 	if thinkTags {
-		var splitter thinkTagSplitter
-		var visible strings.Builder
-		for _, seg := range append(splitter.Feed(content), splitter.Flush()...) {
-			if seg.kind == segThinking {
-				reasoning += seg.text
-				continue
-			}
-			visible.WriteString(seg.text)
-		}
-		content = visible.String()
+		var thinking string
+		content, thinking = splitThinkTagText(content)
+		reasoning += thinking
 	}
 	if reasoning != "" {
 		output = append(output, reasoningOutputItem(newResponsesID("rs"), reasoning))
