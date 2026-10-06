@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -16,6 +17,7 @@ import (
 	openaiCompatProvider "weave-os/router/internal/providers/openaicompat"
 	"weave-os/router/internal/proxy"
 	"weave-os/router/internal/router/catalog"
+	"weave-os/router/internal/router/turntype"
 )
 
 // localModelsFileEnv names the YAML file declaring self-hosted models.
@@ -35,6 +37,8 @@ var (
 	errLocalModelMissingUpstrm  = errors.New("local model: upstream_model is required")
 	errLocalModelContextWindow  = errors.New("local model: context_window must be positive")
 	errLocalModelInvalidField   = errors.New("local model: invalid field value")
+	errLocalTurnRoutingModel    = errors.New("local turn routing: model must name a configured local model")
+	errLocalTurnRoutingType     = errors.New("local turn routing: turn type cannot be served locally")
 )
 
 // Lowercase because force-model input is lowercased before catalog lookup; no
@@ -43,7 +47,20 @@ var (
 var localModelIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 
 type localModelsFile struct {
-	Models []localModelEntry `yaml:"models"`
+	Models      []localModelEntry      `yaml:"models"`
+	TurnRouting *localTurnRoutingEntry `yaml:"turn_routing"`
+}
+
+type localTurnRoutingEntry struct {
+	Model     string   `yaml:"model"`
+	TurnTypes []string `yaml:"turn_types"`
+}
+
+// localModelsConfig is a validated local-models file. A zero turnRoute
+// leaves every turn type on normal routing.
+type localModelsConfig struct {
+	models    []localModel
+	turnRoute proxy.LocalTurnRoute
 }
 
 type localModelEntry struct {
@@ -70,27 +87,58 @@ type localModel struct {
 
 // parseLocalModels decodes and validates a local-models file. Unknown keys are
 // rejected so a misspelt field cannot silently fall back to a default.
-func parseLocalModels(r io.Reader, getenv func(string) string) ([]localModel, error) {
+func parseLocalModels(r io.Reader, getenv func(string) string) (localModelsConfig, error) {
 	var file localModelsFile
 	decoder := yaml.NewDecoder(r)
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&file); err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("decode local models: %w", err)
+		return localModelsConfig{}, fmt.Errorf("decode local models: %w", err)
 	}
 	out := make([]localModel, 0, len(file.Models))
 	seen := make(map[string]struct{}, len(file.Models))
 	for i, entry := range file.Models {
 		model, err := validateLocalModel(entry, getenv)
 		if err != nil {
-			return nil, fmt.Errorf("local model entry %d (%q): %w", i+1, entry.ID, err)
+			return localModelsConfig{}, fmt.Errorf("local model entry %d (%q): %w", i+1, entry.ID, err)
 		}
 		if _, dup := seen[entry.ID]; dup {
-			return nil, fmt.Errorf("local model entry %d: %w: %s", i+1, errLocalModelDuplicateID, entry.ID)
+			return localModelsConfig{}, fmt.Errorf("local model entry %d: %w: %s", i+1, errLocalModelDuplicateID, entry.ID)
 		}
 		seen[entry.ID] = struct{}{}
 		out = append(out, model)
 	}
-	return out, nil
+	route, err := validateLocalTurnRouting(file.TurnRouting, seen)
+	if err != nil {
+		return localModelsConfig{}, err
+	}
+	return localModelsConfig{models: out, turnRoute: route}, nil
+}
+
+// validateLocalTurnRouting resolves the turn_routing block against the
+// configured models. Omitted turn_types selects proxy.DefaultLocalTurnTypes.
+func validateLocalTurnRouting(entry *localTurnRoutingEntry, models map[string]struct{}) (proxy.LocalTurnRoute, error) {
+	if entry == nil {
+		return proxy.LocalTurnRoute{}, nil
+	}
+	if _, configured := models[entry.Model]; !configured {
+		return proxy.LocalTurnRoute{}, fmt.Errorf("%w: %q", errLocalTurnRoutingModel, entry.Model)
+	}
+	types := slices.Clone(proxy.DefaultLocalTurnTypes)
+	if len(entry.TurnTypes) > 0 {
+		types = make([]turntype.TurnType, 0, len(entry.TurnTypes))
+		for _, raw := range entry.TurnTypes {
+			tt := turntype.TurnType(raw)
+			if !proxy.LocalTurnRoutable(tt) {
+				return proxy.LocalTurnRoute{}, fmt.Errorf("%w: %q (want sub_agent_dispatch, title_gen, probe or recap)", errLocalTurnRoutingType, raw)
+			}
+			types = append(types, tt)
+		}
+	}
+	return proxy.LocalTurnRoute{
+		Provider:  providers.LocalProviderName(entry.Model),
+		Model:     entry.Model,
+		TurnTypes: types,
+	}, nil
 }
 
 func validateLocalModel(entry localModelEntry, getenv func(string) string) (localModel, error) {
@@ -215,26 +263,32 @@ func registerLocalModels(
 	return nil
 }
 
-// loadLocalModels reads ROUTER_LOCAL_MODELS_FILE, when set, and registers its
-// models. An unset variable registers nothing.
+// loadLocalModels reads ROUTER_LOCAL_MODELS_FILE, when set, registers its
+// models and returns its turn route. An unset variable registers nothing.
 func loadLocalModels(
 	getenv func(string) string,
 	providerMap map[string]providers.Client,
 	envKeyedProviders map[string]struct{},
 	logger *slog.Logger,
-) error {
+) (proxy.LocalTurnRoute, error) {
 	path := strings.TrimSpace(getenv(localModelsFileEnv))
 	if path == "" {
-		return nil
+		return proxy.LocalTurnRoute{}, nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("%s: %w", localModelsFileEnv, err)
+		return proxy.LocalTurnRoute{}, fmt.Errorf("%s: %w", localModelsFileEnv, err)
 	}
 	defer f.Close()
-	models, err := parseLocalModels(f, getenv)
+	cfg, err := parseLocalModels(f, getenv)
 	if err != nil {
-		return fmt.Errorf("%s: %w", localModelsFileEnv, err)
+		return proxy.LocalTurnRoute{}, fmt.Errorf("%s: %w", localModelsFileEnv, err)
 	}
-	return registerLocalModels(models, providerMap, envKeyedProviders, logger)
+	if err := registerLocalModels(cfg.models, providerMap, envKeyedProviders, logger); err != nil {
+		return proxy.LocalTurnRoute{}, err
+	}
+	if cfg.turnRoute.Model != "" {
+		logger.Info("Local turn routing enabled", "model", cfg.turnRoute.Model, "turn_types", cfg.turnRoute.TurnTypes)
+	}
+	return cfg.turnRoute, nil
 }

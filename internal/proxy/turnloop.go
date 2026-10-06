@@ -908,13 +908,28 @@ func (s *Service) runTurnLoop(
 		)
 	}
 
+	// The local turn route outranks the automatic hard pin and the scorer but
+	// never a user force: an eligible force on a hard-pinned turn returned
+	// above, and on any other turn the routing below honors it. It is served
+	// as a hard pin, so it never reads or writes a session pin; sub-agent
+	// continuations are classified SubAgentDispatch too, so they stay local
+	// without one.
+	localProvider, localModel, localTurn := "", "", false
+	if !forceModelFound || hardPinnedTurn {
+		localProvider, localModel, localTurn = s.localTurnTarget(res.TurnType, req)
+	}
+	if localTurn && !hardPinnedTurn {
+		res.Purpose = utilityPurposes[res.TurnType]
+	}
+
 	// Automatic hard pins bypass pin lookup/write, planner, and scorer entirely.
 	// Probes and title-gen must never create a session pin: the Anthropic SDK fires
 	// probes before the first real turn, and Claude Code fires title-gen
 	// ~25ms before the real-conv call — an anchored pin would leak the
 	// cheap-model decision into the conversation that follows.
-	if hardPinnedTurn {
+	if hardPinnedTurn || localTurn {
 		provider, model := s.hardPinProvider, s.hardPinModel
+		reason := string(res.TurnType) + "_hard_pin"
 		// Sub-agent override is explicit operator config (mirrors ROUTER_HARD_PIN_MODEL
 		// semantics), so it skips hardPinResolver rather than being resolved dynamically.
 		useSubAgentOverride := res.TurnType == turntype.SubAgentDispatch && s.hasSubAgentOverride()
@@ -935,6 +950,9 @@ func (s *Service) runTurnLoop(
 			compactionProvider, compactionModel, origin, compactionPin = s.compactionHardPin(ctx, threadSessionKey, res.PinRole, req)
 		}
 		switch {
+		case localTurn:
+			provider, model, reason = localProvider, localModel, string(res.TurnType)+"_local"
+			log.Info("Local turn route served turn", "turn_type", string(res.TurnType), "local_model", model, "local_provider", provider)
 		case compactionPin:
 			provider, model = compactionProvider, compactionModel
 			log.Info("Hard-pin: compaction turn on compaction model", "hard_pin_model", model, "hard_pin_provider", provider)
@@ -998,13 +1016,13 @@ func (s *Service) runTurnLoop(
 		hardDecision := router.Decision{
 			Provider: provider,
 			Model:    model,
-			Reason:   string(res.TurnType) + "_hard_pin",
+			Reason:   reason,
 		}
 		res.Decision = hardDecision
 		res.StickyHit = true
 		res.HardPinned = true
 		res.Origin = origin
-		res.PinTier = string(res.TurnType) + "_hard_pin"
+		res.PinTier = reason
 		return res, nil
 	}
 

@@ -211,6 +211,31 @@ gateway-exclusive: Claude and Codex subscriptions and other providers stay
 enrolled. Any invalid entry (missing field, unset key variable, duplicate or
 shadowed `id`, unknown field) fails boot with a named error.
 
+#### Turn-type routing
+
+An optional top-level `turn_routing` block serves selected turn types on one
+of the configured local models:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `model` | yes | `id` of an entry under `models`. |
+| `turn_types` | no | Any of `sub_agent_dispatch` (every turn of a Claude Code sub-agent, Explore included), `title_gen`, `probe`, `recap`. Omitted: all four. |
+
+Main-loop and tool-result turns keep normal routing, and `classifier` or
+`compaction` in the list fails boot: those turns are never served locally. A
+locally served turn neither reads nor writes a session pin, so a title or probe
+turn cannot pin the conversation that follows it; a sub-agent stays on the
+local model because each of its turns is classified as a sub-agent turn.
+
+A listed turn falls back to exactly the routing it would have without this
+block when the installation excluded the local model (the dashboard toggle or
+an allowlist), the request cannot reach its provider, the model is disabled for
+automatic routing, the request exceeds its `context_window`, carries images it
+cannot read, or carries tools and the model is rated `tool_use: low` or
+`agentic: low`. An explicit `/force-model` always wins. The route takes
+precedence over `ROUTER_HARD_PIN_*` and `ROUTER_SUBAGENT_*` for the turns it
+serves.
+
 ### Key-pair auth
 
 A gateway whose tenant forbids long-lived tokens can be given an RSA private

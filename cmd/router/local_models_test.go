@@ -20,6 +20,7 @@ import (
 	"weave-os/router/internal/proxy"
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
+	"weave-os/router/internal/router/turntype"
 )
 
 const localTestInstallationID = "00000000-0000-0000-0000-0000000000aa"
@@ -42,11 +43,11 @@ func TestParseLocalModels_ExampleConfig(t *testing.T) {
 	require.NoError(t, err)
 	defer f.Close()
 
-	models, err := parseLocalModels(f, envFrom(map[string]string{"LOCAL_QWEN_API_KEY": "secret"}))
+	cfg, err := parseLocalModels(f, envFrom(map[string]string{"LOCAL_QWEN_API_KEY": "secret"}))
 
 	require.NoError(t, err)
-	require.Len(t, models, 1)
-	m := models[0]
+	require.Len(t, cfg.models, 1)
+	m := cfg.models[0]
 	assert.Equal(t, "local_qwen3.8-flash-next", m.provider)
 	assert.Equal(t, "http://localhost:8081/v1", m.baseURL)
 	assert.Equal(t, "secret", m.apiKey)
@@ -61,6 +62,57 @@ func TestParseLocalModels_ExampleConfig(t *testing.T) {
 	assert.Equal(t, "local_qwen3.8-flash-next", m.model.Providers[0].Provider)
 	assert.Equal(t, "qwen3.8-flash-next-unsloth-ud-q4_k_xl", m.model.Providers[0].UpstreamID)
 	assert.Zero(t, m.model.Providers[0].Price, "local models are free to serve")
+	assert.Equal(t, proxy.LocalTurnRoute{
+		Provider:  "local_qwen3.8-flash-next",
+		Model:     "qwen3.8-flash-next",
+		TurnTypes: proxy.DefaultLocalTurnTypes,
+	}, cfg.turnRoute)
+}
+
+func TestParseLocalModels_TurnRouting(t *testing.T) {
+	env := envFrom(map[string]string{"KEY_A": "a"})
+	entries := localEntryYAML("m1", "http://localhost:1/v1", "KEY_A")
+	parse := func(t *testing.T, routing string) (localModelsConfig, error) {
+		t.Helper()
+		return parseLocalModels(strings.NewReader("models:\n"+entries+routing), env)
+	}
+
+	t.Run("omitted block routes nothing", func(t *testing.T) {
+		cfg, err := parse(t, "")
+		require.NoError(t, err)
+		assert.Equal(t, proxy.LocalTurnRoute{}, cfg.turnRoute)
+	})
+	t.Run("omitted turn types select the defaults", func(t *testing.T) {
+		cfg, err := parse(t, "turn_routing:\n  model: m1\n")
+		require.NoError(t, err)
+		assert.Equal(t, providers.LocalProviderName("m1"), cfg.turnRoute.Provider)
+		assert.Equal(t, "m1", cfg.turnRoute.Model)
+		assert.Equal(t, []turntype.TurnType{turntype.SubAgentDispatch, turntype.TitleGen, turntype.Probe, turntype.Recap}, cfg.turnRoute.TurnTypes)
+	})
+	t.Run("explicit turn types replace the defaults", func(t *testing.T) {
+		cfg, err := parse(t, "turn_routing:\n  model: m1\n  turn_types: [title_gen]\n")
+		require.NoError(t, err)
+		assert.Equal(t, []turntype.TurnType{turntype.TitleGen}, cfg.turnRoute.TurnTypes)
+	})
+	rejected := []struct {
+		name    string
+		routing string
+		want    error
+	}{
+		{"unconfigured model", "turn_routing:\n  model: claude-sonnet-4-6\n", errLocalTurnRoutingModel},
+		{"missing model", "turn_routing:\n  turn_types: [title_gen]\n", errLocalTurnRoutingModel},
+		{"classifier", "turn_routing:\n  model: m1\n  turn_types: [title_gen, classifier]\n", errLocalTurnRoutingType},
+		{"compaction", "turn_routing:\n  model: m1\n  turn_types: [compaction]\n", errLocalTurnRoutingType},
+		{"main loop", "turn_routing:\n  model: m1\n  turn_types: [main_loop]\n", errLocalTurnRoutingType},
+		{"tool result", "turn_routing:\n  model: m1\n  turn_types: [tool_result]\n", errLocalTurnRoutingType},
+		{"unknown type", "turn_routing:\n  model: m1\n  turn_types: [explore]\n", errLocalTurnRoutingType},
+	}
+	for _, tc := range rejected {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			_, err := parse(t, tc.routing)
+			require.ErrorIs(t, err, tc.want)
+		})
+	}
 }
 
 func TestParseLocalModels_RejectsInvalidEntries(t *testing.T) {
@@ -96,11 +148,11 @@ func TestParseLocalModels_NonDefaultCapabilities(t *testing.T) {
 		"    image_input: true\n" +
 		"    reasoning_format: think_tags\n"
 
-	models, err := parseLocalModels(strings.NewReader(doc), envFrom(map[string]string{"KEY_A": "a"}))
+	cfg, err := parseLocalModels(strings.NewReader(doc), envFrom(map[string]string{"KEY_A": "a"}))
 
 	require.NoError(t, err)
-	require.Len(t, models, 1)
-	m := models[0].model
+	require.Len(t, cfg.models, 1)
+	m := cfg.models[0].model
 	assert.Equal(t, catalog.ToolUseLow, m.ToolUseQuality)
 	assert.Equal(t, catalog.AgenticLow, m.AgenticUse)
 	assert.NotEqual(t, catalog.ImageInputUnsupported, m.ImageInput)
@@ -116,15 +168,17 @@ func TestParseLocalModels_RejectsUnknownField(t *testing.T) {
 
 func TestLoadLocalModels_RejectsCatalogIDCollision(t *testing.T) {
 	path := writeLocalModelsFile(t, localEntryYAML("claude-sonnet-4-6", "http://localhost:1/v1", "KEY_A"))
-	err := loadLocalModels(envFrom(map[string]string{localModelsFileEnv: path, "KEY_A": "a"}),
+	_, err := loadLocalModels(envFrom(map[string]string{localModelsFileEnv: path, "KEY_A": "a"}),
 		map[string]providers.Client{}, map[string]struct{}{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.ErrorIs(t, err, catalog.ErrDuplicateModelID)
 }
 
 func TestLoadLocalModels_UnsetFileRegistersNothing(t *testing.T) {
 	providerMap := map[string]providers.Client{}
-	require.NoError(t, loadLocalModels(envFrom(nil), providerMap, map[string]struct{}{}, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	route, err := loadLocalModels(envFrom(nil), providerMap, map[string]struct{}{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
 	assert.Empty(t, providerMap)
+	assert.Empty(t, route.Model)
 }
 
 func writeLocalModelsFile(t *testing.T, entries string) string {
@@ -209,9 +263,10 @@ func localModelService(t *testing.T, id string, upstream *localUpstream) (*proxy
 	anthropicClient := &recordingAnthropic{}
 	providerMap := map[string]providers.Client{providers.ProviderAnthropic: anthropicClient}
 	keyed := map[string]struct{}{}
-	require.NoError(t, loadLocalModels(
+	_, err := loadLocalModels(
 		envFrom(map[string]string{localModelsFileEnv: path, "LOCAL_TEST_KEY": "local-secret"}),
-		providerMap, keyed, slog.New(slog.NewTextHandler(io.Discard, nil))))
+		providerMap, keyed, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
 	t.Cleanup(func() {
 		catalog.UnregisterLocalModels(id)
 		provider := providers.LocalProviderName(id)
@@ -296,4 +351,43 @@ func TestLocalModel_UnkeyedOpenAICallerKeyNeverReachesLocalUpstream(t *testing.T
 	defer upstream.mu.Unlock()
 	require.Len(t, upstream.authz, 1, "the forced local model must be served by its own upstream")
 	assert.Equal(t, "Bearer local-secret", upstream.authz[0])
+}
+
+// The composition-root wiring serves a title-generation turn from the local
+// upstream while a main-loop turn stays on normal routing.
+func TestLocalModel_TurnRoutingDispatchesTitleGenLocally(t *testing.T) {
+	const id = "test-local-turns"
+	upstream := newLocalUpstream(t)
+	path := writeLocalModelsFile(t, localEntryYAML(id, upstream.baseURL, "LOCAL_TEST_KEY")+
+		"turn_routing:\n  model: "+id+"\n")
+	anthropicClient := &recordingAnthropic{}
+	providerMap := map[string]providers.Client{providers.ProviderAnthropic: anthropicClient}
+	keyed := map[string]struct{}{providers.ProviderAnthropic: {}}
+	route, err := loadLocalModels(
+		envFrom(map[string]string{localModelsFileEnv: path, "LOCAL_TEST_KEY": "local-secret"}),
+		providerMap, keyed, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		catalog.UnregisterLocalModels(id)
+		provider := providers.LocalProviderName(id)
+		delete(providers.ProviderFamilies, provider)
+		delete(providers.APIKeyEnvVars, provider)
+	})
+	svc := proxy.NewService(&unusedRouter{}, providerMap, nil, false, nil, nil, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+		WithDeploymentKeyedProviders(keyed).
+		WithLocalTurnRoute(route)
+
+	titleGen := `{"model":"claude-haiku-4-5","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hello"}],` +
+		`"output_config":{"format":{"type":"json_schema","schema":{"properties":{"title":{"type":"string"}}}}}}`
+	require.NoError(t, svc.ProxyMessages(routerKeyedCtx(), []byte(titleGen), httptest.NewRecorder(), claudeCodeRequest("")))
+	require.NoError(t, svc.ProxyMessages(routerKeyedCtx(), []byte(localTestBody), httptest.NewRecorder(), claudeCodeRequest("")))
+
+	upstream.mu.Lock()
+	defer upstream.mu.Unlock()
+	require.Len(t, upstream.bodies, 1, "only the title-generation turn reaches the local upstream")
+	assert.Equal(t, "upstream-"+id, gjson.GetBytes(upstream.bodies[0], "model").String())
+	assert.Equal(t, "Bearer local-secret", upstream.authz[0])
+	anthropicClient.mu.Lock()
+	defer anthropicClient.mu.Unlock()
+	assert.Len(t, anthropicClient.creds, 1, "the main-loop turn stays on normal routing")
 }
