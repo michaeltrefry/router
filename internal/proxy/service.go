@@ -3864,6 +3864,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 		}
 		routeRes.Decision = decision
 		routeRes.Fresh = decision
+		s.substituteMidTier(ctx, &routeRes, req)
 	}
 
 	routeRes.SuggestionMode = r.Header.Get("x-weave-suggestion-mode") == "true"
@@ -5517,6 +5518,11 @@ func (s *Service) recordTurnUsage(ctx context.Context, res turnLoopResult, serve
 	if s.pinStore == nil || res.HardPinned || res.CallerModelPassthrough {
 		return
 	}
+	// A substituted turn is recorded under the router's own pick: a stay priced
+	// at the free local model would hold every later turn on the substitute.
+	if res.SubstitutedFrom.Model != "" {
+		servedProvider, servedModel = res.SubstitutedFrom.Provider, res.SubstitutedFrom.ServedIdentity()
+	}
 	if isHMMTurn(res) {
 		s.recordHMMTurnHistory(res, servedProvider, servedModel, in, out, cacheCreation, cacheRead, outputLimitReached)
 		return
@@ -5622,6 +5628,9 @@ func hmmHistoryStoredReason(res turnLoopResult) string {
 }
 
 func (s *Service) policyOutcomeRoute(res turnLoopResult, decision router.Decision) (router.Decision, *router.RoutingMetadata, policy.OutcomeReporter, bool) {
+	if res.SubstitutedFrom.Model != "" {
+		decision = res.SubstitutedFrom
+	}
 	for _, routeDecision := range []router.Decision{decision, res.Fresh} {
 		routeMetadata := routeDecision.Metadata
 		if routeMetadata == nil || routeMetadata.Strategy == "" || routeMetadata.RouteID == "" {
@@ -5673,8 +5682,14 @@ func (s *Service) reportPolicyOutcome(ctx context.Context, res turnLoopResult, d
 	trainingAllowed := policyTrainingAllowedForRequest(ctx)
 	clientIdentity := ClientIdentityFrom(ctx)
 	selectedServedModelMatch := routeDecision.Model == decision.Model
+	// The policy did not choose the local substitute, so its outcome must not
+	// train the policy's arm.
+	substituted := res.SubstitutedFrom.Model != ""
+	if substituted {
+		trainingAllowed = false
+	}
 	authoritativeModelMismatch := routeMetadata.AuthoritativePerTurnSelection &&
-		!selectedServedModelMatch
+		!selectedServedModelMatch && !substituted
 	if authoritativeModelMismatch {
 		trainingAllowed = false
 		log := observability.FromContext(ctx)
@@ -5756,6 +5771,8 @@ func (s *Service) reportPolicyOutcome(ctx context.Context, res turnLoopResult, d
 		"sticky_hit":                       res.StickyHit,
 	}
 	switch {
+	case substituted:
+		payload["training_exclusion_reason"] = reasonMidTierSubstitute
 	case authoritativeModelMismatch:
 		payload["training_exclusion_reason"] = "selected_served_model_mismatch"
 	case effortMismatch:
