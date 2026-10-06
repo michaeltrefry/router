@@ -203,13 +203,13 @@ project_output="$(printf '{"hook_event_name":"SessionStart","source":"startup"}\
 
 no_node_path="$work/no-node-home"
 mkdir -p "$no_node_path"
-if PATH="/opt/homebrew/bin:/usr/bin:/bin" /bin/bash -c 'command -v node >/dev/null 2>&1'; then
-  echo "test setup unexpectedly found Node.js on the no-node PATH" >&2
-  exit 1
-fi
+unavailable_node_bin="$work/unavailable-node-bin"
+mkdir -p "$unavailable_node_bin"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 127' >"$unavailable_node_bin/node"
+chmod +x "$unavailable_node_bin/node"
 HOME="$no_node_path" XDG_CACHE_HOME="$no_node_path/.cache" \
-  PATH="$fake_bin:/opt/homebrew/bin:/usr/bin:/bin" NO_COLOR=1 WEAVE_ROUTER_KEY="rk_no_node" \
-  /bin/bash "$installer" --claude --quiet --non-interactive --scope user \
+  PATH="$unavailable_node_bin:$fake_bin:$PATH" NO_COLOR=1 WEAVE_ROUTER_KEY="rk_no_node" \
+  bash "$installer" --claude --quiet --non-interactive --scope user \
     --base-url https://router.workweave.ai </dev/null >/dev/null 2>&1
 test ! -e "$no_node_path/.claude/weave-router-policy.cjs"
 jq -e '(.hooks == null) or (.hooks | length == 0)' "$no_node_path/.claude/settings.json" >/dev/null

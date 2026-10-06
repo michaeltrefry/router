@@ -6214,7 +6214,8 @@ write_claude_settings() {
   fi
   custom_headers="$custom_headers"$'\n'"X-App: claude-code"
   local policy_hook_file="$settings_dir/weave-router-policy.cjs"
-  local policy_node="$(command -v node || true)"
+  local policy_node
+  policy_node="$(command -v node || true)"
   local policy_hook_enabled="true"
   local policy_hook_file_owned="false"
   local policy_hook_command=""
@@ -6239,6 +6240,8 @@ write_claude_settings() {
   fi
   if [ "$policy_hook_enabled" = "true" ]; then
     if [ "$scope" = "project" ] && [ -z "$install_dir" ]; then
+      # Claude expands the project path when executing the registered command.
+      # shellcheck disable=SC2016
       policy_hook_command='node "${CLAUDE_PROJECT_DIR}/.claude/weave-router-policy.cjs"'
     else
       printf -v policy_hook_command '%q %q' "$policy_node" "$policy_hook_file"

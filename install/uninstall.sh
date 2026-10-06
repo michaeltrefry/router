@@ -1153,7 +1153,10 @@ printf -v policy_hook_file_command '%q' "$policy_hook_file"
 refuse_if_symlink "$policy_hook_file"
 policy_hook_legacy_file="${policy_hook_file%.cjs}.js"
 printf -v policy_hook_legacy_file_command '%q' "$policy_hook_legacy_file"
+# Claude expands these paths at execution time.
+# shellcheck disable=SC2016
 policy_hook_project_command='node "${CLAUDE_PROJECT_DIR}/.claude/weave-router-policy.cjs"'
+# shellcheck disable=SC2016
 policy_hook_legacy_project_command='node "${CLAUDE_PROJECT_DIR}/.claude/weave-router-policy.js"'
 context_state_file="$(dirname "$settings_file")/.weave-context-window.json"
 if [ -f "$context_state_file" ]; then
