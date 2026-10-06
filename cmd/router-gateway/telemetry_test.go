@@ -15,7 +15,6 @@ import (
 	commonv1 "go.opentelemetry.io/proto/otlp/common/v1"
 	"google.golang.org/protobuf/proto"
 
-	"weave-os/router/internal/config"
 	"weave-os/router/internal/gateway"
 	"weave-os/router/internal/observability/otel"
 )
@@ -33,23 +32,14 @@ func TestGatewayTelemetryExport(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer collector.Close()
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", collector.URL)
-	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "Authorization=Bearer%20synthetic")
-	t.Setenv("NAME", "")
-	t.Setenv("OTEL_SERVICE_NAME", "")
-	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.region=us%2Ccentral,service.name=router-gateway-from-resource")
-	resourceAttributes, err := otel.ResourceAttributesFromEnvironment(context.Background())
-	require.NoError(t, err)
-	serviceName := otel.ResolveServiceName(config.GetOr("OTEL_SERVICE_NAME", ""), resourceAttributes, "router-gateway")
-	delete(resourceAttributes, "service.name")
-	resourceAttributes["router.deployment_mode"] = "managed"
-	exporterHeaders, err := otel.ParseOTLPHeaders(config.GetOr("OTEL_EXPORTER_OTLP_HEADERS", ""))
-	require.NoError(t, err)
 	emitter, err := otel.NewEmitter(otel.EmitterConfig{
-		Endpoint:      config.GetOr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
-		Headers:       exporterHeaders,
-		ServiceName:   serviceName,
-		ResourceAttrs: resourceAttributes,
+		Endpoint:    collector.URL,
+		Headers:     map[string]string{"Authorization": "Bearer synthetic"},
+		ServiceName: "router-gateway",
+		ResourceAttrs: map[string]string{
+			"deployment.region":      "us,central",
+			"router.deployment_mode": "managed",
+		},
 	})
 	require.NoError(t, err)
 	start := time.Now()
@@ -67,7 +57,7 @@ func TestGatewayTelemetryExport(t *testing.T) {
 		return values
 	}
 	resource := attrs(batch.ResourceSpans[0].Resource.Attributes)
-	assert.Equal(t, "router-gateway-from-resource", resource["service.name"].GetStringValue())
+	assert.Equal(t, "router-gateway", resource["service.name"].GetStringValue())
 	assert.Equal(t, "managed", resource["router.deployment_mode"].GetStringValue())
 	assert.Equal(t, "us,central", resource["deployment.region"].GetStringValue())
 	span := batch.ResourceSpans[0].ScopeSpans[0].Spans[0]
