@@ -33,7 +33,7 @@ type betaCaptureProvider struct {
 }
 
 // Synthetic provider never bills subscription extra usage.
-func (*betaCaptureProvider) IncludedOnlySubscriptions() bool { return true }
+func (*betaCaptureProvider) SupportsSubscriptions() bool { return true }
 
 func (p *betaCaptureProvider) Proxy(
 	_ context.Context,
