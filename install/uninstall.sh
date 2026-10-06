@@ -1148,13 +1148,13 @@ fi
 
 statusline_file_owned="false"
 statusline_setting_owned="false"
-policy_hook_file="$(dirname "$settings_file")/weave-router-policy.js"
+policy_hook_file="$(dirname "$settings_file")/weave-router-policy.cjs"
 printf -v policy_hook_file_command '%q' "$policy_hook_file"
-policy_hook_owned="false"
 refuse_if_symlink "$policy_hook_file"
-if [ -f "$policy_hook_file" ] && grep -Fq 'weave-router managed organization policy hook' "$policy_hook_file"; then
-  policy_hook_owned="true"
-fi
+policy_hook_legacy_file="${policy_hook_file%.cjs}.js"
+printf -v policy_hook_legacy_file_command '%q' "$policy_hook_legacy_file"
+policy_hook_project_command='node "${CLAUDE_PROJECT_DIR}/.claude/weave-router-policy.cjs"'
+policy_hook_legacy_project_command='node "${CLAUDE_PROJECT_DIR}/.claude/weave-router-policy.js"'
 context_state_file="$(dirname "$settings_file")/.weave-context-window.json"
 if [ -f "$context_state_file" ]; then
   refuse_if_symlink "$context_state_file"
@@ -1187,12 +1187,19 @@ if [ -f "$settings_file" ]; then
   # delete `statusLine` / `apiKeyHelper` when they point at scripts this
   # installer used in older versions. Otherwise an unrelated user-configured
   # statusLine or apiKeyHelper would be silently clobbered.
-  cleaned="$(jq --arg statusline_setting_owned "$statusline_setting_owned" --arg policy_hook_owned "$policy_hook_owned" --arg policy_hook_file_command "$policy_hook_file_command" '
-    def strip_policy_hook($file_command):
-      map(if (.hooks | type) == "array" then .hooks |= map(select((.command // "") != $file_command and ((.command // "") | endswith(" " + $file_command) | not))) else . end)
+  cleaned="$(jq --arg statusline_setting_owned "$statusline_setting_owned" --arg policy_hook_file_command "$policy_hook_file_command" --arg policy_hook_legacy_file_command "$policy_hook_legacy_file_command" --arg policy_hook_project_command "$policy_hook_project_command" --arg policy_hook_legacy_project_command "$policy_hook_legacy_project_command" '
+    def strip_policy_hook:
+      map(if (.hooks | type) == "array" then .hooks |= map(select(
+        (.command // "") != $policy_hook_file_command
+        and (.command // "") != $policy_hook_legacy_file_command
+        and (((.command // "") | endswith(" " + $policy_hook_file_command)) | not)
+        and (((.command // "") | endswith(" " + $policy_hook_legacy_file_command)) | not)
+        and (.command // "") != $policy_hook_project_command
+        and (.command // "") != $policy_hook_legacy_project_command
+      )) else . end)
       | map(select((.hooks | type) != "array" or (.hooks | length) > 0));
     if .env then
-      .env |= (del(.ANTHROPIC_BASE_URL, .ANTHROPIC_AUTH_TOKEN, .ANTHROPIC_CUSTOM_HEADERS, .ENABLE_TOOL_SEARCH, .WEAVE_POLICY_API_URL))
+      .env |= (del(.ANTHROPIC_BASE_URL, .ANTHROPIC_AUTH_TOKEN, .ANTHROPIC_CUSTOM_HEADERS, .ENABLE_TOOL_SEARCH))
       | (if (.env | length) == 0 then del(.env) else . end)
     else . end
     | (if $statusline_setting_owned == "true" then del(.statusLine) else . end)
@@ -1203,10 +1210,10 @@ if [ -f "$settings_file" ]; then
               or .attribution.commit == "Co-Authored-By: Weave Router <noreply@workweave.ai>")
               and .attribution.pr == "🤖 Generated with [Weave Router](https://router.workweave.ai)")
          then del(.attribution) else . end)
-    | if $policy_hook_owned == "true" then
-        .hooks = (.hooks // {})
-        | .hooks.SessionStart = ((.hooks.SessionStart // []) | strip_policy_hook($policy_hook_file_command))
-        | .hooks.SubagentStart = ((.hooks.SubagentStart // []) | strip_policy_hook($policy_hook_file_command))
+    | if (.hooks | type) == "object" then
+        (if (.hooks.SessionStart | type) == "array" then .hooks.SessionStart |= strip_policy_hook | if (.hooks.SessionStart | length) == 0 then del(.hooks.SessionStart) else . end else . end)
+        | (if (.hooks.SubagentStart | type) == "array" then .hooks.SubagentStart |= strip_policy_hook | if (.hooks.SubagentStart | length) == 0 then del(.hooks.SubagentStart) else . end else . end)
+        | if (.hooks | length) == 0 then del(.hooks) else . end
       else . end
   ' "$settings_file")"
   printf '%s\n' "$cleaned" >"$settings_file"
@@ -1222,7 +1229,7 @@ if [ -n "$local_settings_file" ] && [ -f "$local_settings_file" ]; then
   # router key; scrub both so uninstall fully reverts the local config.
   cleaned="$(jq '
     if .env then
-      .env |= (del(.ANTHROPIC_BASE_URL, .ANTHROPIC_AUTH_TOKEN, .ANTHROPIC_CUSTOM_HEADERS, .ENABLE_TOOL_SEARCH, .WEAVE_ROUTER_BASE_URL, .WEAVE_POLICY_API_URL))
+      .env |= (del(.ANTHROPIC_BASE_URL, .ANTHROPIC_AUTH_TOKEN, .ANTHROPIC_CUSTOM_HEADERS, .ENABLE_TOOL_SEARCH, .WEAVE_ROUTER_BASE_URL))
       | (if (.env | length) == 0 then del(.env) else . end)
     else . end
     | del(.apiKeyHelper)
@@ -1231,7 +1238,7 @@ if [ -n "$local_settings_file" ] && [ -f "$local_settings_file" ]; then
   ok "Cleaned $local_settings_file"
 fi
 
-if [ "$policy_hook_owned" = "true" ]; then
+if [ -f "$policy_hook_file" ] && grep -Fq 'weave-router managed organization policy hook' "$policy_hook_file"; then
   rm -f "$policy_hook_file"
   ok "Removed Weave Router policy hook"
 fi
