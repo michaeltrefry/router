@@ -768,10 +768,14 @@ func (s *Service) runTurnLoop(
 	if installationID != uuid.Nil {
 		req.InstallationID = installationID.String()
 	}
+	turnType := turntype.Detect(env, feats, subAgentHint, openCodeCaller(ClientIdentityFrom(ctx)))
+	if subAgentHint == "" && s.codexLocalSubAgentTurn(ctx, reqHeaders, turnType, req) {
+		turnType, subAgentHint = turntype.SubAgentDispatch, codexSpawnedSubAgent
+	}
 	res = turnLoopResult{
 		InstallationID:      installationID,
 		Strategy:            router.StrategyFromContext(ctx),
-		TurnType:            turntype.Detect(env, feats, subAgentHint, openCodeCaller(ClientIdentityFrom(ctx))),
+		TurnType:            turnType,
 		PinTier:             "miss",
 		RequestedTier:       catalog.TierFor(feats.Model),
 		StripThinkingBlocks: betaArtifactHistoryFromContext(ctx),

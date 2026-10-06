@@ -1,6 +1,9 @@
 package proxy
 
 import (
+	"context"
+	"net/http"
+
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
 	"weave-os/router/internal/router/sessionpin"
@@ -88,4 +91,31 @@ func localModelServes(provider, model string, req router.Request) bool {
 		return false
 	}
 	return true
+}
+
+// codexSubAgentHeader carries the kind of Codex thread a request comes from;
+// codexSpawnedSubAgent marks a sub-agent the model spawned.
+const (
+	codexSubAgentHeader  = "x-openai-subagent"
+	codexSpawnedSubAgent = "collab_spawn"
+)
+
+// codexLocalSubAgentTurn reports whether a Codex spawned sub-agent turn on
+// Responses ingress that Detect classified as normal work is served by the
+// local turn route as sub-agent dispatch. Only a turn the local model accepts
+// is reclassified; any other turn keeps Detect's result, so an ineligible
+// request never gains the sub-agent hard pin. Codex's review, compaction and
+// approval threads carry other header values and stay on normal routing.
+func (s *Service) codexLocalSubAgentTurn(ctx context.Context, h http.Header, detected turntype.TurnType, req router.Request) bool {
+	if detected != turntype.MainLoop && detected != turntype.ToolResult {
+		return false
+	}
+	if h.Get(codexSubAgentHeader) != codexSpawnedSubAgent {
+		return false
+	}
+	if responses, _ := ctx.Value(responsesSurfaceContextKey{}).(bool); !responses || ClientIdentityFrom(ctx).ClientApp != ClientAppCodex {
+		return false
+	}
+	_, _, ok := s.localTurnTarget(turntype.SubAgentDispatch, req)
+	return ok
 }
