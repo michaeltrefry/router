@@ -148,6 +148,10 @@ type Service struct {
 	localTurnProvider string
 	localTurnModel    string
 	localTurnTypes    map[turntype.TurnType]struct{}
+	// midTier{Provider,Model} replace automatic mid-tier selections; see
+	// WithMidTierSubstitute.
+	midTierProvider string
+	midTierModel    string
 	// telemetry is an optional repository for persisting per-request telemetry.
 	telemetry TelemetryRepository
 	// turnClock times user prompts against the previous response; nil leaves
@@ -831,17 +835,18 @@ func sanitizeSidecarDisplayMarker(raw string) string {
 // the marker wording; tests assert the mapping against these constants rather
 // than re-spelling the literals.
 const (
-	markerReasonShadowEscalation = "escalation marked — shadow mode; no action taken"
-	markerReasonUserForced       = "pinned by force-model"
-	markerReasonLoopEscalated    = "escalated due to loop"
-	markerReasonSwitched         = "switched for positive EV after cache eviction"
-	markerReasonStayed           = "stayed on your last pick"
-	markerReasonTierUpgrade      = "upgraded to a stronger tier"
-	markerReasonBestPick         = "best pick for this turn"
-	markerReasonBaseline         = "fell back to baseline after provider outage"
-	markerReasonSibling          = "switched after the picked model was overloaded"
-	markerReasonCyberRefusal     = "switched after the picked model declined the request"
-	markerReasonForcedPinDropped = "your force-model pin could not be served this turn"
+	markerReasonShadowEscalation  = "escalation marked — shadow mode; no action taken"
+	markerReasonUserForced        = "pinned by force-model"
+	markerReasonLoopEscalated     = "escalated due to loop"
+	markerReasonSwitched          = "switched for positive EV after cache eviction"
+	markerReasonStayed            = "stayed on your last pick"
+	markerReasonTierUpgrade       = "upgraded to a stronger tier"
+	markerReasonBestPick          = "best pick for this turn"
+	markerReasonBaseline          = "fell back to baseline after provider outage"
+	markerReasonSibling           = "switched after the picked model was overloaded"
+	markerReasonCyberRefusal      = "switched after the picked model declined the request"
+	markerReasonForcedPinDropped  = "your force-model pin could not be served this turn"
+	markerReasonMidTierSubstitute = "local substitute for"
 )
 
 // baselineRoutingMarkerFor renders the routing badge for an in-turn baseline
@@ -881,6 +886,9 @@ func cyberRefusalRoutingMarkerFor(res turnLoopResult, fallbackModel string) stri
 // routingReasonShort returns a short user-facing reason for the routing
 // decision, or empty when the underlying code is internal recovery noise.
 func routingReasonShort(res turnLoopResult) string {
+	if res.SubstitutedFrom.Model != "" {
+		return markerReasonMidTierSubstitute + " " + res.SubstitutedFrom.Model
+	}
 	if res.PlannerDecision.Reason != "" {
 		return humanReasonFromPlanner(res.PlannerDecision.Reason)
 	}
@@ -5313,7 +5321,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 	if preludeBuf.Committed() {
 		streamCut.noteCut(proxyErr)
 	}
-	log.Info("ProxyMessages complete", append(append([]any{"requested_model", feats.Model, "baseline_model", s.baselineFor(feats.Model), "decision_model", decision.Model, "decision_provider", decision.Provider, "primary_provider", primaryProvider, "primary_model", primaryModel, "fallback_attempts", winnerIdx, "failover_used", finalProvider != primaryProvider || subscriptionFailoverUsed || siblingFailoverUsed, "subscription_failover", subscriptionFailoverUsed, "decision_reason", decision.Reason, "requested_tier", routeRes.RequestedTier.String(), "decision_tier", catalog.TierFor(decision.Model).String(), "embedded_tokens", len(promptText) / 4, "total_input_tokens", feats.Tokens, "has_tools", feats.HasTools, "message_count", feats.MessageCount, "last_kind", feats.LastKind, "last_preview", s.zdrLogField(ctx, feats.LastPreview), "embed_input", embedInput, "cross_format", crossFormat, "sticky_hit", stickyHit, "route_ms", routeMs, "proxy_ms", proxyMs, "proxy_err", proxyErr, "upstream_err_body", s.zdrLogField(ctx, providers.UpstreamErrorBodyMessage(proxyErr)), "upstream_status", upstreamStatus(proxyErr), "upstream_finish_reason", respSummary.UpstreamFinishReason, "resp_stop_reason", respSummary.StopReason, "resp_refusal", refusalObs.refused, "resp_refusal_category", refusalObs.category, "stop_reason_promoted", respSummary.StopReasonPromoted, "tool_use_blocks", respSummary.ToolUseBlocks, "invalid_tool_args_blocks", respSummary.InvalidToolArgsBlocks, "last_tool_use_name", terminalToolUse.Name, "last_tool_use_input_bytes", terminalToolUse.InputBytes, "ended_on_tool_use", endedOnToolUse, "tool_error_counts", toolErrorTally, "text_only_turn_nudged", respSummary.TextOnlyTurnNudged, "stop_reason_demoted", respSummary.StopReasonDemoted, "suppressed_tool_calls", respSummary.SuppressedToolCalls, "tool_call_invalid_blocks", len(respSummary.ToolCallIssues), "cc_only_tools_stripped", reqStats.CCOnlyToolsStripped, "cc_task_reminders_stripped", reqStats.CCTaskRemindersStripped, "tool_references_unresolved", reqStats.ToolReferencesUnresolved, "gemini_reminder_injected", reqStats.GeminiReminderInjected, "gemini_validated_tool_mode", reqStats.GeminiValidatedToolMode, "resp_output_tokens", respSummary.OutputTokens, "resp_reasoning_tokens", extractor.ReasoningTokens(), "prelude_committed", preludeBuf.Committed(), "routing_marker", marker, "prior_served_model", routeRes.PriorServedModel, "hard_pinned", routeRes.HardPinned}, append(append(append(armStrikeLogFieldsWithPrimaryReason(armDemoted, armDemotionReasonValue, rescuedArmDemoted, rescuedArmDemotionReason), plannerLogFields(routeRes)...), streamCut.completionLogFields()...), rateLimit.completionLogFields()...)...), downgradeShadowLogFields(routeRes)...)...)
+	log.Info("ProxyMessages complete", append(append([]any{"requested_model", feats.Model, "baseline_model", s.baselineFor(feats.Model), "decision_model", decision.Model, "decision_provider", decision.Provider, "primary_provider", primaryProvider, "primary_model", primaryModel, "fallback_attempts", winnerIdx, "failover_used", finalProvider != primaryProvider || subscriptionFailoverUsed || siblingFailoverUsed, "subscription_failover", subscriptionFailoverUsed, "decision_reason", decision.Reason, "requested_tier", routeRes.RequestedTier.String(), "decision_tier", catalog.TierFor(decision.Model).String(), "embedded_tokens", len(promptText) / 4, "total_input_tokens", feats.Tokens, "has_tools", feats.HasTools, "message_count", feats.MessageCount, "last_kind", feats.LastKind, "last_preview", s.zdrLogField(ctx, feats.LastPreview), "embed_input", embedInput, "cross_format", crossFormat, "sticky_hit", stickyHit, "route_ms", routeMs, "proxy_ms", proxyMs, "proxy_err", proxyErr, "upstream_err_body", s.zdrLogField(ctx, providers.UpstreamErrorBodyMessage(proxyErr)), "upstream_status", upstreamStatus(proxyErr), "upstream_finish_reason", respSummary.UpstreamFinishReason, "resp_stop_reason", respSummary.StopReason, "resp_refusal", refusalObs.refused, "resp_refusal_category", refusalObs.category, "stop_reason_promoted", respSummary.StopReasonPromoted, "tool_use_blocks", respSummary.ToolUseBlocks, "invalid_tool_args_blocks", respSummary.InvalidToolArgsBlocks, "last_tool_use_name", terminalToolUse.Name, "last_tool_use_input_bytes", terminalToolUse.InputBytes, "ended_on_tool_use", endedOnToolUse, "tool_error_counts", toolErrorTally, "text_only_turn_nudged", respSummary.TextOnlyTurnNudged, "stop_reason_demoted", respSummary.StopReasonDemoted, "suppressed_tool_calls", respSummary.SuppressedToolCalls, "tool_call_invalid_blocks", len(respSummary.ToolCallIssues), "cc_only_tools_stripped", reqStats.CCOnlyToolsStripped, "cc_task_reminders_stripped", reqStats.CCTaskRemindersStripped, "tool_references_unresolved", reqStats.ToolReferencesUnresolved, "gemini_reminder_injected", reqStats.GeminiReminderInjected, "gemini_validated_tool_mode", reqStats.GeminiValidatedToolMode, "resp_output_tokens", respSummary.OutputTokens, "resp_reasoning_tokens", extractor.ReasoningTokens(), "prelude_committed", preludeBuf.Committed(), "routing_marker", marker, "prior_served_model", routeRes.PriorServedModel, "hard_pinned", routeRes.HardPinned, "substituted_from_model", routeRes.SubstitutedFrom.Model, "substituted_from_provider", routeRes.SubstitutedFrom.Provider}, append(append(append(armStrikeLogFieldsWithPrimaryReason(armDemoted, armDemotionReasonValue, rescuedArmDemoted, rescuedArmDemotionReason), plannerLogFields(routeRes)...), streamCut.completionLogFields()...), rateLimit.completionLogFields()...)...), downgradeShadowLogFields(routeRes)...)...)
 	policyRespBody, policyRespTrunc := capturedResponse(policyOutcomeCap)
 	var policyResp *policyOutcomeResponse
 	if policyOutcomeCap != nil {
@@ -8251,7 +8259,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 		)
 	}
 
-	log.Info("ProxyOpenAIChatCompletion complete", append(append([]any{"requested_model", feats.Model, "baseline_model", s.baselineFor(feats.Model), "decision_model", decision.Model, "decision_provider", decision.Provider, "primary_provider", primaryProvider, "primary_model", primaryModel, "fallback_attempts", winnerIdx, "failover_used", finalProvider != primaryProvider || codexFailoverUsed || claudeFailoverUsed || siblingFailoverUsed, "subscription_failover", codexFailoverUsed || claudeFailoverUsed, "decision_reason", decision.Reason, "requested_tier", routeRes.RequestedTier.String(), "decision_tier", catalog.TierFor(decision.Model).String(), "embedded_tokens", len(promptText) / 4, "total_input_tokens", feats.Tokens, "has_tools", feats.HasTools, "embed_input", embedInput, "cross_format", crossFormat, "sticky_hit", stickyHit, "pin_tier", pinTier, "turn_type", string(tt), "route_ms", routeMs, "proxy_ms", proxyMs, "proxy_err", proxyErr, "upstream_err_body", s.zdrLogField(ctx, providers.UpstreamErrorBodyMessage(proxyErr)), "upstream_status", upstreamStatus(proxyErr), "upstream_finish_reason", respSummary.UpstreamFinishReason, "resp_stop_reason", respSummary.StopReason, "stop_reason_promoted", respSummary.StopReasonPromoted, "tool_use_blocks", respSummary.ToolUseBlocks, "invalid_tool_args_blocks", respSummary.InvalidToolArgsBlocks, "tool_call_invalid_blocks", len(respSummary.ToolCallIssues), "routing_marker", marker, "prior_served_model", routeRes.PriorServedModel, "hard_pinned", routeRes.HardPinned}, append(append(armStrikeLogFieldsWithPrimaryReason(armDemotedOAI, armDemotionReasonOAI, rescuedArmDemotedOAI, rescuedArmDemotionReasonOAI), plannerLogFields(routeRes)...), rateLimit.completionLogFields()...)...), downgradeShadowLogFields(routeRes)...)...)
+	log.Info("ProxyOpenAIChatCompletion complete", append(append([]any{"requested_model", feats.Model, "baseline_model", s.baselineFor(feats.Model), "decision_model", decision.Model, "decision_provider", decision.Provider, "primary_provider", primaryProvider, "primary_model", primaryModel, "fallback_attempts", winnerIdx, "failover_used", finalProvider != primaryProvider || codexFailoverUsed || claudeFailoverUsed || siblingFailoverUsed, "subscription_failover", codexFailoverUsed || claudeFailoverUsed, "decision_reason", decision.Reason, "requested_tier", routeRes.RequestedTier.String(), "decision_tier", catalog.TierFor(decision.Model).String(), "embedded_tokens", len(promptText) / 4, "total_input_tokens", feats.Tokens, "has_tools", feats.HasTools, "embed_input", embedInput, "cross_format", crossFormat, "sticky_hit", stickyHit, "pin_tier", pinTier, "turn_type", string(tt), "route_ms", routeMs, "proxy_ms", proxyMs, "proxy_err", proxyErr, "upstream_err_body", s.zdrLogField(ctx, providers.UpstreamErrorBodyMessage(proxyErr)), "upstream_status", upstreamStatus(proxyErr), "upstream_finish_reason", respSummary.UpstreamFinishReason, "resp_stop_reason", respSummary.StopReason, "stop_reason_promoted", respSummary.StopReasonPromoted, "tool_use_blocks", respSummary.ToolUseBlocks, "invalid_tool_args_blocks", respSummary.InvalidToolArgsBlocks, "tool_call_invalid_blocks", len(respSummary.ToolCallIssues), "routing_marker", marker, "prior_served_model", routeRes.PriorServedModel, "hard_pinned", routeRes.HardPinned, "substituted_from_model", routeRes.SubstitutedFrom.Model, "substituted_from_provider", routeRes.SubstitutedFrom.Provider}, append(append(armStrikeLogFieldsWithPrimaryReason(armDemotedOAI, armDemotionReasonOAI, rescuedArmDemotedOAI, rescuedArmDemotionReasonOAI), plannerLogFields(routeRes)...), rateLimit.completionLogFields()...)...), downgradeShadowLogFields(routeRes)...)...)
 	s.reportPolicyOutcome(ctx, routeRes, decision, effortServed, finalProvider, fastServed, feats.Tokens, in, out, cacheCreation, cacheRead, routeMs, proxyMs, proxyErr, nil)
 
 	// Subscription-only mode disables paid failover by pinning dispatch to the

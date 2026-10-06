@@ -536,3 +536,13 @@ func TestRoutingMarkerFor_ShadowEscalationShowsWithoutModelSwitchAndStripsOnEcho
 	turn.SuggestionMode = true
 	require.Empty(t, routingMarkerFor(turn))
 }
+
+func TestRoutingMarkerNamesMidTierSubstituteOriginal(t *testing.T) {
+	turn := turnLoopResult{
+		Decision:        router.Decision{Provider: "local_qwen", Model: "qwen", Reason: reasonMidTierSubstitute},
+		SubstitutedFrom: router.Decision{Model: "claude-sonnet-5"},
+		PlannerDecision: planner.Decision{Reason: planner.ReasonNoPin},
+	}
+
+	assert.Equal(t, "✦ **Weave Router** → qwen · "+markerReasonMidTierSubstitute+" claude-sonnet-5\n\n", routingMarkerFor(turn))
+}

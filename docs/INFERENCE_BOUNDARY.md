@@ -34,6 +34,8 @@ Router PRs [#884](https://github.com/weave-os/router/pull/884) and [#792](https:
 
 The local turn route (`proxy.Service.WithLocalTurnRoute`, configured by `turn_routing` in the local-models file) is a deployment target, not a new purpose: title, probe and sub-agent turns keep their utility purpose, and a recap keeps its ingress surface purpose; each is authorized with the `deployment` override source both policies already declare.
 
+The mid-tier substitute (`proxy.Service.WithMidTierSubstitute`, configured by `mid_tier_substitute` in the local-models file) is likewise a deployment target, not a new purpose: a main-loop or tool-result turn keeps its ingress surface purpose, and the substituted decision is authorized with the `deployment` override source (`turnLoopResult.Origin`) instead of the session or router source the replaced selection carried. It retargets a copy of the routed compatibility decision in place (as the baseline failover does) rather than constructing a new one, so it adds no `target_construction` exception; the plan resolver remains the only authorization for the local target.
+
 The generated static registry in [`POLICY_INFERENCE.md`](POLICY_INFERENCE.md) is the authoritative review projection for policy IDs, rationale, constraints, budgets, fallback, owner, and migration status.
 
 ## Direct Provider Calls

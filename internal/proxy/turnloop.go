@@ -250,6 +250,9 @@ type turnLoopResult struct {
 	StickyRole string
 	// Fresh is the scorer's recommendation for this turn when the scorer ran.
 	Fresh router.Decision
+	// SubstitutedFrom is the router's own pick when the mid-tier substitute
+	// replaced it in Decision; zero otherwise.
+	SubstitutedFrom router.Decision
 	// PlannerDecision holds the planner's verdict and EV math when the planner ran.
 	PlannerDecision planner.Decision
 	// PinModel is stamped independently of PlannerDecision so log lines can
@@ -711,6 +714,7 @@ func (s *Service) runTurnLoop(
 		if routeErr == nil {
 			routeErr = policyPinServed(ctx, res)
 			if routeErr == nil {
+				s.substituteMidTier(ctx, &res, req)
 				logAuthoritativeUpgrade(ctx, res)
 			}
 		}

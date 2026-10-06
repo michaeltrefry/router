@@ -29,3 +29,12 @@ turn_routing:
   # Only these four are accepted; main-loop, tool-result, classifier and
   # compaction turns are never served by this route.
   turn_types: [sub_agent_dispatch, title_gen, probe, recap]
+
+# Optional: when the router's own selection for a turn is a mid-tier model
+# (e.g. claude-sonnet-5), serve it on this local model instead. The model must
+# be tier: mid. Omit the block, or set enabled: false, to turn it off. A forced
+# model is never substituted, and a turn the local model cannot carry keeps the
+# router's selection.
+mid_tier_substitute:
+  model: qwen3.8-flash-next
+  enabled: true
