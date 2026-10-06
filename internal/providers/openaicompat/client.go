@@ -111,6 +111,11 @@ type Client struct {
 	// versionMemo resolves gateway base URLs that mount chat/completions one
 	// "/v1" below where the stored base URL points.
 	versionMemo providers.GatewayVersionMemo
+	// responseHeaderTimeout replaces the default time-to-first-byte guard
+	// when > 0; privateBaseURL exempts the base URL's origin from restricted
+	// egress. Both rebuild http after options apply.
+	responseHeaderTimeout time.Duration
+	privateBaseURL        bool
 }
 
 // Option configures a Client at construction.
@@ -135,8 +140,17 @@ func WithResponseHeaderTimeout(timeout time.Duration) Option {
 		if timeout <= 0 {
 			return
 		}
-		c.http = httputil.NewClient(httputil.NewTransportWithResponseHeaderTimeout(5*time.Second, 5*time.Second, timeout))
-		c.grokHTTP = c.http
+		c.responseHeaderTimeout = timeout
+	}
+}
+
+// WithPrivateBaseURL lets the client reach its configured base URL on a
+// private-network address when upstream egress is restricted to public
+// destinations. Every other origin stays restricted and redirects stay
+// refused, so the exemption covers exactly the configured server.
+func WithPrivateBaseURL() Option {
+	return func(c *Client) {
+		c.privateBaseURL = true
 	}
 }
 
@@ -172,6 +186,18 @@ func newClient(apiKey, baseURL string, modelIDMap map[string]string, opts ...Opt
 	}
 	for _, opt := range opts {
 		opt(client)
+	}
+	if client.responseHeaderTimeout > 0 || client.privateBaseURL {
+		timeout := client.responseHeaderTimeout
+		if timeout <= 0 {
+			timeout = httputil.DefaultResponseHeaderTimeout
+		}
+		var transport http.RoundTripper = httputil.NewTransportWithResponseHeaderTimeout(5*time.Second, 5*time.Second, timeout)
+		if client.privateBaseURL {
+			transport = httputil.NewTransportForOrigin(client.baseURL, 5*time.Second, 5*time.Second, timeout)
+		}
+		client.http = httputil.NewClient(transport)
+		client.grokHTTP = client.http
 	}
 	return client
 }

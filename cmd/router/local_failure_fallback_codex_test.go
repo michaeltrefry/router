@@ -176,8 +176,8 @@ func TestLocalFailure_CodexResponsesStreamFallsBackWithOneBadge(t *testing.T) {
 			assert.Equal(t, 1, strings.Count(out, "event: response.created"))
 			assert.Contains(t, out, "normal route answer")
 			assert.Equal(t, 1, badgeCount(out), "exactly one badge reaches the client")
-			assert.Contains(t, out, "→ "+tc.served+" · best pick for this turn · local "+tc.id+" failed")
-			assert.NotContains(t, out, "(local)", "the failed local model's own badge never renders")
+			assert.Contains(t, out, "→ "+tc.served+" · best pick for this turn · "+tc.id+" (local) failed")
+			assert.NotContains(t, out, "→ "+tc.id+" (local)", "the failed local model's own badge never renders")
 			logLine(t, &logs, "Local model failed before output; serving the turn on its normal route")
 		})
 	}

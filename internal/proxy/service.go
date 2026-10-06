@@ -850,7 +850,7 @@ const (
 	markerReasonSibling           = "switched after the picked model was overloaded"
 	markerReasonCyberRefusal      = "switched after the picked model declined the request"
 	markerReasonForcedPinDropped  = "your force-model pin could not be served this turn"
-	markerReasonMidTierSubstitute = "local substitute for"
+	markerReasonMidTierSubstitute = "substitute for"
 )
 
 // baselineRoutingMarkerFor renders the routing badge for an in-turn baseline
@@ -4736,18 +4736,29 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 				siblingViable = rescues.siblingViable && !agentShadowMode && target.Reason != translate.ReasonUserForceModel
 				baselineViable = baselineViableFor(ctx, target, normalRes)
 				baselineEligible = !normalRes.AuthoritativePerTurn && baselineViable
+				if localFallback == nil {
+					localFallback = s.planSubscriptionLocalFallbackAfterLocalFailure(ctx, localFailure, normalRes, req, r.Header)
+					localFallbackViable = localFallback != nil
+				}
+				if localFallback.servesFirst() {
+					baselineViable, baselineEligible, subscriptionRetryEligible, siblingViable = false, false, false, false
+				}
 				laterRescueViable = baselineViable || subscriptionRetryEligible || siblingViable || localFallbackViable
-				winnerIdx, proxyErr = s.dispatchWithFallback(ctx, failoverInputs{
-					w:                      contentSink,
-					buf:                    preludeBuf,
-					initialDecision:        target,
-					bindings:               targetBindings,
-					attempt:                targetAttempt,
-					flushErr:               flushErrAsAnthropic,
-					deferFlushOnExhaustion: laterRescueViable,
-					purpose:                normalRes.dispatchPurpose(inference.PurposeAnthropicMessages),
-					origin:                 normalRes.dispatchOrigin(target),
-				})
+				if localFallback.servesFirst() {
+					winnerIdx, proxyErr = -1, localFallback.unfundedRefusal()
+				} else {
+					winnerIdx, proxyErr = s.dispatchWithFallback(ctx, failoverInputs{
+						w:                      contentSink,
+						buf:                    preludeBuf,
+						initialDecision:        target,
+						bindings:               targetBindings,
+						attempt:                targetAttempt,
+						flushErr:               flushErrAsAnthropic,
+						deferFlushOnExhaustion: laterRescueViable,
+						purpose:                normalRes.dispatchPurpose(inference.PurposeAnthropicMessages),
+						origin:                 normalRes.dispatchOrigin(target),
+					})
+				}
 				subscriptionPoolFailure = isSubscriptionPoolError(proxyErr)
 				decision, bindings, marker, effortServed = target, targetBindings, targetMarker, targetEffort
 				routeRes = normalRes
@@ -7943,19 +7954,30 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 				siblingViable = rescues.siblingViable && !strings.HasPrefix(target.Reason, translate.ReasonUserForceModel)
 				cyberRetryTarget, cyberRetryViable = cyberRetryFor(ctx, target, normalRes)
 				cyberRetryArmed = cyberRetryViable
+				if localFallback == nil {
+					localFallback = s.planSubscriptionLocalFallbackAfterLocalFailure(ctx, localFailure, normalRes, routeRequest, r.Header)
+					localFallbackViable = localFallback != nil
+				}
+				if localFallback.servesFirst() {
+					cyberRetryViable, cyberRetryArmed, codexRetryViable, claudeRetryViable, siblingViable = false, false, false, false, false
+				}
 				laterRescueViable = cyberRetryViable || codexRetryViable || claudeRetryViable || siblingViable || localFallbackViable
 				respSummary = translate.ResponseSummary{}
-				winnerIdx, proxyErr = s.dispatchWithFallback(ctx, failoverInputs{
-					w:                      contentSink,
-					buf:                    preludeBuf,
-					initialDecision:        target,
-					bindings:               targetBindings,
-					attempt:                targetAttempt,
-					flushErr:               flushErrAsOpenAI,
-					deferFlushOnExhaustion: laterRescueViable,
-					purpose:                normalRes.dispatchPurpose(surfacePurpose),
-					origin:                 normalRes.dispatchOrigin(target),
-				})
+				if localFallback.servesFirst() {
+					winnerIdx, proxyErr = -1, localFallback.unfundedRefusal()
+				} else {
+					winnerIdx, proxyErr = s.dispatchWithFallback(ctx, failoverInputs{
+						w:                      contentSink,
+						buf:                    preludeBuf,
+						initialDecision:        target,
+						bindings:               targetBindings,
+						attempt:                targetAttempt,
+						flushErr:               flushErrAsOpenAI,
+						deferFlushOnExhaustion: laterRescueViable,
+						purpose:                normalRes.dispatchPurpose(surfacePurpose),
+						origin:                 normalRes.dispatchOrigin(target),
+					})
+				}
 				subscriptionPoolFailure = isSubscriptionPoolError(proxyErr)
 				cyberRefusalSeen = cyberRefusalSeen || providers.IsUpstreamCyberPolicyRefusal(proxyErr)
 				decision, bindings, marker, effortServed = target, targetBindings, targetMarker, targetEffort

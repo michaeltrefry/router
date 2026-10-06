@@ -178,7 +178,7 @@ func TestSubscriptionLocalFallback_ClaudeRateLimitServedLocally(t *testing.T) {
 
 	assert.Contains(t, logs.String(), `"Subscription local fallback serving turn"`)
 	line := completionLine(t, &logs)
-	assert.Equal(t, "✦ **Weave Router** → "+f.model+" (local) · local fallback after claude-opus-4-7 subscription limit\n\n", line["routing_marker"])
+	assert.Equal(t, "✦ **Weave Router** → "+f.model+" (local) · fallback after claude-opus-4-7 subscription limit\n\n", line["routing_marker"])
 	assert.Equal(t, f.model, line["decision_model"])
 	assert.Equal(t, f.provider, line["decision_provider"])
 	assert.Equal(t, "claude-opus-4-7", line["substituted_from_model"])
@@ -373,6 +373,24 @@ func TestSubscriptionLocalFallback_ForcedModelIsNotFallenBack(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
 }
 
+// Classifier and compaction turns are never served locally, so the
+// subscription's refusal surfaces to the client.
+func TestSubscriptionLocalFallback_ClassifierAndCompactionSurfaceRefusal(t *testing.T) {
+	for name, body := range map[string]string{"classifier": classifierBody, "compaction": compactionBody} {
+		t.Run(name, func(t *testing.T) {
+			f := newSubscriptionFallbackFixture(t, "test-sub-fb-"+name, providers.ProviderAnthropic, "claude-opus-4-7", false, true, nil)
+			f.upstream.subErr = claudeLimit429
+
+			rec, err := f.messages(t, claudeSubscriptionCtx(), body)
+
+			require.Error(t, err)
+			assert.Positive(t, f.upstream.subDispatches, "the subscription is tried")
+			assert.Empty(t, f.local.proxyBodies, "the local model never serves this turn")
+			assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+		})
+	}
+}
+
 func TestSubscriptionLocalFallback_CommittedStreamIsNotRetried(t *testing.T) {
 	f := newSubscriptionFallbackFixture(t, "test-sub-fb-committed", providers.ProviderAnthropic, "claude-opus-4-7", false, true, nil)
 	f.upstream.subErr = &providers.UpstreamStatusError{Status: http.StatusTooManyRequests}
@@ -454,7 +472,7 @@ func codexSubscriptionCtx(logs io.Writer) context.Context {
 }
 
 func fallbackBadge(f subscriptionFallbackFixture) string {
-	return "→ " + f.model + " (local) · local fallback after"
+	return "→ " + f.model + " (local) · fallback after"
 }
 
 // streamedCount counts needle in the text deltas of an SSE body, where each
@@ -473,7 +491,7 @@ func TestSubscriptionLocalFallback_ClaudeRateLimitStreamServedLocally(t *testing
 	f := newSubscriptionFallbackFixture(t, "test-sub-fb-claude-stream", providers.ProviderAnthropic, "claude-opus-4-7", false, true, nil)
 	f.upstream.subErr = claudeLimit429
 	f.local.proxyResponse = localChatStreamOK
-	body := `{"model":"claude-opus-4-7","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"fix the build"}]}`
+	body := `{"model":"claude-opus-4-7","stream":true,"max_tokens":4096,"messages":[{"role":"user","content":"fix the build"}]}`
 
 	rec, err := f.messages(t, claudeSubscriptionCtx(), body)
 
@@ -536,7 +554,7 @@ func TestSubscriptionLocalFallback_CodexStreamServedBySubscriptionKeepsOneBadge(
 	out := rec.Body.String()
 	assert.Contains(t, out, "from subscription")
 	assert.Equal(t, 1, streamedCount(out, "→ "+fallbackCodexModel+" · best pick"), "the subscription's badge renders once")
-	assert.NotContains(t, out, "local fallback after")
+	assert.NotContains(t, out, "fallback after")
 }
 
 // A paid retry's own request rejection is the turn's real error; the earlier

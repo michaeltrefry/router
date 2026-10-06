@@ -7,7 +7,6 @@ import (
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
 	"weave-os/router/internal/router/policy"
-	"weave-os/router/internal/router/turntype"
 )
 
 // reasonMidTierSubstitute is the decision reason of a turn served by the
@@ -75,12 +74,11 @@ func (s *Service) substituteMidTier(ctx context.Context, res *turnLoopResult, re
 }
 
 // midTierSubstitutable reports whether the turn's decision is the router's own
-// automatic selection. A classifier verdict governs the session that follows,
-// so it keeps the scorer's model.
+// automatic selection on a turn a local model may serve.
 func midTierSubstitutable(res turnLoopResult) bool {
 	if res.HardPinned || res.UsageBypass || res.CallerModelPassthrough || len(res.Purpose) > 0 ||
 		isUserForcedReason(res.Decision.Reason) {
 		return false
 	}
-	return res.TurnType != turntype.Classifier && res.TurnType != turntype.Compaction
+	return localServableTurn(res.TurnType)
 }

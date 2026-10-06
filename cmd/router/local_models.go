@@ -332,7 +332,8 @@ func registerLocalModels(
 		}
 		providerMap[m.provider] = openaiCompatProvider.NewClientWithModelIDMap(
 			m.apiKey, m.baseURL, map[string]string{m.model.ID: m.model.Providers[0].UpstreamID},
-			openaiCompatProvider.WithResponseHeaderTimeout(m.headerTimeout))
+			openaiCompatProvider.WithResponseHeaderTimeout(m.headerTimeout),
+			openaiCompatProvider.WithPrivateBaseURL())
 		envKeyedProviders[m.provider] = struct{}{}
 		logger.Info("Local model provider enabled",
 			"provider", m.provider, "model", m.model.ID, "base_url", m.baseURL, "tier", m.model.Tier.String())
