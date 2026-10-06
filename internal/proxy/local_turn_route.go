@@ -27,16 +27,24 @@ var DefaultLocalTurnTypes = []turntype.TurnType{
 }
 
 // LocalTurnRoutable reports whether a local turn route may serve tt. Main-loop
-// and tool-result turns keep normal routing; classifier and compaction turns
-// are never served locally because their verdict or summary governs the
-// session that follows.
+// and tool-result turns keep normal routing.
 func LocalTurnRoutable(tt turntype.TurnType) bool {
+	if !localServableTurn(tt) {
+		return false
+	}
 	switch tt {
 	case turntype.SubAgentDispatch, turntype.TitleGen, turntype.Probe, turntype.Recap:
 		return true
 	default:
 		return false
 	}
+}
+
+// localServableTurn reports whether any local rule (turn route, mid-tier
+// substitute, subscription fallback) may serve tt. Classifier and compaction
+// turns never are: their verdict or summary governs the session that follows.
+func localServableTurn(tt turntype.TurnType) bool {
+	return tt != turntype.Classifier && tt != turntype.Compaction
 }
 
 // WithLocalTurnRoute installs the local turn route. Turn types that are not

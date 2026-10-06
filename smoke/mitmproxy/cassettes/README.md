@@ -25,4 +25,8 @@ See `docs/SMOKE.md` for when refreshing is expected (a fixture/scenario change,
 or a suspected upstream API shape change).
 
 Do not hand-edit these files — regenerate them so the recorded shape matches
-something the real API actually returned.
+something the real API actually returned. The exception is the local-model
+scenario (`smoke/local_model_test.go`): there is no server to record from, so
+its two cassettes (`d4cffc98…` streamed, `3423b631…` non-streamed) are authored
+synthetic responses in the shape OpenAI-compatible local servers stream. See
+`docs/SMOKE.md` "Adding a scenario".

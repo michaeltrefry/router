@@ -341,6 +341,36 @@ func TestModelDiscoveryPrivateOriginConfigurationValidation(t *testing.T) {
 	assert.Equal(t, "https://gateway.internal:443", origin)
 }
 
+func TestOriginTransportExemptsOnlyTheConfiguredOrigin(t *testing.T) {
+	var otherHits atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		otherHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer other.Close()
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, other.URL, http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer local.Close()
+	client := NewClient(newTransportForOrigin(local.URL+"/v1", time.Second, time.Second, time.Second, true))
+
+	resp, err := client.Get(local.URL + "/v1/chat/completions")
+	require.NoError(t, err, "the configured private origin is reachable with egress restricted")
+	_ = resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	_, err = client.Get(other.URL)
+	assert.ErrorIs(t, err, ErrRestrictedDestination, "another private origin stays restricted")
+
+	_, err = client.Get(local.URL + "/redirect")
+	assert.ErrorIs(t, err, ErrRefusedRedirect, "the configured origin cannot redirect to another private origin")
+	assert.Zero(t, otherHits.Load())
+}
+
 func mustServerAddress(t *testing.T, rawURL string) string {
 	t.Helper()
 	parsed, err := url.Parse(rawURL)

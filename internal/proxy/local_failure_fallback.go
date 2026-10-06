@@ -11,9 +11,9 @@ import (
 	"weave-os/router/internal/router"
 )
 
-// markerReasonLocalFailure prefixes the failed local model in the routing
-// marker of a turn its normal route served instead.
-const markerReasonLocalFailure = "local"
+// markerReasonLocalFailure follows the failed local model's label in the
+// routing marker of a turn its normal route served instead.
+const markerReasonLocalFailure = "failed"
 
 // localFailureSourceTurnRoute names the local turn route as the rule that put
 // a turn on a local model; the mid-tier substitute uses reasonMidTierSubstitute.
@@ -104,7 +104,7 @@ func (fb *localFailureFallback) marker(res turnLoopResult) string {
 	if normal == "" {
 		return ""
 	}
-	return normal + " · " + markerReasonLocalFailure + " " + fb.local.Model + " failed\n\n"
+	return normal + " · " + markerModelLabel(fb.local) + " " + markerReasonLocalFailure + "\n\n"
 }
 
 // logServing records the normal route taking over a failed local turn.

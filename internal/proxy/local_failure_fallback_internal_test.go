@@ -26,7 +26,7 @@ func TestLocalFailureMarker_FollowsNormalRouteBadgeRules(t *testing.T) {
 
 	dropped := turnLoopResult{Decision: normal, HardPinned: true, ForcedPinDropped: true, ForcedPinModel: "box"}
 	assert.Equal(t,
-		routingMarkerPrefix+"claude-haiku-4-5 · "+markerReasonForcedPinDropped+" (box) · local box failed\n\n",
+		routingMarkerPrefix+"claude-haiku-4-5 · "+markerReasonForcedPinDropped+" (box) · box (local) failed\n\n",
 		fb.marker(dropped), "a dropped force pin is reported even on a hard pin")
 
 	sameModel := turnLoopResult{Decision: normal, PriorServedModel: "claude-haiku-4-5"}

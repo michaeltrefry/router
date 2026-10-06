@@ -16,7 +16,7 @@ const reasonSubscriptionLocalFallback = "subscription_local_fallback"
 
 // markerReasonSubscriptionLocalFallback prefixes the original model in the
 // routing marker of a turn the subscription fallback served.
-const markerReasonSubscriptionLocalFallback = "local fallback after"
+const markerReasonSubscriptionLocalFallback = "fallback after"
 
 // SubscriptionLocalFallback serves turns a Claude or Codex subscription
 // refused for rate limit or plan exhaustion on one deployment-configured
@@ -91,11 +91,12 @@ type subscriptionLocalFallback struct {
 // planSubscriptionLocalFallback returns the turn's fallback plan when the
 // fallback is configured, the turn is about to dispatch on the caller's
 // subscription (or one already read spent with no paid key behind it), the
-// selection is neither forced nor already local, and the local model can
-// take the request. A nil plan leaves every existing failure path unchanged.
+// selection is neither forced nor already local, the turn is one a local model
+// may serve (never classifier or compaction), and the local model can take the
+// request. A nil plan leaves every existing failure path unchanged.
 func (s *Service) planSubscriptionLocalFallback(ctx context.Context, res turnLoopResult, req router.Request, decision router.Decision, headers http.Header, note *subscriptionRefusalNote) *subscriptionLocalFallback {
 	if s.subscriptionFallbackModel == "" || providers.IsLocalProvider(decision.Provider) ||
-		isUserForcedReason(decision.Reason) || res.CallerModelPassthrough {
+		isUserForcedReason(decision.Reason) || res.CallerModelPassthrough || !localServableTurn(res.TurnType) {
 		return nil
 	}
 	exhaustedUnfunded := s.subscriptionExhaustedUnfunded(ctx, decision, headers)
@@ -115,6 +116,22 @@ func (s *Service) planSubscriptionLocalFallback(ctx context.Context, res turnLoo
 		target: target, original: decision, note: note, exhaustedUnfunded: exhaustedUnfunded,
 		localFirst: exhaustedUnfunded && !managedSubscriptionCanServe(ctx, decision.Provider, decision.Model),
 	}
+}
+
+// planSubscriptionLocalFallbackAfterLocalFailure plans the subscription
+// fallback for the normal target that now serves a failed local turn. The
+// primary plan was skipped because the turn's decision was local. When the
+// fallback model is the local model that just failed, the normal target's
+// refusal surfaces instead of dispatching that model again.
+func (s *Service) planSubscriptionLocalFallbackAfterLocalFailure(ctx context.Context, failed *localFailureFallback, normal turnLoopResult, req router.Request, headers http.Header) *subscriptionLocalFallback {
+	if failed.local.Provider == s.subscriptionFallbackProvider && failed.local.Model == s.subscriptionFallbackModel {
+		return nil
+	}
+	note, _ := ctx.Value(subscriptionRefusalNoteKey{}).(*subscriptionRefusalNote)
+	if note == nil {
+		return nil
+	}
+	return s.planSubscriptionLocalFallback(ctx, normal, req, normal.Decision, headers, note)
 }
 
 // subscriptionExhaustedUnfunded reports a subscription the usage observer read

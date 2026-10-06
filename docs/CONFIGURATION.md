@@ -212,10 +212,21 @@ gateway-exclusive: Claude and Codex subscriptions and other providers stay
 enrolled. Any invalid entry (missing field, unset key variable, duplicate or
 shadowed `id`, unknown field) fails boot with a named error.
 
+A local model's `base_url` may name a private-network or loopback host even
+with `ROUTER_RESTRICT_UPSTREAM_EGRESS=true`: each local client may dial exactly
+its own configured origin (scheme, host and port) on any address. Every other
+provider keeps the public-destinations-only policy, a local client still cannot
+reach any other private origin, and redirects are refused, so a local server
+cannot steer a request elsewhere.
+
 Local models appear under one "local" group on the dashboard models page;
 unchecking one adds its `id` to the installation's excluded models. Turns they
-serve record $0 actual cost, the routing marker reads `→ <id> (local)`, and the
-decision log carries `decision_provider=local_<id>`.
+serve record $0 actual cost and the decision log carries
+`decision_provider=local_<id>`. When a turn shows a routing marker, a local
+model is labelled `→ <id> (local)`; turns that show none keep none when served
+locally. Turn-type routed title, probe, recap and sub-agent turns are hard pins
+and never show a marker, and a turn served by the same model as the previous
+turn shows none either, so `decision_provider` is the only record of those.
 
 #### Turn-type routing
 
@@ -280,7 +291,7 @@ substituted.
 A substituted turn logs `Mid-tier substitute served turn` with the original and
 substitute models, its completion line carries `substituted_from_model` and
 `substituted_from_provider` next to `decision_model`, and its routing marker
-reads `→ <substitute> (local) · local substitute for <original model>`. Its policy outcome reports the
+reads `→ <substitute> (local) · substitute for <original model>`. Its policy outcome reports the
 original model as the selection and is excluded from training
 (`training_exclusion_reason: mid_tier_substitute`).
 
@@ -316,6 +327,10 @@ history record the original selection, so the next turn goes back to the
 subscription, and the turn's policy outcome is excluded from training
 (`training_exclusion_reason: subscription_local_fallback`).
 
+Classifier and compaction turns are never served locally: their verdict or
+summary governs the session that follows, so a subscription refusal on one of
+those turns reaches the client as the subscription's error.
+
 An explicit `/force-model`, a caller-model passthrough, or a request the local
 model cannot carry (the same checks as turn-type routing: excluded by the
 installation, provider not enabled, disabled for automatic routing, beyond its
@@ -329,7 +344,7 @@ original and fallback models and the refusal's status; its completion line
 carries `subscription_local_fallback=true`, `decision_reason=subscription_local_fallback`
 and `substituted_from_model` / `substituted_from_provider` naming the original
 selection; the span carries `dispatch.subscription_local_fallback`. Its routing
-marker reads `→ <id> (local) · local fallback after <original model> subscription limit`.
+marker reads `→ <id> (local) · fallback after <original model> subscription limit`.
 On a streamed `/v1/responses` turn that may fall back, the routing badge is
 sent with the first output instead of ahead of dispatch, so the client sees one
 badge naming the model that answered.
@@ -364,13 +379,22 @@ error event and no second upstream request is made. A model chosen with
 subscription exhaustion fallback is unaffected: when its local model fails,
 the client still gets the subscription's error.
 
+The two fallbacks compose in one order: local failure first, subscription
+exhaustion last. When the normal target that takes over a failed local turn is
+dispatched on a subscription that refuses it, `subscription_fallback.model`
+serves the turn, provided it is a different local model from the one that just
+failed. When it is the same model, the failed model is not dispatched again and
+the subscription's error reaches the client. A normal target whose
+subscription is already read spent with no paid key goes to the subscription
+fallback model without contacting the vendor, as on any other turn.
+
 A rescued turn logs `Local model failed before output; serving the turn on its
 normal route` with `local_model`, `local_source` (`local_turn_route` or
 `mid_tier_substitute`), `fallback_model` and the failure's status. Its
 completion line carries `local_failure_fallback=true` and the serving model as
 `decision_model`; the span carries `dispatch.local_failure_fallback`. The
 marker is the one the normal route would show, followed by
-`· local <id> failed`; a turn whose normal marker is hidden (title, probe,
+`· <id> (local) failed`; a turn whose normal marker is hidden (title, probe,
 recap and other hard-pinned turns, or the model the session was served last
 turn) carries none. If the normal target then fails too, it gets the rescues it
 would have had without local rules: the paid-key retry of a subscription

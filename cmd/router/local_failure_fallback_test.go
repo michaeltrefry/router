@@ -293,8 +293,8 @@ func TestLocalFailure_TurnRouteSubAgentFallsBackToScorer(t *testing.T) {
 	assert.Equal(t, 1, scorer.count(), "normal routing is computed once, on failure")
 	assert.Equal(t, []string{"claude-opus-4-7"}, anthropicClient.served())
 	assert.Contains(t, rec.Body.String(), "normal route answer")
-	assert.Equal(t, 1, strings.Count(rec.Body.String(), "local "+id+" failed"), "the badge names the failed local model once")
-	assert.Contains(t, rec.Body.String(), "→ claude-opus-4-7 · best pick for this turn · local "+id+" failed")
+	assert.Equal(t, 1, strings.Count(rec.Body.String(), id+" (local) failed"), "the badge names the failed local model once")
+	assert.Contains(t, rec.Body.String(), "→ claude-opus-4-7 · best pick for this turn · "+id+" (local) failed")
 }
 
 // A mid-tier substitute that fails is replaced by the router's own pick.
@@ -323,7 +323,7 @@ func TestLocalFailure_MidTierSubstituteFallsBackToOriginalPick(t *testing.T) {
 			assert.Equal(t, "claude-sonnet-5", rec.Header().Get(proxy.HeaderRouterModel))
 			assert.Contains(t, rec.Body.String(), "normal route answer")
 			if stream {
-				assert.Equal(t, 1, strings.Count(rec.Body.String(), "→ claude-sonnet-5 · best pick for this turn · local "+id+" failed"))
+				assert.Equal(t, 1, strings.Count(rec.Body.String(), "→ claude-sonnet-5 · best pick for this turn · "+id+" (local) failed"))
 			}
 			line := logLine(t, &logs, "Local model failed before output; serving the turn on its normal route")
 			assert.Equal(t, "mid_tier_substitute", line["local_source"])
