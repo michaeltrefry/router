@@ -26,6 +26,7 @@ SELECT outcome FROM router.task_domain_profiles
 WHERE conversation_key = $1::text AND root_sha256 = $2::text
 AND release_sha256 = $3::text AND evidence_sha256 = $4::text
 AND expires_at > CURRENT_TIMESTAMP AND outcome IS NOT NULL
+AND (retry_after IS NULL OR retry_after > CURRENT_TIMESTAMP)
 `
 
 type GetTaskDomainProfileParams struct {
@@ -36,11 +37,13 @@ type GetTaskDomainProfileParams struct {
 }
 
 // Completed profiles never wait behind unrelated first-turn inference transactions.
+// A failure past its retry window is a miss, so the caller reclassifies.
 //
 //	SELECT outcome FROM router.task_domain_profiles
 //	WHERE conversation_key = $1::text AND root_sha256 = $2::text
 //	AND release_sha256 = $3::text AND evidence_sha256 = $4::text
 //	AND expires_at > CURRENT_TIMESTAMP AND outcome IS NOT NULL
+//	AND (retry_after IS NULL OR retry_after > CURRENT_TIMESTAMP)
 func (q *Queries) GetTaskDomainProfile(ctx context.Context, arg GetTaskDomainProfileParams) ([]byte, error) {
 	row := q.db.QueryRow(ctx, getTaskDomainProfile,
 		arg.ConversationKey,
@@ -130,8 +133,9 @@ const insertTaskDomainProfile = `-- name: InsertTaskDomainProfile :exec
 INSERT INTO router.task_domain_profiles (conversation_key, root_sha256, release_sha256, evidence_sha256)
 VALUES ($1::text, $2::text, $3::text, $4::text)
 ON CONFLICT (conversation_key, root_sha256, release_sha256, evidence_sha256)
-DO UPDATE SET outcome = NULL, expires_at = CURRENT_TIMESTAMP + INTERVAL '30 days'
+DO UPDATE SET outcome = NULL, retry_after = NULL, expires_at = CURRENT_TIMESTAMP + INTERVAL '30 days'
 WHERE task_domain_profiles.expires_at <= CURRENT_TIMESTAMP
+OR task_domain_profiles.retry_after <= CURRENT_TIMESTAMP
 `
 
 type InsertTaskDomainProfileParams struct {
@@ -141,13 +145,15 @@ type InsertTaskDomainProfileParams struct {
 	EvidenceSha256  string
 }
 
-// Reserve a root before acquiring its cross-replica inference lock.
+// Reserve a root before acquiring its cross-replica inference lock. An expired row, or a
+// failure whose retry window has passed, is reset for a fresh classification.
 //
 //	INSERT INTO router.task_domain_profiles (conversation_key, root_sha256, release_sha256, evidence_sha256)
 //	VALUES ($1::text, $2::text, $3::text, $4::text)
 //	ON CONFLICT (conversation_key, root_sha256, release_sha256, evidence_sha256)
-//	DO UPDATE SET outcome = NULL, expires_at = CURRENT_TIMESTAMP + INTERVAL '30 days'
+//	DO UPDATE SET outcome = NULL, retry_after = NULL, expires_at = CURRENT_TIMESTAMP + INTERVAL '30 days'
 //	WHERE task_domain_profiles.expires_at <= CURRENT_TIMESTAMP
+//	OR task_domain_profiles.retry_after <= CURRENT_TIMESTAMP
 func (q *Queries) InsertTaskDomainProfile(ctx context.Context, arg InsertTaskDomainProfileParams) error {
 	_, err := q.db.Exec(ctx, insertTaskDomainProfile,
 		arg.ConversationKey,
@@ -160,7 +166,7 @@ func (q *Queries) InsertTaskDomainProfile(ctx context.Context, arg InsertTaskDom
 
 const updateTaskDomainProfile = `-- name: UpdateTaskDomainProfile :exec
 UPDATE router.task_domain_profiles SET outcome = $1::jsonb,
-    expires_at = CASE WHEN $2::boolean THEN CURRENT_TIMESTAMP + INTERVAL '5 minutes' ELSE expires_at END
+    retry_after = CASE WHEN $2::boolean THEN CURRENT_TIMESTAMP + INTERVAL '5 minutes' END
 WHERE conversation_key = $3::text AND root_sha256 = $4::text
 AND release_sha256 = $5::text AND evidence_sha256 = $6::text
 `
@@ -174,12 +180,13 @@ type UpdateTaskDomainProfileParams struct {
 	EvidenceSha256  string
 }
 
-// Persist outcomes without prompt text. A failed classification expires after five
-// minutes so a later turn can retry, at most once per window, instead of keeping the
-// whole task on baseline ranking for the 30-day profile lifetime.
+// Persist outcomes without prompt text. A failed classification becomes retryable after
+// five minutes, at most once per window, instead of keeping the task on baseline ranking
+// for the 30-day profile lifetime. The row itself keeps that lifetime so it still counts
+// toward resume ambiguity.
 //
 //	UPDATE router.task_domain_profiles SET outcome = $1::jsonb,
-//	    expires_at = CASE WHEN $2::boolean THEN CURRENT_TIMESTAMP + INTERVAL '5 minutes' ELSE expires_at END
+//	    retry_after = CASE WHEN $2::boolean THEN CURRENT_TIMESTAMP + INTERVAL '5 minutes' END
 //	WHERE conversation_key = $3::text AND root_sha256 = $4::text
 //	AND release_sha256 = $5::text AND evidence_sha256 = $6::text
 func (q *Queries) UpdateTaskDomainProfile(ctx context.Context, arg UpdateTaskDomainProfileParams) error {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -13,6 +14,10 @@ import (
 	"weave-os/router/internal/router/taskdomain"
 	"weave-os/router/internal/sqlc"
 )
+
+// slotWait bounds how long a first turn waits for an inference transaction slot, leaving
+// most of the request's taskdomain.Timeout for classification itself.
+const slotWait = time.Second
 
 // TaskDomainRepo bounds connections held by optional first-turn inference.
 type TaskDomainRepo struct {
@@ -47,9 +52,12 @@ func (r *TaskDomainRepo) Resolve(ctx context.Context, key taskdomain.Key, resume
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return taskdomain.Outcome{}, err
 	}
-	// Wait for a slot within the caller's budget; failing fast under a burst left
-	// first turns on baseline ranking even when capacity freed moments later.
-	if err := r.transactions.Acquire(ctx, 1); err != nil {
+	// Wait briefly for a slot: one that frees moments later is used, but a long wait would
+	// leave classification too little budget and persist a timeout for this task.
+	slotCtx, cancelSlot := context.WithTimeout(ctx, slotWait)
+	err = r.transactions.Acquire(slotCtx, 1)
+	cancelSlot()
+	if err != nil {
 		return taskdomain.Outcome{}, fmt.Errorf("task profile transaction capacity: %w", err)
 	}
 	defer r.transactions.Release(1)

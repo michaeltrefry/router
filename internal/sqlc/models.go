@@ -1209,4 +1209,5 @@ type RouterTaskDomainProfile struct {
 	EvidenceSha256  string
 	Outcome         []byte
 	ExpiresAt       pgtype.Timestamptz
+	RetryAfter      pgtype.Timestamptz
 }
