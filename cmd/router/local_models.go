@@ -27,20 +27,21 @@ const localModelsFileEnv = "ROUTER_LOCAL_MODELS_FILE"
 const maxLocalProviderNameLen = 32
 
 var (
-	errLocalModelMissingID      = errors.New("local model: id is required")
-	errLocalModelInvalidID      = errors.New("local model: invalid id")
-	errLocalModelDuplicateID    = errors.New("local model: duplicate id")
-	errLocalModelMissingBaseURL = errors.New("local model: base_url is required")
-	errLocalModelInvalidBaseURL = errors.New("local model: base_url must be an absolute http(s) URL")
-	errLocalModelMissingKeyEnv  = errors.New("local model: api_key_env is required")
-	errLocalModelKeyEnvUnset    = errors.New("local model: api_key_env names an unset environment variable")
-	errLocalModelMissingUpstrm  = errors.New("local model: upstream_model is required")
-	errLocalModelContextWindow  = errors.New("local model: context_window must be positive")
-	errLocalModelInvalidField   = errors.New("local model: invalid field value")
-	errLocalTurnRoutingModel    = errors.New("local turn routing: model must name a configured local model")
-	errLocalTurnRoutingType     = errors.New("local turn routing: turn type cannot be served locally")
-	errMidTierSubstituteModel   = errors.New("mid-tier substitute: model must name a configured local model")
-	errMidTierSubstituteTier    = errors.New("mid-tier substitute: model must be tier mid")
+	errLocalModelMissingID       = errors.New("local model: id is required")
+	errLocalModelInvalidID       = errors.New("local model: invalid id")
+	errLocalModelDuplicateID     = errors.New("local model: duplicate id")
+	errLocalModelMissingBaseURL  = errors.New("local model: base_url is required")
+	errLocalModelInvalidBaseURL  = errors.New("local model: base_url must be an absolute http(s) URL")
+	errLocalModelMissingKeyEnv   = errors.New("local model: api_key_env is required")
+	errLocalModelKeyEnvUnset     = errors.New("local model: api_key_env names an unset environment variable")
+	errLocalModelMissingUpstrm   = errors.New("local model: upstream_model is required")
+	errLocalModelContextWindow   = errors.New("local model: context_window must be positive")
+	errLocalModelInvalidField    = errors.New("local model: invalid field value")
+	errLocalTurnRoutingModel     = errors.New("local turn routing: model must name a configured local model")
+	errLocalTurnRoutingType      = errors.New("local turn routing: turn type cannot be served locally")
+	errMidTierSubstituteModel    = errors.New("mid-tier substitute: model must name a configured local model")
+	errMidTierSubstituteTier     = errors.New("mid-tier substitute: model must be tier mid")
+	errSubscriptionFallbackModel = errors.New("subscription fallback: model must name a configured local model")
 )
 
 // Lowercase because force-model input is lowercased before catalog lookup; no
@@ -52,6 +53,9 @@ type localModelsFile struct {
 	Models            []localModelEntry            `yaml:"models"`
 	TurnRouting       *localTurnRoutingEntry       `yaml:"turn_routing"`
 	MidTierSubstitute *localMidTierSubstituteEntry `yaml:"mid_tier_substitute"`
+	// SubscriptionFallback shares the substitute's shape: a model and an
+	// enabled flag that defaults to true.
+	SubscriptionFallback *localMidTierSubstituteEntry `yaml:"subscription_fallback"`
 }
 
 // localMidTierSubstituteEntry names the local model that replaces automatic
@@ -67,11 +71,13 @@ type localTurnRoutingEntry struct {
 }
 
 // localModelsConfig is a validated local-models file. A zero turnRoute
-// leaves every turn type on normal routing; a zero midTier substitutes nothing.
+// leaves every turn type on normal routing; a zero midTier substitutes
+// nothing; a zero subscriptionFallback leaves subscription refusals as they are.
 type localModelsConfig struct {
-	models    []localModel
-	turnRoute proxy.LocalTurnRoute
-	midTier   proxy.MidTierSubstitute
+	models               []localModel
+	turnRoute            proxy.LocalTurnRoute
+	midTier              proxy.MidTierSubstitute
+	subscriptionFallback proxy.SubscriptionLocalFallback
 }
 
 type localModelEntry struct {
@@ -128,7 +134,26 @@ func parseLocalModels(r io.Reader, getenv func(string) string) (localModelsConfi
 	if err != nil {
 		return localModelsConfig{}, err
 	}
-	return localModelsConfig{models: out, turnRoute: route, midTier: midTier}, nil
+	fallback, err := validateSubscriptionFallback(file.SubscriptionFallback, seen)
+	if err != nil {
+		return localModelsConfig{}, err
+	}
+	return localModelsConfig{models: out, turnRoute: route, midTier: midTier, subscriptionFallback: fallback}, nil
+}
+
+// validateSubscriptionFallback resolves the subscription_fallback block. Any
+// tier is accepted; enabled: false keeps the block but falls back to nothing.
+func validateSubscriptionFallback(entry *localMidTierSubstituteEntry, models map[string]struct{}) (proxy.SubscriptionLocalFallback, error) {
+	if entry == nil {
+		return proxy.SubscriptionLocalFallback{}, nil
+	}
+	if _, configured := models[entry.Model]; !configured {
+		return proxy.SubscriptionLocalFallback{}, fmt.Errorf("%w: %q", errSubscriptionFallbackModel, entry.Model)
+	}
+	if entry.Enabled != nil && !*entry.Enabled {
+		return proxy.SubscriptionLocalFallback{}, nil
+	}
+	return proxy.SubscriptionLocalFallback{Provider: providers.LocalProviderName(entry.Model), Model: entry.Model}, nil
 }
 
 // validateMidTierSubstitute resolves the mid_tier_substitute block. The model
@@ -329,6 +354,9 @@ func loadLocalModels(
 	}
 	if cfg.midTier.Model != "" {
 		logger.Info("Mid-tier local substitution enabled", "model", cfg.midTier.Model)
+	}
+	if cfg.subscriptionFallback.Model != "" {
+		logger.Info("Subscription local fallback enabled", "model", cfg.subscriptionFallback.Model)
 	}
 	return cfg, nil
 }

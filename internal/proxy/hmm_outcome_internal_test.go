@@ -237,7 +237,7 @@ func TestReportPolicyOutcome_MidTierSubstituteReportsOriginalAndExcludesTraining
 	}
 	served := original
 	served.Model, served.Provider, served.Reason = "local-mid", "local_mid", reasonMidTierSubstitute
-	routeRes := turnLoopResult{Decision: served, Fresh: served, SubstitutedFrom: original}
+	routeRes := turnLoopResult{Decision: served, Fresh: served, SubstitutedFrom: original, SubstitutionReason: reasonMidTierSubstitute}
 	var logs bytes.Buffer
 	ctx := observability.WithLogger(context.Background(), slog.New(slog.NewJSONHandler(&logs, nil)))
 	ctx = context.WithValue(ctx, PolicyTrainingAllowedContextKey{}, true)

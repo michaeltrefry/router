@@ -72,6 +72,7 @@ func TestParseLocalModels_ExampleConfig(t *testing.T) {
 		TurnTypes: proxy.DefaultLocalTurnTypes,
 	}, cfg.turnRoute)
 	assert.Equal(t, proxy.MidTierSubstitute{Provider: "local_qwen3.8-flash-next", Model: "qwen3.8-flash-next"}, cfg.midTier)
+	assert.Equal(t, proxy.SubscriptionLocalFallback{Provider: "local_qwen3.8-flash-next", Model: "qwen3.8-flash-next"}, cfg.subscriptionFallback)
 }
 
 func TestParseLocalModels_TurnRouting(t *testing.T) {
@@ -161,6 +162,47 @@ func TestParseLocalModels_MidTierSubstitute(t *testing.T) {
 	}
 }
 
+func TestParseLocalModels_SubscriptionFallback(t *testing.T) {
+	env := envFrom(map[string]string{"KEY_A": "a"})
+	entries := localEntryYAML("m1", "http://localhost:1/v1", "KEY_A") +
+		strings.Replace(localEntryYAML("hi1", "http://localhost:2/v1", "KEY_A"), "tier: mid", "tier: high", 1)
+	parse := func(t *testing.T, block string) (localModelsConfig, error) {
+		t.Helper()
+		return parseLocalModels(strings.NewReader("models:\n"+entries+block), env)
+	}
+
+	t.Run("omitted block falls back to nothing", func(t *testing.T) {
+		cfg, err := parse(t, "")
+		require.NoError(t, err)
+		assert.Equal(t, proxy.SubscriptionLocalFallback{}, cfg.subscriptionFallback)
+	})
+	t.Run("block enables the fallback by default", func(t *testing.T) {
+		cfg, err := parse(t, "subscription_fallback:\n  model: m1\n")
+		require.NoError(t, err)
+		assert.Equal(t, proxy.SubscriptionLocalFallback{Provider: providers.LocalProviderName("m1"), Model: "m1"}, cfg.subscriptionFallback)
+	})
+	t.Run("any tier may serve the fallback", func(t *testing.T) {
+		cfg, err := parse(t, "subscription_fallback:\n  model: hi1\n")
+		require.NoError(t, err)
+		assert.Equal(t, "hi1", cfg.subscriptionFallback.Model)
+	})
+	t.Run("enabled false turns it off", func(t *testing.T) {
+		cfg, err := parse(t, "subscription_fallback:\n  model: m1\n  enabled: false\n")
+		require.NoError(t, err)
+		assert.Equal(t, proxy.SubscriptionLocalFallback{}, cfg.subscriptionFallback)
+	})
+	rejected := map[string]string{
+		"unconfigured model": "subscription_fallback:\n  model: claude-sonnet-5\n",
+		"missing model":      "subscription_fallback:\n  enabled: true\n",
+	}
+	for name, block := range rejected {
+		t.Run("rejects "+name, func(t *testing.T) {
+			_, err := parse(t, block)
+			require.ErrorIs(t, err, errSubscriptionFallbackModel)
+		})
+	}
+}
+
 func TestParseLocalModels_RejectsInvalidEntries(t *testing.T) {
 	env := envFrom(map[string]string{"KEY_A": "a"})
 	cases := []struct {
@@ -226,6 +268,7 @@ func TestLoadLocalModels_UnsetFileRegistersNothing(t *testing.T) {
 	assert.Empty(t, providerMap)
 	assert.Empty(t, cfg.turnRoute.Model)
 	assert.Empty(t, cfg.midTier.Model)
+	assert.Empty(t, cfg.subscriptionFallback.Model)
 }
 
 func writeLocalModelsFile(t *testing.T, entries string) string {

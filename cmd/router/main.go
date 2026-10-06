@@ -1318,6 +1318,7 @@ func main() {
 		WithSubAgentOverride(subAgentProvider, subAgentModel).
 		WithLocalTurnRoute(localModels.turnRoute).
 		WithMidTierSubstitute(localModels.midTier).
+		WithSubscriptionLocalFallback(localModels.subscriptionFallback).
 		WithPlannerEnabled(plannerEnabled).
 		WithScoreToolResultTurns(scoreToolResultTurns).
 		WithCyberRefusalRepin(cyberRefusalRepin).

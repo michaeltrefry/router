@@ -61,6 +61,7 @@ func (s *Service) substituteMidTier(ctx context.Context, res *turnLoopResult, re
 	substitute.Effort = ""
 	substitute.Reason = reasonMidTierSubstitute
 	res.SubstitutedFrom = original
+	res.SubstitutionReason = reasonMidTierSubstitute
 	res.Decision = substitute
 	res.Origin = policy.OverrideSourceDeployment
 	observability.FromContext(ctx).Info("Mid-tier substitute served turn",

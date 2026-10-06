@@ -250,9 +250,12 @@ type turnLoopResult struct {
 	StickyRole string
 	// Fresh is the scorer's recommendation for this turn when the scorer ran.
 	Fresh router.Decision
-	// SubstitutedFrom is the router's own pick when the mid-tier substitute
-	// replaced it in Decision; zero otherwise.
+	// SubstitutedFrom is the router's own pick when a local model replaced it
+	// in Decision; zero otherwise.
 	SubstitutedFrom router.Decision
+	// SubstitutionReason names what replaced SubstitutedFrom: the mid-tier
+	// substitute or the subscription local fallback.
+	SubstitutionReason string
 	// PlannerDecision holds the planner's verdict and EV math when the planner ran.
 	PlannerDecision planner.Decision
 	// PinModel is stamped independently of PlannerDecision so log lines can
