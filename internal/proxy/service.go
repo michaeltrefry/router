@@ -4583,6 +4583,12 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 		localFallback = s.planSubscriptionLocalFallback(ctx, routeRes, req, decision, r.Header, refusalNote)
 	}
 	localFallbackViable := localFallback != nil
+	// A subscription already read spent with no paid key cannot serve the
+	// turn: the prompt goes to the local model and never to the vendor.
+	localFirst := localFallback.servesFirst()
+	if localFirst {
+		baselineViable, baselineEligible, subscriptionRetryEligible, siblingViable = false, false, false, false
+	}
 
 	primaryProvider := decision.Provider
 	// Captured before rescue: failover replaces decision.Model, so afterwards
@@ -4605,7 +4611,9 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 		}
 		flushUpstreamErrorAsAnthropic(w, err)
 	}
-	if attemptBuildErr != nil {
+	if localFirst {
+		winnerIdx, proxyErr = -1, localFallback.unfundedRefusal()
+	} else if attemptBuildErr != nil {
 		// Nothing was dispatched — enters the rescue chain as if every binding pre-committed failed.
 		winnerIdx, proxyErr = -1, attemptBuildErr
 	} else {
@@ -7163,6 +7171,13 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 		}
 	}
 
+	// Last in the rescue chain: once the subscription refused the turn and no
+	// paid retry or peer served it, the local model does. Planned before the
+	// Responses prelude, which must not show a badge the fallback may replace.
+	ctx, refusalNote := withSubscriptionRefusalNote(ctx)
+	localFallback := s.planSubscriptionLocalFallback(ctx, routeRes, routeRequest, decision, r.Header, refusalNote)
+	localFallbackViable := localFallback != nil
+
 	// Previously gated on policy debug; ordinary Codex turns fell through to
 	// ResponsesWriter's legacy badge that ignored suppression and never showed the routing reason.
 	verbatimPassthrough := responsesPassthrough && decision.Provider == providers.ProviderOpenAI
@@ -7181,6 +7196,11 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 	responsesPreludeWillEmit := env.Stream() && !verbatimPassthrough && (len(bindings) <= 1 || marker != "")
 	if verbatimPassthrough {
 		responsesPreludeWillEmit = env.Stream() && supportsResponsesTerminalSurfaces(clientID.ClientApp) && marker != ""
+	}
+	// The eager badge names the subscription's model; a local fallback would
+	// leave it on the wire beside its own, so the badge rides the first output.
+	if localFallbackViable {
+		responsesPreludeWillEmit = false
 	}
 
 	var responsesPreludeBuf *preludeBuffer
@@ -7697,11 +7717,12 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 		(s.shouldFailover(ctx) || s.gatewaySiblingAllowed(ctx, siblingDecisions[0])) &&
 		!paidFallbackForbidden(ctx)
 
-	// Last in the rescue chain: once the subscription refused the turn and no
-	// paid retry or peer served it, the local model does.
-	ctx, refusalNote := withSubscriptionRefusalNote(ctx)
-	localFallback := s.planSubscriptionLocalFallback(ctx, routeRes, routeRequest, decision, r.Header, refusalNote)
-	localFallbackViable := localFallback != nil
+	// A subscription already read spent with no paid key cannot serve the
+	// turn: the prompt goes to the local model and never to the vendor.
+	localFirst := localFallback.servesFirst()
+	if localFirst {
+		cyberRetryViable, cyberRetryArmed, codexRetryViable, claudeRetryViable, siblingViable = false, false, false, false, false
+	}
 
 	primaryProvider := decision.Provider
 	primaryModel := decision.Model
@@ -7730,40 +7751,44 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 		}
 		flushBufferedIfPresent(w, err)
 	}
-	winnerIdx, proxyErr = s.dispatchWithFallback(ctx, failoverInputs{
-		// contentSink is the raw w when capture is off.
-		w:               contentSink,
-		buf:             preludeBuf,
-		initialDecision: decision,
-		alternatives: func() []router.Decision {
-			if routeRes.HardPinned || routeRes.AuthoritativePerTurn {
-				return nil
-			}
-			return s.subscriptionAlternativeDecisions(ctx, routeRequest, decision)
-		}(),
-		buildAlternative: func(target router.Decision) (dispatchAttempt, error) {
-			alternativeOpts := opts
-			alternativeOpts.TargetModel = target.Model
-			alternativeOpts.TargetProvider = target.Provider
-			alternativeOpts.Capabilities = router.Lookup(target.Model)
-			alternativeOpts.ModelSwitched = true
-			alternativeEffort := s.resolveEffort(ctx, target, alternativeOpts.Capabilities, routeRes.EscalateEffort)
-			alternativeEffort.apply(&alternativeOpts)
-			alternativeMarker := suppressMarkerIfRequested(ctx, r.Header, modelSelectionMarkerForRequest(ctx, routeRes, siblingRoutingMarkerFor(routeRes, target.Model), target.Model, markerReasonSibling))
-			return buildAttempt(target, alternativeOpts, alternativeMarker)
-		},
-		onAlternative: func(target router.Decision) {
-			decision = target
-			bindings = s.resolveBindingsForDispatch(ctx, target)
-			marker = suppressMarkerIfRequested(ctx, r.Header, modelSelectionMarkerForRequest(ctx, routeRes, siblingRoutingMarkerFor(routeRes, target.Model), target.Model, markerReasonSibling))
-		},
-		bindings:               bindings,
-		attempt:                attempt,
-		flushErr:               flushErrAsOpenAI,
-		deferFlushOnExhaustion: cyberRetryViable || codexRetryViable || claudeRetryViable || siblingViable || localFallbackViable,
-		purpose:                routeRes.dispatchPurpose(surfacePurpose),
-		origin:                 routeRes.dispatchOrigin(decision),
-	})
+	if localFirst {
+		winnerIdx, proxyErr = -1, localFallback.unfundedRefusal()
+	} else {
+		winnerIdx, proxyErr = s.dispatchWithFallback(ctx, failoverInputs{
+			// contentSink is the raw w when capture is off.
+			w:               contentSink,
+			buf:             preludeBuf,
+			initialDecision: decision,
+			alternatives: func() []router.Decision {
+				if routeRes.HardPinned || routeRes.AuthoritativePerTurn {
+					return nil
+				}
+				return s.subscriptionAlternativeDecisions(ctx, routeRequest, decision)
+			}(),
+			buildAlternative: func(target router.Decision) (dispatchAttempt, error) {
+				alternativeOpts := opts
+				alternativeOpts.TargetModel = target.Model
+				alternativeOpts.TargetProvider = target.Provider
+				alternativeOpts.Capabilities = router.Lookup(target.Model)
+				alternativeOpts.ModelSwitched = true
+				alternativeEffort := s.resolveEffort(ctx, target, alternativeOpts.Capabilities, routeRes.EscalateEffort)
+				alternativeEffort.apply(&alternativeOpts)
+				alternativeMarker := suppressMarkerIfRequested(ctx, r.Header, modelSelectionMarkerForRequest(ctx, routeRes, siblingRoutingMarkerFor(routeRes, target.Model), target.Model, markerReasonSibling))
+				return buildAttempt(target, alternativeOpts, alternativeMarker)
+			},
+			onAlternative: func(target router.Decision) {
+				decision = target
+				bindings = s.resolveBindingsForDispatch(ctx, target)
+				marker = suppressMarkerIfRequested(ctx, r.Header, modelSelectionMarkerForRequest(ctx, routeRes, siblingRoutingMarkerFor(routeRes, target.Model), target.Model, markerReasonSibling))
+			},
+			bindings:               bindings,
+			attempt:                attempt,
+			flushErr:               flushErrAsOpenAI,
+			deferFlushOnExhaustion: cyberRetryViable || codexRetryViable || claudeRetryViable || siblingViable || localFallbackViable,
+			purpose:                routeRes.dispatchPurpose(surfacePurpose),
+			origin:                 routeRes.dispatchOrigin(decision),
+		})
+	}
 	primaryFailureErr := proxyErr
 	subscriptionPoolFailure := isSubscriptionPoolError(proxyErr)
 	primarySubscriptionArmFailure := proxyErr

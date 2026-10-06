@@ -11,12 +11,14 @@ import (
 	"testing"
 	"time"
 
+	"weave-os/router/internal/auth"
 	"weave-os/router/internal/observability"
 	"weave-os/router/internal/providers"
 	"weave-os/router/internal/proxy"
 	"weave-os/router/internal/proxy/usage"
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
+	"weave-os/router/internal/subscriptions"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -196,8 +198,82 @@ func TestSubscriptionLocalFallback_ClaudeObservedExhaustionServedLocally(t *test
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Zero(t, f.upstream.subDispatches, "a plan already read spent is not dispatched again")
+	assert.Zero(t, f.upstream.paidDispatches, "with no paid key the prompt never reaches the vendor")
 	assert.Len(t, f.local.proxyBodies, 1)
 	assert.Contains(t, rec.Body.String(), "served locally")
+}
+
+func TestSubscriptionLocalFallback_CodexObservedExhaustionServedLocally(t *testing.T) {
+	f := newSubscriptionFallbackFixture(t, "test-sub-fb-codex-observed", providers.ProviderOpenAI, fallbackCodexModel, false, true, nil)
+	now := time.Now()
+	observer := usage.NewObserver([]byte("salt"), time.Hour, func() time.Time { return now })
+	observer.Record(observer.Key([]byte(fallbackCodexToken)), usage.Snapshot{Secondary: usage.Window{UsedPercent: 1, WindowMinutes: 10080}})
+	f.svc.WithUsageObserver(observer)
+	body := []byte(`{"model":"` + fallbackCodexModel + `","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"fix the build"}]}]}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(""))
+
+	require.NoError(t, f.svc.ProxyOpenAIResponses(codexSubscriptionCtx(io.Discard), body, rec, req))
+
+	assert.Zero(t, f.upstream.subDispatches+f.upstream.paidDispatches, "with no paid key the prompt never reaches the vendor")
+	assert.Len(t, f.local.proxyBodies, 1)
+	assert.Contains(t, rec.Body.String(), "served locally")
+}
+
+// A Claude turn on the Chat Completions ingress keeps the spent token attached;
+// the local model still answers before the vendor sees the prompt.
+func TestSubscriptionLocalFallback_ClaudeObservedExhaustionOnChatIngressSkipsVendor(t *testing.T) {
+	f := newSubscriptionFallbackFixture(t, "test-sub-fb-chat-observed", providers.ProviderAnthropic, "claude-opus-4-7", false, true, nil)
+	now := time.Now()
+	observer := usage.NewObserver([]byte("salt"), time.Hour, func() time.Time { return now })
+	observer.Record(observer.Key([]byte(fallbackClaudeToken)), usage.Snapshot{Secondary: usage.Window{UsedPercent: 1, WindowMinutes: 10080}})
+	f.svc.WithUsageObserver(observer)
+	body := []byte(`{"model":"claude-opus-4-7","messages":[{"role":"user","content":"fix the build"}]}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(""))
+
+	require.NoError(t, f.svc.ProxyOpenAIChatCompletion(claudeSubscriptionCtx(), body, rec, req))
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Zero(t, f.upstream.subDispatches+f.upstream.paidDispatches, "the vendor never receives the prompt")
+	assert.Len(t, f.local.proxyBodies, 1)
+	assert.Contains(t, rec.Body.String(), "served locally")
+}
+
+type oneSeatLeaser struct{ leased int }
+
+func (l *oneSeatLeaser) Lease(context.Context, auth.SubscriptionOwner, subscriptions.Provider, string) (subscriptions.Lease, bool, error) {
+	if l.leased > 0 {
+		return subscriptions.Lease{}, true, subscriptions.ErrNoAvailableAccount
+	}
+	l.leased++
+	return subscriptions.Lease{AccountID: "seat-1", AccessToken: "sk-ant-oat01-managed-seat"}, true, nil
+}
+
+func (*oneSeatLeaser) Cooldown(context.Context, auth.SubscriptionOwner, subscriptions.Provider, string, time.Time) error {
+	return nil
+}
+
+func (*oneSeatLeaser) Disable(context.Context, auth.SubscriptionOwner, subscriptions.Provider, string) error {
+	return nil
+}
+
+// The caller's own plan is spent, but an enrolled managed seat can still serve
+// the selection, so the vendor is tried before the local model.
+func TestSubscriptionLocalFallback_ObservedExhaustionKeepsManagedSeat(t *testing.T) {
+	f := newSubscriptionFallbackFixture(t, "test-sub-fb-managed-seat", providers.ProviderAnthropic, "claude-opus-4-7", false, true, nil)
+	now := time.Now()
+	observer := usage.NewObserver([]byte("salt"), time.Hour, func() time.Time { return now })
+	observer.Record(observer.Key([]byte(fallbackClaudeToken)), usage.Snapshot{Secondary: usage.Window{UsedPercent: 1, WindowMinutes: 10080}})
+	f.svc.WithUsageObserver(observer).WithManagedSubscriptions(&oneSeatLeaser{})
+	ctx := context.WithValue(claudeSubscriptionCtx(), proxy.ManagedSubscriptionProvidersContextKey{}, map[auth.SubscriptionProvider]struct{}{auth.SubscriptionProviderClaude: {}})
+	ctx = proxy.WithManagedSubscriptionUsage(ctx)
+
+	rec, _ := f.messages(t, ctx, pinTestBody)
+
+	assert.Equal(t, 1, f.upstream.subDispatches, "the managed seat serves the turn")
+	assert.Empty(t, f.local.proxyBodies)
+	assert.Contains(t, rec.Body.String(), `"paid"`)
 }
 
 func TestSubscriptionLocalFallback_PaidKeyKeepsPrecedence(t *testing.T) {
@@ -361,4 +437,136 @@ func TestSubscriptionLocalFallback_NextTurnReturnsToSubscription(t *testing.T) {
 	defer f.store.mu.Unlock()
 	require.NotEmpty(t, f.store.usages)
 	assert.Equal(t, "claude-opus-4-7", f.store.usages[0].ServedModel, "the fallback turn records the original selection")
+}
+
+func localChatStreamOK(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl_local\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"served locally\"},\"finish_reason\":null}]}\n\n"+
+		"data: {\"id\":\"chatcmpl_local\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n")
+}
+
+func codexSubscriptionCtx(logs io.Writer) context.Context {
+	ctx := context.WithValue(authedCtx(uuid.New().String()), proxy.OpenAISubscriptionContextKey{}, fallbackCodexToken)
+	ctx = context.WithValue(ctx, proxy.OpenAIAccountIDContextKey{}, fallbackCodexAccount)
+	ctx = context.WithValue(ctx, proxy.ClientIdentityContextKey{}, proxy.ClientIdentity{ClientApp: proxy.ClientAppCodex})
+	return observability.WithLogger(ctx, slog.New(slog.NewJSONHandler(logs, nil)))
+}
+
+func fallbackBadge(f subscriptionFallbackFixture) string {
+	return "→ " + f.model + " (local) · local fallback after"
+}
+
+// streamedCount counts needle in the text deltas of an SSE body, where each
+// rendered badge appears once; done and completed events repeat the text.
+func streamedCount(body, needle string) int {
+	n := 0
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "data: ") && (strings.Contains(line, `"type":"response.output_text.delta"`) || strings.Contains(line, `"type":"content_block_delta"`)) {
+			n += strings.Count(line, needle)
+		}
+	}
+	return n
+}
+
+func TestSubscriptionLocalFallback_ClaudeRateLimitStreamServedLocally(t *testing.T) {
+	f := newSubscriptionFallbackFixture(t, "test-sub-fb-claude-stream", providers.ProviderAnthropic, "claude-opus-4-7", false, true, nil)
+	f.upstream.subErr = claudeLimit429
+	f.local.proxyResponse = localChatStreamOK
+	body := `{"model":"claude-opus-4-7","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"fix the build"}]}`
+
+	rec, err := f.messages(t, claudeSubscriptionCtx(), body)
+
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, f.local.proxyBodies, 1, "the local model serves the refused turn")
+	out := rec.Body.String()
+	assert.Equal(t, 1, strings.Count(out, "event: message_start"))
+	assert.NotContains(t, out, "event: error")
+	assert.Contains(t, out, "served locally")
+	assert.Equal(t, 1, streamedCount(out, fallbackBadge(f)), "the fallback badge renders once")
+	assert.NotContains(t, out, "→ claude-opus-4-7", "the refused selection's badge never reaches the client")
+}
+
+func TestSubscriptionLocalFallback_CodexRateLimitOnResponsesStreamServedLocally(t *testing.T) {
+	f := newSubscriptionFallbackFixture(t, "test-sub-fb-codex-stream", providers.ProviderOpenAI, fallbackCodexModel, false, true, nil)
+	f.upstream.subErr = codexLimit429
+	f.local.proxyResponse = localChatStreamOK
+	body := []byte(`{"model":"` + fallbackCodexModel + `","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"fix the build"}]}]}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(""))
+
+	require.NoError(t, f.svc.ProxyOpenAIResponses(codexSubscriptionCtx(io.Discard), body, rec, req))
+
+	assert.Positive(t, f.upstream.subDispatches, "the Codex subscription is tried first")
+	require.Len(t, f.local.proxyBodies, 1, "the local model serves the refused turn")
+	out := rec.Body.String()
+	assert.Equal(t, 1, strings.Count(out, "event: response.created"))
+	assert.Equal(t, 1, strings.Count(out, "event: response.output_item.added"), "badge and answer share one assistant item")
+	assert.NotContains(t, out, "event: response.failed")
+	assert.Contains(t, out, "served locally")
+	assert.Contains(t, out, "event: response.completed")
+	assert.Equal(t, 1, streamedCount(out, fallbackBadge(f)), "the fallback badge renders once")
+	assert.NotContains(t, out, "best pick", "the refused selection's badge never reaches the client")
+}
+
+// Planning the fallback defers the Responses badge to the first output; a turn
+// the subscription serves still shows its own badge exactly once.
+func TestSubscriptionLocalFallback_CodexStreamServedBySubscriptionKeepsOneBadge(t *testing.T) {
+	f := newSubscriptionFallbackFixture(t, "test-sub-fb-codex-ok", providers.ProviderOpenAI, fallbackCodexModel, false, true, nil)
+	f.upstream.okBody = func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		item := `{"id":"msg_sub","type":"message","status":"in_progress","role":"assistant","content":[]}`
+		done := `{"id":"msg_sub","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"from subscription","annotations":[]}]}`
+		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_sub\",\"status\":\"in_progress\",\"output\":[]}}\n\n"+
+			"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":"+item+"}\n\n"+
+			"event: response.content_part.added\ndata: {\"type\":\"response.content_part.added\",\"sequence_number\":2,\"item_id\":\"msg_sub\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]}}\n\n"+
+			"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"item_id\":\"msg_sub\",\"output_index\":0,\"content_index\":0,\"delta\":\"from subscription\"}\n\n"+
+			"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":4,\"output_index\":0,\"item\":"+done+"}\n\n"+
+			"event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":5,\"response\":{\"id\":\"resp_sub\",\"status\":\"completed\",\"output\":["+done+"]}}\n\n")
+	}
+	body := []byte(`{"model":"` + fallbackCodexModel + `","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"fix the build"}]}]}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(""))
+
+	require.NoError(t, f.svc.ProxyOpenAIResponses(codexSubscriptionCtx(io.Discard), body, rec, req))
+
+	assert.Empty(t, f.local.proxyBodies)
+	out := rec.Body.String()
+	assert.Contains(t, out, "from subscription")
+	assert.Equal(t, 1, streamedCount(out, "→ "+fallbackCodexModel+" · best pick"), "the subscription's badge renders once")
+	assert.NotContains(t, out, "local fallback after")
+}
+
+// A paid retry's own request rejection is the turn's real error; the earlier
+// subscription limit does not license serving it locally.
+func TestSubscriptionLocalFallback_PaidRetryRejectionSurfaces(t *testing.T) {
+	f := newSubscriptionFallbackFixture(t, "test-sub-fb-paid-400", providers.ProviderAnthropic, "claude-opus-4-7", true, true, nil)
+	f.upstream.subErr = claudeLimit429
+	f.upstream.paidErr = &providers.UpstreamErrorResponse{Status: http.StatusBadRequest, Body: []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"tools.0: unknown field"}}`)}
+
+	rec, err := f.messages(t, claudeSubscriptionCtx(), pinTestBody)
+
+	require.Error(t, err)
+	assert.Equal(t, 1, f.upstream.paidDispatches)
+	assert.Empty(t, f.local.proxyBodies, "the paid key's 400 is not served locally")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "unknown field")
+}
+
+func TestSubscriptionLocalFallback_ObservedExhaustionLocalFailureSurfacesLimit(t *testing.T) {
+	f := newSubscriptionFallbackFixture(t, "test-sub-fb-observed-fail", providers.ProviderAnthropic, "claude-opus-4-7", false, true, nil)
+	now := time.Now()
+	observer := usage.NewObserver([]byte("salt"), time.Hour, func() time.Time { return now })
+	observer.Record(observer.Key([]byte(fallbackClaudeToken)), usage.Snapshot{Secondary: usage.Window{UsedPercent: 1, WindowMinutes: 10080}})
+	f.svc.WithUsageObserver(observer)
+	f.local.proxyErr = &providers.UpstreamErrorResponse{Status: http.StatusBadGateway, Body: []byte(`{"error":{"type":"server_error","message":"local down"}}`)}
+
+	rec, err := f.messages(t, claudeSubscriptionCtx(), pinTestBody)
+
+	require.Error(t, err)
+	assert.Zero(t, f.upstream.subDispatches+f.upstream.paidDispatches, "the vendor never receives the prompt")
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code, "the client sees the subscription limit, not the local failure")
+	assert.Contains(t, rec.Body.String(), "rate_limit_error")
 }

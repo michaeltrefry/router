@@ -83,7 +83,9 @@ type subscriptionLocalFallback struct {
 	// exhaustedUnfunded is a subscription the observer already read spent, with
 	// no paid key to serve the requested model in its place.
 	exhaustedUnfunded bool
-	done              bool
+	// localFirst skips the vendor: exhaustedUnfunded with no managed seat either.
+	localFirst bool
+	done       bool
 }
 
 // planSubscriptionLocalFallback returns the turn's fallback plan when the
@@ -109,7 +111,10 @@ func (s *Service) planSubscriptionLocalFallback(ctx context.Context, res turnLoo
 	target.Provider, target.Model = s.subscriptionFallbackProvider, s.subscriptionFallbackModel
 	target.Effort = ""
 	target.Reason = reasonSubscriptionLocalFallback
-	return &subscriptionLocalFallback{target: target, original: decision, note: note, exhaustedUnfunded: exhaustedUnfunded}
+	return &subscriptionLocalFallback{
+		target: target, original: decision, note: note, exhaustedUnfunded: exhaustedUnfunded,
+		localFirst: exhaustedUnfunded && !managedSubscriptionCanServe(ctx, decision.Provider, decision.Model),
+	}
 }
 
 // subscriptionExhaustedUnfunded reports a subscription the usage observer read
@@ -127,19 +132,42 @@ func (s *Service) subscriptionExhaustedUnfunded(ctx context.Context, decision ro
 }
 
 // refusal returns the subscription refusal the fallback answers, or nil when
-// err is not one: a noted limit refusal, an exhausted subscription pool, or
-// any failure of a turn whose subscription was already read spent.
+// err is not one: a noted limit refusal whose final error is still a capacity
+// failure, an exhausted subscription pool, or a subscription already read spent.
+// A request or credential rejection from a later paid retry surfaces as is.
 func (fb *subscriptionLocalFallback) refusal(err error) error {
 	if fb == nil || fb.done || err == nil {
 		return nil
 	}
 	if fb.note != nil && fb.note.err != nil {
-		return fb.note.err
+		if providers.IsRetryable(err) || isSubscriptionPoolError(err) || subscriptionLimitRefusal(err) {
+			return fb.note.err
+		}
+		return nil
 	}
 	if errors.Is(err, ErrSubscriptionPoolExhausted) || fb.exhaustedUnfunded {
 		return err
 	}
 	return nil
+}
+
+// servesFirst reports a turn the local model takes before any vendor dispatch.
+func (fb *subscriptionLocalFallback) servesFirst() bool {
+	return fb != nil && fb.localFirst
+}
+
+// unfundedRefusal is the limit refusal a servesFirst turn stands in for; the
+// client sees it if the local model fails before output.
+func (fb *subscriptionLocalFallback) unfundedRefusal() error {
+	errType := "rate_limit_error"
+	if fb.original.Provider == providers.ProviderOpenAI {
+		errType = "usage_limit_reached"
+	}
+	return &providers.UpstreamErrorResponse{
+		Status:  http.StatusTooManyRequests,
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"error":{"type":"` + errType + `","message":"The ` + fb.original.Model + ` subscription usage limit is reached and no API key is configured to continue."}}`),
+	}
 }
 
 // holds reports whether the deferred error must stay off the wire because the
