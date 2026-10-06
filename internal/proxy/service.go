@@ -736,9 +736,8 @@ func routingMarkerFor(res turnLoopResult) string {
 	return strings.Join(parts, " · ") + "\n\n"
 }
 
-// markerModelLabel names the decision's model in the routing marker, tagging a
-// self-hosted model so the user can tell a local turn from a cloud model that
-// shares its name.
+// markerModelLabel names the decision's model in the routing marker, marking
+// a turn served by a self-hosted model.
 func markerModelLabel(decision router.Decision) string {
 	if providers.IsLocalProvider(decision.Provider) {
 		return decision.Model + " (local)"
@@ -6164,7 +6163,7 @@ func (s *Service) excludeCodexOAuthOnlyModels(
 func resolveAndInjectCredentials(ctx context.Context, provider, model string, headers http.Header) context.Context {
 	// A local model authenticates only with its configured key; any inbound or
 	// earlier-attempt credential belongs to a different upstream.
-	if strings.HasPrefix(provider, providers.LocalProviderPrefix) {
+	if providers.IsLocalProvider(provider) {
 		return clearCredentials(ctx)
 	}
 	routerKeyed := installationIDFromContext(ctx) != (uuid.UUID{})

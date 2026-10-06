@@ -30,7 +30,7 @@ func IsLocalProvider(name string) bool {
 // provider maps. Boot-time only: the maps are read without locking once the
 // server is serving.
 func RegisterLocalProvider(name, apiKeyEnvVar string) error {
-	if !strings.HasPrefix(name, LocalProviderPrefix) {
+	if !IsLocalProvider(name) {
 		return fmt.Errorf("local provider %q must start with %q", name, LocalProviderPrefix)
 	}
 	if apiKeyEnvVar == "" {
