@@ -176,6 +176,7 @@ func TestPrepare_CountsUnresolvedToolReferences(t *testing.T) {
 		`{"type":"tool_addition","tool":{"type":"tool_reference","name":"Read"}},` +
 		`{"type":"tool_addition","tool":{"type":"tool_reference","name":"mcp__ghost"}},` +
 		`{"type":"tool_addition","tool":{"type":"tool_reference","name":"mcp__phantom"}},` +
+		`{"type":"tool_addition","tool":{"name":"mcp__inline","input_schema":{"type":"object"}}},` +
 		`{"type":"text","text":"go"}]}]}`
 	env, err := translate.ParseAnthropic([]byte(body))
 	require.NoError(t, err)
@@ -183,7 +184,7 @@ func TestPrepare_CountsUnresolvedToolReferences(t *testing.T) {
 	chat, err := env.PrepareOpenAI(http.Header{}, translate.EmitOptions{TargetModel: "local-model"})
 	require.NoError(t, err)
 	assert.Equal(t, 2, chat.Stats.ToolReferencesUnresolved)
-	assert.Equal(t, []string{"Read"}, emittedToolNames(t, chat.Body))
+	assert.Equal(t, []string{"Read", "mcp__inline"}, emittedToolNames(t, chat.Body))
 
 	resp, err := env.PrepareOpenAIResponses(http.Header{}, translate.EmitOptions{TargetModel: "gpt-5.6-luna"})
 	require.NoError(t, err)
