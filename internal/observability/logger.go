@@ -151,8 +151,8 @@ func serviceName() string {
 		}
 	}
 	resourceAttributes, _ := ResourceAttributesFromEnvironment(context.Background())
-	if name := strings.TrimSpace(resourceAttributes["service.name"]); name != "" {
-		return name
+	if serviceName := strings.TrimSpace(resourceAttributes["service.name"]); serviceName != "" {
+		return serviceName
 	}
 	return defaultServiceName
 }
