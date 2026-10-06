@@ -6732,6 +6732,9 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 
 	// OpenAI signals sub-agent identity via x-weave-subagent-type (no metadata.user_id).
 	subAgentHint := r.Header.Get("x-weave-subagent-type")
+	if subAgentHint == "" {
+		subAgentHint = s.codexLocalSubAgentHint(ctx, r.Header)
+	}
 
 	enabledProviders := s.enabledProvidersForRequest(ctx, providers.ProviderOpenAI, r.Header)
 
@@ -7200,6 +7203,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 	buildAttempt := func(target router.Decision, targetOpts translate.EmitOptions, targetMarker string) (dispatchAttempt, error) {
 		if rw, ok := w.(*translate.ResponsesWriter); ok {
 			rw.SetRoutedModel(target.Model)
+			rw.SetThinkTagReasoning(catalog.ThinkTagReasoningFor(target.Model))
 			if targetMarker != "" && targetMarker != responsesMarker {
 				if err := rw.EmitRoutingBadge(targetMarker); err != nil {
 					return nil, fmt.Errorf("emit Responses routing badge: %w", err)
@@ -8290,6 +8294,10 @@ func stripResponsesTerminalArtifacts(body []byte) ([]byte, error) {
 // re-emitted as Responses-shaped SSE / JSON. This keeps the turn loop, cache,
 // pricing, and translation matrix unchanged.
 func (s *Service) ProxyOpenAIResponses(ctx context.Context, body []byte, w http.ResponseWriter, r *http.Request) error {
+	body, err := translate.StripRouterReasoningFromResponsesInput(body)
+	if err != nil {
+		return fmt.Errorf("strip router reasoning from Responses input: %w", err)
+	}
 	ctx = context.WithValue(ctx, responsesSurfaceContextKey{}, true)
 	ctx, inputErr := s.withClassifierInput(ctx, body, router.EndpointOpenAIResponses)
 	if inputErr != nil {
@@ -8304,7 +8312,6 @@ func (s *Service) ProxyOpenAIResponses(ctx context.Context, body []byte, w http.
 	}
 	nativeBody := body
 	conversionBody := body
-	var err error
 	if terminalResponses {
 		nativeBody, err = stripResponsesTerminalArtifacts(body)
 		if err != nil {
