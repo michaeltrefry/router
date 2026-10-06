@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -14,6 +13,10 @@ import (
 	"weave-os/router/internal/router/taskdomain"
 	"weave-os/router/internal/sqlc"
 )
+
+// ErrTaskProfileCapacity reports that every inference transaction slot stayed busy for the
+// bounded wait; it is capacity pressure, not a classifier or request timeout.
+var ErrTaskProfileCapacity = errors.New("task profile transaction capacity reached")
 
 // slotWait bounds how long a first turn waits for an inference transaction slot, leaving
 // most of the request's taskdomain.Timeout for classification itself.
@@ -58,7 +61,10 @@ func (r *TaskDomainRepo) Resolve(ctx context.Context, key taskdomain.Key, resume
 	err = r.transactions.Acquire(slotCtx, 1)
 	cancelSlot()
 	if err != nil {
-		return taskdomain.Outcome{}, fmt.Errorf("task profile transaction capacity: %w", err)
+		if ctx.Err() != nil {
+			return taskdomain.Outcome{}, ctx.Err()
+		}
+		return taskdomain.Outcome{}, ErrTaskProfileCapacity
 	}
 	defer r.transactions.Release(1)
 	var outcome taskdomain.Outcome

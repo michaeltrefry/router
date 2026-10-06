@@ -4,7 +4,8 @@
 INSERT INTO router.task_domain_profiles (conversation_key, root_sha256, release_sha256, evidence_sha256)
 VALUES (@conversation_key::text, @root_sha256::text, @release_sha256::text, @evidence_sha256::text)
 ON CONFLICT (conversation_key, root_sha256, release_sha256, evidence_sha256)
-DO UPDATE SET outcome = NULL, retry_after = NULL, expires_at = CURRENT_TIMESTAMP + INTERVAL '30 days'
+DO UPDATE SET outcome = NULL, retry_after = NULL,
+    expires_at = CASE WHEN task_domain_profiles.expires_at <= CURRENT_TIMESTAMP THEN CURRENT_TIMESTAMP + INTERVAL '30 days' ELSE task_domain_profiles.expires_at END
 WHERE task_domain_profiles.expires_at <= CURRENT_TIMESTAMP
 OR task_domain_profiles.retry_after <= CURRENT_TIMESTAMP;
 

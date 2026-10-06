@@ -133,7 +133,8 @@ const insertTaskDomainProfile = `-- name: InsertTaskDomainProfile :exec
 INSERT INTO router.task_domain_profiles (conversation_key, root_sha256, release_sha256, evidence_sha256)
 VALUES ($1::text, $2::text, $3::text, $4::text)
 ON CONFLICT (conversation_key, root_sha256, release_sha256, evidence_sha256)
-DO UPDATE SET outcome = NULL, retry_after = NULL, expires_at = CURRENT_TIMESTAMP + INTERVAL '30 days'
+DO UPDATE SET outcome = NULL, retry_after = NULL,
+    expires_at = CASE WHEN task_domain_profiles.expires_at <= CURRENT_TIMESTAMP THEN CURRENT_TIMESTAMP + INTERVAL '30 days' ELSE task_domain_profiles.expires_at END
 WHERE task_domain_profiles.expires_at <= CURRENT_TIMESTAMP
 OR task_domain_profiles.retry_after <= CURRENT_TIMESTAMP
 `
@@ -151,7 +152,8 @@ type InsertTaskDomainProfileParams struct {
 //	INSERT INTO router.task_domain_profiles (conversation_key, root_sha256, release_sha256, evidence_sha256)
 //	VALUES ($1::text, $2::text, $3::text, $4::text)
 //	ON CONFLICT (conversation_key, root_sha256, release_sha256, evidence_sha256)
-//	DO UPDATE SET outcome = NULL, retry_after = NULL, expires_at = CURRENT_TIMESTAMP + INTERVAL '30 days'
+//	DO UPDATE SET outcome = NULL, retry_after = NULL,
+//	    expires_at = CASE WHEN task_domain_profiles.expires_at <= CURRENT_TIMESTAMP THEN CURRENT_TIMESTAMP + INTERVAL '30 days' ELSE task_domain_profiles.expires_at END
 //	WHERE task_domain_profiles.expires_at <= CURRENT_TIMESTAMP
 //	OR task_domain_profiles.retry_after <= CURRENT_TIMESTAMP
 func (q *Queries) InsertTaskDomainProfile(ctx context.Context, arg InsertTaskDomainProfileParams) error {

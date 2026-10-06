@@ -149,25 +149,25 @@ func check(dsn string) (checkErr error) {
 	}
 	// A failed root past its retry window still counts toward resume ambiguity, so a
 	// successful sibling (e.g. a subagent) never becomes the conversation's resume profile.
-	other := taskdomain.Key{Conversation: identity(), Root: identity(), Release: key.Release, Evidence: key.Evidence}
+	resumeAmbiguityKey := taskdomain.Key{Conversation: identity(), Root: identity(), Release: key.Release, Evidence: key.Evidence}
 	defer func() {
 		cleanupCtx, stop := context.WithTimeout(context.Background(), time.Second)
 		defer stop()
-		_, err := pool.Exec(cleanupCtx, "DELETE FROM router.task_domain_profiles WHERE conversation_key = $1", other.Conversation)
+		_, err := pool.Exec(cleanupCtx, "DELETE FROM router.task_domain_profiles WHERE conversation_key = $1", resumeAmbiguityKey.Conversation)
 		checkErr = errors.Join(checkErr, err)
 	}()
-	if _, err := repo.Resolve(ctx, other, false, failure); err != nil {
+	if _, err := repo.Resolve(ctx, resumeAmbiguityKey, false, failure); err != nil {
 		return err
 	}
-	sibling := other
+	sibling := resumeAmbiguityKey
 	sibling.Root = identity()
 	if _, err := repo.Resolve(ctx, sibling, false, classify); err != nil {
 		return err
 	}
-	if _, err := pool.Exec(ctx, "UPDATE router.task_domain_profiles SET retry_after = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE conversation_key = $1 AND root_sha256 = $2", other.Conversation, other.Root); err != nil {
+	if _, err := pool.Exec(ctx, "UPDATE router.task_domain_profiles SET retry_after = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE conversation_key = $1 AND root_sha256 = $2", resumeAmbiguityKey.Conversation, resumeAmbiguityKey.Root); err != nil {
 		return err
 	}
-	stillAmbiguous, err := repo.Resolve(ctx, other, true, classify)
+	stillAmbiguous, err := repo.Resolve(ctx, resumeAmbiguityKey, true, classify)
 	if err != nil || stillAmbiguous.Status != taskdomain.NoTask {
 		return fmt.Errorf("retryable failure exposed a sibling resume profile: %v, %v", stillAmbiguous.Status, err)
 	}
@@ -265,8 +265,8 @@ func check(dsn string) (checkErr error) {
 	gaveUp := key
 	gaveUp.Root = identity()
 	waitStarted := time.Now()
-	if _, err := repo.Resolve(ctx, gaveUp, false, classify); err == nil || time.Since(waitStarted) > 2*time.Second {
-		return fmt.Errorf("slot wait not bounded: %v after %s", err, time.Since(waitStarted))
+	if _, err := repo.Resolve(ctx, gaveUp, false, classify); !errors.Is(err, postgres.ErrTaskProfileCapacity) || time.Since(waitStarted) > 2*time.Second {
+		return fmt.Errorf("slot wait not bounded or misreported: %v after %s", err, time.Since(waitStarted))
 	}
 	releaseBlockers <- struct{}{}
 	releaseBlockers <- struct{}{}
