@@ -4682,10 +4682,12 @@ case "$first_line" in
   "${router_badge_sentinel}✦ **Weave Router** → "*)
     marker_model="${first_line#"${router_badge_sentinel}✦ **Weave Router** → "}"
     marker_model="${marker_model%% ·*}"
+    marker_model="${marker_model% (local)}"
     ;;
   "✦ **Weave Router** → "*)
     marker_model="${first_line#"✦ **Weave Router** → "}"
     marker_model="${marker_model%% ·*}"
+    marker_model="${marker_model% (local)}"
     ;;
 esac
 case "$first_line" in

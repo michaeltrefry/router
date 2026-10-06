@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,11 +13,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 
+	"weave-os/router/internal/observability"
 	"weave-os/router/internal/providers"
 	"weave-os/router/internal/proxy"
 	"weave-os/router/internal/router"
@@ -259,6 +263,11 @@ func (r *unusedRouter) Route(context.Context, router.Request) (router.Decision, 
 // (config file → provider, client, catalog row) next to an Anthropic client.
 func localModelService(t *testing.T, id string, upstream *localUpstream) (*proxy.Service, *recordingAnthropic, *unusedRouter) {
 	t.Helper()
+	return localModelServiceWithTelemetry(t, id, upstream, nil)
+}
+
+func localModelServiceWithTelemetry(t *testing.T, id string, upstream *localUpstream, telemetry proxy.TelemetryRepository) (*proxy.Service, *recordingAnthropic, *unusedRouter) {
+	t.Helper()
 	path := writeLocalModelsFile(t, localEntryYAML(id, upstream.baseURL, "LOCAL_TEST_KEY"))
 	anthropicClient := &recordingAnthropic{}
 	providerMap := map[string]providers.Client{providers.ProviderAnthropic: anthropicClient}
@@ -274,7 +283,7 @@ func localModelService(t *testing.T, id string, upstream *localUpstream) (*proxy
 		delete(providers.APIKeyEnvVars, provider)
 	})
 	rtr := &unusedRouter{}
-	svc := proxy.NewService(rtr, providerMap, nil, false, nil, nil, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+	svc := proxy.NewService(rtr, providerMap, nil, false, nil, nil, false, providers.ProviderAnthropic, "claude-haiku-4-5", telemetry).
 		WithDeploymentKeyedProviders(keyed)
 	return svc, anthropicClient, rtr
 }
@@ -390,4 +399,79 @@ func TestLocalModel_TurnRoutingDispatchesTitleGenLocally(t *testing.T) {
 	anthropicClient.mu.Lock()
 	defer anthropicClient.mu.Unlock()
 	assert.Len(t, anthropicClient.creds, 1, "the main-loop turn stays on normal routing")
+}
+
+// recordingTelemetry captures the telemetry rows the dashboard metrics
+// aggregate; every other repository method is unused here.
+type recordingTelemetry struct {
+	proxy.TelemetryRepository
+	mu   sync.Mutex
+	rows []proxy.InsertTelemetryParams
+}
+
+func (r *recordingTelemetry) InsertRequestTelemetry(_ context.Context, p proxy.InsertTelemetryParams) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rows = append(r.rows, p)
+	return nil
+}
+
+func (r *recordingTelemetry) snapshot() []proxy.InsertTelemetryParams {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]proxy.InsertTelemetryParams(nil), r.rows...)
+}
+
+// localMainLoopBody carries a tool registry, as a real Claude Code turn does;
+// a tool-less short request is a classifier turn, which never shows a marker.
+const localMainLoopBody = `{"model":"claude-sonnet-4-6","max_tokens":8192,"stream":true,"tools":[{"name":"Read","description":"Read a file","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}],"messages":[{"role":"user","content":"hello"}]}`
+
+func TestLocalModel_ForcedTurnRecordsZeroCostAndNamesLocalModel(t *testing.T) {
+	const id = "test-local-metrics"
+	upstream := newLocalUpstream(t)
+	tel := &recordingTelemetry{}
+	svc, _, _ := localModelServiceWithTelemetry(t, id, upstream, tel)
+	var logs bytes.Buffer
+	ctx := observability.WithLogger(routerKeyedCtx(), slog.New(slog.NewJSONHandler(&logs, nil)))
+
+	rec := httptest.NewRecorder()
+	require.NoError(t, svc.ProxyMessages(ctx, []byte(localMainLoopBody), rec, claudeCodeRequest(id)))
+
+	assert.Contains(t, rec.Body.String(), "→ "+id+" (local)", "the routing marker names the model and its local source")
+
+	require.Eventually(t, func() bool { return len(tel.snapshot()) == 1 }, 2*time.Second, 10*time.Millisecond)
+	row := tel.snapshot()[0]
+	assert.Equal(t, id, row.DecisionModel)
+	assert.Equal(t, providers.LocalProviderName(id), row.DecisionProvider)
+	assert.Positive(t, row.InputTokens, "the turn's usage is recorded")
+	assert.Positive(t, row.RequestedInputCostUSD, "the requested baseline is still priced")
+	assert.Zero(t, row.ActualInputCostUSD+row.ActualOutputCostUSD, "a local turn costs $0")
+
+	var complete map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var entry map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &entry))
+		if entry["msg"] == "ProxyMessages complete" {
+			complete = entry
+		}
+	}
+	require.NotNil(t, complete, "the decision log line is emitted")
+	assert.Equal(t, id, complete["decision_model"])
+	assert.Equal(t, providers.LocalProviderName(id), complete["decision_provider"])
+	assert.Contains(t, complete["routing_marker"], id+" (local)")
+}
+
+func TestLocalModel_ExcludedLocalModelIsNotServed(t *testing.T) {
+	const id = "test-local-excluded"
+	upstream := newLocalUpstream(t)
+	svc, _, _ := localModelService(t, id, upstream)
+	ctx := context.WithValue(routerKeyedCtx(), proxy.InstallationExcludedModelsContextKey{}, []string{id})
+
+	rec := httptest.NewRecorder()
+	err := svc.ProxyMessages(ctx, []byte(localTestBody), rec, claudeCodeRequest(id))
+
+	require.ErrorIs(t, err, proxy.ErrForcedModelExcluded, "a dashboard-excluded local model is refused, not served")
+	upstream.mu.Lock()
+	defer upstream.mu.Unlock()
+	assert.Empty(t, upstream.bodies, "the excluded local upstream is never called")
 }

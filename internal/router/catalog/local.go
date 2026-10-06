@@ -41,6 +41,12 @@ func RegisterLocalModels(models ...Model) error {
 	return nil
 }
 
+// IsLocal reports whether id was registered by RegisterLocalModels.
+func IsLocal(id string) bool {
+	_, local := localIDs[id]
+	return local
+}
+
 // UnregisterLocalModels removes rows previously added by RegisterLocalModels;
 // other IDs are ignored. Same boot-time-only constraint as registration.
 func UnregisterLocalModels(ids ...string) {
