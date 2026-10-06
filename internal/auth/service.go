@@ -1022,7 +1022,7 @@ func (s *Service) withBlindExperiment(ctx context.Context, installationID, route
 		}
 	}
 	if !resolved {
-		if !hasFetched {
+		if !hasFetched || ctx.Err() != nil {
 			return ctx
 		}
 		// Invalidations here are usually unchanged-config fanout. Dropping the
