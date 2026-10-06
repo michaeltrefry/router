@@ -10,6 +10,7 @@ Provider `Client` interface + canonical `Provider*` name constants + concrete ad
 - `anthropic/`, `openai/`, `google/`, `openaicompat/` — concrete adapters.
 - `cortexagents/` — Snowflake Cortex Agents (`agent:run`). Not a `providers.Client`: it implements `websearch.Executor` only, serving the native web-search server tool that Cortex's inference endpoints reject.
 - `httputil/` — shared transport + streaming helpers.
+- `local.go` — boot-time `RegisterLocalProvider` for self-hosted models declared in `ROUTER_LOCAL_MODELS_FILE`: one `local_<id>` provider per model, `FamilyOpenAICompat`, never a gateway.
 
 ## Request-scoped context
 

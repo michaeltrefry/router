@@ -199,6 +199,14 @@ func resolveForceModel(model string) (canonicalID, provider string, known bool) 
 	return canon, prov, kn
 }
 
+// ForceModelShadowTarget reports the catalog model that forcing name already
+// resolves to through an alias or bare-name lookup. A model registered under a
+// shadowed name could never be forced, so boot configuration rejects it.
+func ForceModelShadowTarget(name string) (target string, shadowed bool) {
+	canonical, _, known := resolveForceModel(name)
+	return canonical, known && canonical != name
+}
+
 // resolveForceModelWithEffort is like resolveForceModel but also strips a
 // `:level` suffix. `known` is true only for catalog matches; known=false +
 // effort!="" lets callers surface "model not found" without losing the effort.

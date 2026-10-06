@@ -6147,6 +6147,11 @@ func (s *Service) excludeCodexOAuthOnlyModels(
 // the client's inbound key to a different upstream provider. The deployment
 // env key is the correct fallback there.
 func resolveAndInjectCredentials(ctx context.Context, provider, model string, headers http.Header) context.Context {
+	// A local model authenticates only with its configured key; any inbound or
+	// earlier-attempt credential belongs to a different upstream.
+	if strings.HasPrefix(provider, providers.LocalProviderPrefix) {
+		return clearCredentials(ctx)
+	}
 	routerKeyed := installationIDFromContext(ctx) != (uuid.UUID{})
 	// Skip subscription OAuth (fall through to BYOK / deployment key):
 	// exhausted (Anthropic-only, avoid re-429), toggle off (provider-wide), or

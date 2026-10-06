@@ -499,6 +499,11 @@ func main() {
 			})
 	}
 
+	if err := loadLocalModels(os.Getenv, providerMap, envKeyedProviders, logger); err != nil {
+		logger.Error("Invalid local models configuration; refusing to boot", "err", err)
+		panic(err)
+	}
+
 	availableProviders := make(map[string]struct{}, len(providerMap))
 	for name := range providerMap {
 		availableProviders[name] = struct{}{}

@@ -8,6 +8,7 @@ This page is the exhaustive reference; the [README](../README.md) has the
 ## Table of contents
 
 - [Provider API keys](#provider-api-keys)
+  - [Local models](#local-models)
   - [Key-pair auth](#key-pair-auth)
   - [Workload identity federation](#workload-identity-federation)
 - [Postgres](#postgres)
@@ -185,6 +186,30 @@ curl -sS -b jar -X PUT https://<router>/admin/v1/provider-keys/<key id>/model-al
   -H 'content-type: application/json' \
   -d '{"model_aliases":{"claude-fable-5":"internal.claude-fable-5"}}'
 ```
+
+### Local models
+
+Self-hosted OpenAI-compatible servers (llama.cpp, vLLM, …) are added by
+configuration, not code. Point `ROUTER_LOCAL_MODELS_FILE` at a YAML file; start
+from [`local-models.example.yaml`](local-models.example.yaml).
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `id` | yes | Catalog model ID and `x-weave-force-model` name. Lowercase `[a-z0-9._-]`, must not collide with a catalog ID or force-model alias. |
+| `base_url` | yes | Absolute `http(s)` base; `/chat/completions` is appended. |
+| `api_key_env` | yes | Name of the env var holding the bearer key; boot fails when it is unset. |
+| `upstream_model` | yes | Model name sent in the request body. |
+| `context_window` | yes | Total token budget. |
+| `tier` | yes | `low`, `mid` or `high`. |
+| `tool_use`, `agentic` | no | `default` or `low`; `low` keeps the model off tool-bearing / agentic turns. |
+| `image_input` | no | `true` when the model accepts images; defaults to text-only. |
+| `reasoning_format` | no | `reasoning_content` (default) or `think_tags` for inline `<think>` output. |
+
+Each entry registers its own provider, `local_<id>`, priced at $0 and keyed by
+the deployment, so several local servers coexist. A local provider is never
+gateway-exclusive: Claude and Codex subscriptions and other providers stay
+enrolled. Any invalid entry (missing field, unset key variable, duplicate or
+shadowed `id`, unknown field) fails boot with a named error.
 
 ### Key-pair auth
 
