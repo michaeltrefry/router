@@ -65,7 +65,7 @@ def request_deadline(budget_header: str | None) -> float:
 
 
 async def cancel_on_disconnect(request: Request, classification_task: asyncio.Task[tuple[list[int], str]]) -> None:
-    """Cancels in-flight classification_task once the caller hangs up, which aborts it in the engine."""
+    """Cancels in-flight work once the caller hangs up, which aborts it in the engine."""
     while (await request.receive())["type"] != "http.disconnect":
         pass
     classification_task.cancel()
@@ -113,7 +113,7 @@ def create_app(predictor: Predictor, release_sha256: str, bearer: str) -> FastAP
             raise HTTPException(503, "classifier busy")
         in_flight += 1
         try:
-            # The deadline and disconnect watcher cover tokenization too, so stale classification_task frees its slot.
+            # The deadline and disconnect watcher cover tokenization too, so stale work frees its slot.
             classification_task: asyncio.Task[tuple[list[int], str]] = asyncio.create_task(tokenize_and_classify(predictor, classification.user_text))
             disconnect_watcher: asyncio.Task[None] = asyncio.create_task(cancel_on_disconnect(request, classification_task))
             try:
