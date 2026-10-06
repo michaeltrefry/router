@@ -502,6 +502,20 @@ class ComposeMergeTest(unittest.TestCase):
             self.assertEqual(
                 server["environment"]["ANTHROPIC_API_KEY"], runner.PLACEHOLDER_KEY
             )
+            self.assertEqual(
+                server["environment"]["ROUTER_LOCAL_MODELS_FILE"],
+                runner.LOCAL_MODELS_PATH,
+            )
+            local_models = next(
+                mount
+                for mount in server["volumes"]
+                if mount["target"] == runner.LOCAL_MODELS_PATH
+            )
+            self.assertTrue(local_models["read_only"])
+            self.assertTrue(
+                any(mount["target"] == "/certs" for mount in server["volumes"]),
+                "the fixture mount must not replace the proxy CA mount",
+            )
             self.assertNotIn("ports", server)
             ingress = config["services"]["smoke-ingress"]
             self.assertEqual(ingress["ports"][0]["host_ip"], "127.0.0.1")

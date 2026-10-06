@@ -181,6 +181,7 @@ recording OpenAI by omitting
 | `smoke/streaming_test.go` | tool-use stream lifecycle: balanced `content_block_start/stop`, exactly one `message_stop`, `stop_reason` present |
 | `smoke/tool_delta_test.go` | non-system `tool_addition` and `tool_removal` blocks are normalized and accepted by Anthropic |
 | `smoke/openai_test.go` | OpenAI Responses-API translation path (gpt-5.x + tools): a genuinely typeless optional tool param round-trips without a 400; basic turn served correctly |
+| `smoke/local_model_test.go` | self-hosted OpenAI-compatible model (`smoke/fixtures/local-models.yaml`) on the Anthropic ingress: a streamed tool turn yields balanced blocks, a thinking block from `reasoning_content`, a `tool_use` block, one `message_stop` and no leaked `: keep-alive`; a non-streamed turn is served by `local_smoke-local` |
 
 ## Regression proof
 
@@ -215,6 +216,17 @@ old fixture mismatch, or build failure is not a successful fail-before proof.
 4. Record the new cassette: `ANTHROPIC_API_KEY=… [OPENAI_API_KEY=…]
    SMOKE_PROXY_MODE=record make smoke`, then review and commit the new
    file(s) under `smoke/mitmproxy/cassettes/`.
+
+A provider that cannot be recorded, such as a self-hosted local model, gets an
+authored cassette instead. Its fixture names an `https` base URL on a reserved
+`.test` host: the router's transport sends it through `HTTPS_PROXY` to the MITM
+proxy, which matches cassettes by method, path and body only, so the host is
+never resolved. Run the scenario once in replay mode; the cache-miss 502 (and
+the proxy log) names the request key, and the cassette is
+`smoke/mitmproxy/cassettes/<key>.json` with an authored synthetic response. The
+scenario skips itself in `record` mode, so a refresh never needs that server.
+`smoke/local_model_test.go`'s two cassettes (`d4cffc98…` streamed,
+`3423b631…` non-streamed) are authored this way.
 
 ## Refreshing cassettes
 
