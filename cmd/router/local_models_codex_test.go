@@ -98,7 +98,7 @@ func codexLocalServiceFromEntry(t *testing.T, id, entryYAML, extraYAML string) (
 	rtr := &codexRouter{}
 	svc := proxy.NewService(rtr, providerMap, nil, false, nil, nil, false, providers.ProviderOpenAI, "gpt-5.6-luna", nil).
 		WithDeploymentKeyedProviders(keyed).
-		WithLocalTurnRoute(route)
+		WithLocalTurnRoute(route.turnRoute)
 	return svc, openAIClient, rtr
 }
 
