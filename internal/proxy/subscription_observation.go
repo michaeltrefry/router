@@ -183,7 +183,13 @@ func (s *Service) withUsageObserver(ctx context.Context, headers http.Header) co
 
 func (s *Service) subscriptionUsageKey(creds *Credentials) usage.CredentialKey {
 	if creds.SubscriptionAccountID != "" {
-		return s.usageObserver.Key([]byte("subscription-account:" + creds.SubscriptionAccountID))
+		return s.managedSubscriptionUsageKey(creds.SubscriptionAccountID)
 	}
 	return s.usageObserver.Key(creds.APIKey)
+}
+
+// managedSubscriptionUsageKey is the stable observer key for a managed
+// account: its physical identity, not the rotating access token.
+func (s *Service) managedSubscriptionUsageKey(accountID string) usage.CredentialKey {
+	return s.usageObserver.Key([]byte("subscription-account:" + accountID))
 }

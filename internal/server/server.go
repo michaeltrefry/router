@@ -266,6 +266,9 @@ func RegisterWithFeatures(engine *gin.Engine, authSvc *auth.Service, proxySvc *p
 	adminAuthed.Use(servingAdmissionMiddleware...)
 	adminAuthed.GET("/validate", admin.ValidateHandler)
 	adminAuthed.POST("/v1/client-events", admin.ClientEventHandler(authSvc))
+	// Read-only, in-memory quota windows for the caller's own subscriptions;
+	// mounted regardless of managed accounts so presented tokens are readable.
+	subscriptionsapi.RegisterUsage(adminAuthed, authSvc, proxySvc)
 	if authSvc.SubscriptionAccountsEnabled() {
 		subscriptionGroup := engine.Group("/v1", middleware.WithTimeout(subscriptionAccountTimeout), middleware.WithAuth(authSvc, byokRequiresOptIn, features.ServingAdmission))
 		subscriptionGroup.Use(servingAdmissionMiddleware...)

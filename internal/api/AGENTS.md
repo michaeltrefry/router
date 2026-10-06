@@ -11,6 +11,7 @@ Presentation layer. Handlers adapt HTTP ↔ Service. Read [root CLAUDE.md](../..
 - `openai/` — OpenAI Chat Completions (`/v1/chat/completions`)
 - `gemini/` — Gemini native (`/v1beta/models/:modelAction`)
 - `analytics/` — read-only routing-decision export (`/v1/analytics/routing-decisions`, `/models`, `/schema`). Authed by `ra_` analytics keys via `middleware.WithAnalyticsKey` **only** — no `WithAuth`, no balance check, no spend cap, since nothing here can route or spend.
+- `subscriptions/` — authenticated (`WithAuth`) subscription surface. `/v1/subscriptions/accounts` manages router-held accounts (mounted only when managed accounts are configured). `GET /v1/subscriptions/usage` is a read-only view of `internal/proxy/usage` quota windows (utilization, `reset_at`, exhausted, overage, `observed_at`) scoped to exactly the caller's credentials: subscription tokens presented on that request (proof of possession) plus managed accounts owned by the key's verified personal subject. Credentials appear only as the salted `credential_key`; never echo a token. Readings are per-process memory, so a multi-worker deployment answers from the serving worker only.
 - `feedback/` — no-login feedback-link surface (`/f/<token>`, rating submit). The token itself (signed via [`internal/feedback`](../feedback)) is the sole credential, so this is the one subpackage that **deliberately carries no auth middleware** — do not add `WithAuth`/`WithAdminOnly` here; that would break the whole point of a shareable no-login link.
 
 ## Import rules
