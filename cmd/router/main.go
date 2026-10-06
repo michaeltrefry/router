@@ -499,7 +499,8 @@ func main() {
 			})
 	}
 
-	if err := loadLocalModels(os.Getenv, providerMap, envKeyedProviders, logger); err != nil {
+	localTurnRoute, err := loadLocalModels(os.Getenv, providerMap, envKeyedProviders, logger)
+	if err != nil {
 		logger.Error("Invalid local models configuration; refusing to boot", "err", err)
 		panic(err)
 	}
@@ -1315,6 +1316,7 @@ func main() {
 		WithPassthroughEligibleProviders(passthroughEligible).
 		WithHardPinResolver(hardPinResolver).
 		WithSubAgentOverride(subAgentProvider, subAgentModel).
+		WithLocalTurnRoute(localTurnRoute).
 		WithPlannerEnabled(plannerEnabled).
 		WithScoreToolResultTurns(scoreToolResultTurns).
 		WithCyberRefusalRepin(cyberRefusalRepin).

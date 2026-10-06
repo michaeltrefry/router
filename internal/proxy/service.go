@@ -143,6 +143,11 @@ type Service struct {
 	// classifier on the shared hard pin.
 	subAgentProvider string
 	subAgentModel    string
+	// localTurn{Provider,Model} serve localTurnTypes ahead of the hard pin
+	// and the scorer; see WithLocalTurnRoute.
+	localTurnProvider string
+	localTurnModel    string
+	localTurnTypes    map[turntype.TurnType]struct{}
 	// telemetry is an optional repository for persisting per-request telemetry.
 	telemetry TelemetryRepository
 	// turnClock times user prompts against the previous response; nil leaves

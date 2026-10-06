@@ -18,3 +18,14 @@ models:
     image_input: false
     # reasoning_content (OpenAI-compatible field) | think_tags (inline <think>)
     reasoning_format: reasoning_content
+
+# Optional: serve these turn types on one of the models above. Omit the block to
+# keep every turn on normal routing. A turn falls back to normal routing when the
+# installation excluded the model, it cannot carry the request (context window,
+# images, tool_use/agentic: low on a tool-bearing turn), or a user forced a model.
+turn_routing:
+  model: qwen3.8-flash-next
+  # Default when omitted: sub_agent_dispatch, title_gen, probe, recap.
+  # Only these four are accepted; main-loop, tool-result, classifier and
+  # compaction turns are never served by this route.
+  turn_types: [sub_agent_dispatch, title_gen, probe, recap]
