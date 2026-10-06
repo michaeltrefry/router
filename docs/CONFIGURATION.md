@@ -368,9 +368,13 @@ A rescued turn logs `Local model failed before output; serving the turn on its
 normal route` with `local_model`, `local_source` (`local_turn_route` or
 `mid_tier_substitute`), `fallback_model` and the failure's status. Its
 completion line carries `local_failure_fallback=true` and the serving model as
-`decision_model`; the span carries `dispatch.local_failure_fallback`. Turns
-that show a routing marker read `→ <model> · local <id> failed`; title, probe,
-recap and other hard-pinned turns never carry a marker. The session pin and
+`decision_model`; the span carries `dispatch.local_failure_fallback`. The
+marker is the one the normal route would show, followed by
+`· local <id> failed`; a turn whose normal marker is hidden (title, probe,
+recap and other hard-pinned turns, or the model the session was served last
+turn) carries none. If the normal target then fails too, it gets the rescues it
+would have had without local rules: the paid-key retry of a subscription
+refusal, same-cluster peers and the baseline model. The session pin and
 HMM history record the model that served, as for a normally routed turn.
 
 ### Key-pair auth

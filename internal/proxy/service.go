@@ -4529,16 +4529,19 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 		modelInRequestSubset(ctx, baselineModel)
 	// baselineViable omits authoritative-per-turn: that contract governs which
 	// model the policy picks, not whether a provably-unservable request can be rescued.
-	baselineViable := !agentShadowMode &&
-		!routeRes.CallerModelPassthrough &&
-		decision.Reason != translate.ReasonUserForceModel &&
-		s.shouldFailover(ctx) &&
-		!anthropicExcluded &&
-		baselineAllowed &&
-		decision.Provider != providers.ProviderAnthropic &&
-		baselineModel != decision.Model &&
-		baselineKnown && baselineCatalog.PrimaryProvider() == providers.ProviderAnthropic &&
-		siblingFitsContext(baselineModel, providers.ProviderAnthropic, overflowEstimate, env.SignatureTokenSavings(), outputReserve)
+	baselineViableFor := func(c context.Context, d router.Decision, res turnLoopResult) bool {
+		return !agentShadowMode &&
+			!res.CallerModelPassthrough &&
+			d.Reason != translate.ReasonUserForceModel &&
+			s.shouldFailover(c) &&
+			!anthropicExcluded &&
+			baselineAllowed &&
+			d.Provider != providers.ProviderAnthropic &&
+			baselineModel != d.Model &&
+			baselineKnown && baselineCatalog.PrimaryProvider() == providers.ProviderAnthropic &&
+			siblingFitsContext(baselineModel, providers.ProviderAnthropic, overflowEstimate, env.SignatureTokenSavings(), outputReserve)
+	}
+	baselineViable := baselineViableFor(ctx, decision, routeRes)
 	baselineEligible := !routeRes.AuthoritativePerTurn && baselineViable
 
 	// Subscription-credit failover eligibility. A Claude turn served on the
@@ -4560,25 +4563,16 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 	// key at full cost, which is exactly the paid spend that mode forbids — a
 	// subscription throttle there surfaces raw instead. A linked-first turn's
 	// credits are intact, so its throttle rolls over like any other.
-	subscriptionRetryEligible := decision.Provider == providers.ProviderAnthropic &&
-		!agentShadowMode &&
-		servedOnSubscription(ctx) &&
-		!paidFallbackForbidden(ctx) &&
-		s.anthropicFallbackKeyAvailable(ctx)
+	rescues := s.turnRescuesFor(ctx, decision, routeRes, overflowEstimate, env.SignatureTokenSavings(), outputReserve)
+	subscriptionRetryEligible := rescues.claudeRetry && !agentShadowMode
 
 	// Same-cluster model failover: when the routed model's only binding is dark,
 	// degrade to a peer the policy already scored. Gated out for depleted-credit
 	// turns (a different model incurs the paid spend that mode forbids). BYOK
 	// normally disables failover, but a gateway-aliased sibling uses the same
 	// held credentials, so it stays eligible.
-	siblingDecisions := s.siblingFailoverDecisions(ctx, rescueBasisForTurn(decision, routeRes), overflowEstimate, env.SignatureTokenSavings(), outputReserve)
-	siblingViable := s.ResolveSiblingFailover(ctx) &&
-		len(siblingDecisions) > 0 &&
-		!agentShadowMode &&
-		!routeRes.CallerModelPassthrough &&
-		decision.Reason != translate.ReasonUserForceModel &&
-		(s.shouldFailover(ctx) || s.gatewaySiblingAllowed(ctx, siblingDecisions[0])) &&
-		!paidFallbackForbidden(ctx)
+	siblingDecisions := rescues.siblings
+	siblingViable := rescues.siblingViable && !agentShadowMode && decision.Reason != translate.ReasonUserForceModel
 
 	// Last in the rescue chain: once the subscription refused the turn and no
 	// paid retry or peer served it, the local model does.
@@ -4734,7 +4728,16 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 				crossFormat = false
 				respSummary = translate.ResponseSummary{}
 				reqStats = providers.RequestMutationStats{}
-				winnerIdx, proxyErr = s.dispatchWithFallback(targetCtx, failoverInputs{
+				// The rescues that follow judge the target that now serves.
+				ctx, opts = targetCtx, targetOpts
+				rescues := s.turnRescuesFor(ctx, target, normalRes, overflowEstimate, env.SignatureTokenSavings(), outputReserve)
+				subscriptionRetryEligible = rescues.claudeRetry && !agentShadowMode
+				siblingDecisions = rescues.siblings
+				siblingViable = rescues.siblingViable && !agentShadowMode && target.Reason != translate.ReasonUserForceModel
+				baselineViable = baselineViableFor(ctx, target, normalRes)
+				baselineEligible = !normalRes.AuthoritativePerTurn && baselineViable
+				laterRescueViable = baselineViable || subscriptionRetryEligible || siblingViable || localFallbackViable
+				winnerIdx, proxyErr = s.dispatchWithFallback(ctx, failoverInputs{
 					w:                      contentSink,
 					buf:                    preludeBuf,
 					initialDecision:        target,
@@ -4750,10 +4753,6 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 				routeRes = normalRes
 				tt, stickyHit, pinTier = normalRes.TurnType, normalRes.StickyHit, normalRes.PinTier
 				localFailureUsed = proxyErr == nil
-				if target.Model == baselineModel {
-					// The baseline rescue would repeat the attempt that just failed.
-					baselineViable, baselineEligible = false, false
-				}
 			}
 		}
 	}
@@ -7165,31 +7164,13 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 	if s.codexSubscriptionExhausted(ctx, r.Header) {
 		ctx = withSuppressedCodexSubscription(ctx)
 	}
-	resolvedCtx := s.resolveCredentials(ctx, decision.Provider, decision.Model, r.Header)
-	responsesEndpointKey := EffectiveBaseURL(resolvedCtx, decision.Provider)
-	openAIResponsesEndpoint := responsesPassthrough
-	if !openAIResponsesEndpoint && decision.Provider == providers.ProviderOpenAI {
-		openAIResponsesEndpoint = translate.UseOpenAIResponsesAPI(translate.ResponsesRoute{
-			Provider:       decision.Provider,
-			Capabilities:   opts.Capabilities,
-			HasTools:       feats.HasTools,
-			ChatOnlyParams: env.RequiresChatCompletionsParams(opts.Capabilities),
-			Broad:          s.ResolveOpenAIResponsesBroad(ctx),
-		}) && !s.gatewayLacksResponses(responsesEndpointKey)
-		if !env.RequiresChatCompletionsParams(opts.Capabilities) && !s.gatewayLacksResponses(responsesEndpointKey) && s.includedOnlySubscriptionTransport(decision.Provider) &&
-			(servedOnCodexSubscription(resolvedCtx) || managedSubscriptionCanServe(ctx, decision.Provider, decision.Model)) {
-			openAIResponsesEndpoint = true
-		}
-	}
-	endpointCtx, endpointErr := s.avoidCodexOnChatEndpoint(ctx, decision.Provider, decision.Model, openAIResponsesEndpoint, r.Header)
+	turnSurface, endpointErr := s.resolveOpenAITurnSurface(ctx, env, decision, opts.Capabilities, feats.HasTools, responsesPassthrough, r.Header)
 	if endpointErr != nil {
 		return endpointErr
 	}
-	if codexChatEndpoint(endpointCtx) {
-		ctx = s.resolveCredentials(endpointCtx, decision.Provider, decision.Model, r.Header)
-	} else {
-		ctx = resolvedCtx
-	}
+	ctx = turnSurface.ctx
+	openAIResponsesEndpoint := turnSurface.responses
+	responsesEndpointKey := turnSurface.endpointKey
 	opts.FastMode = fastModeForAttempt(ctx, decision.Model, decision.Provider)
 	// fastServed tracks whether the most recent attempt went out on the fast
 	// tier so post-dispatch billing prices the winning attempt.
@@ -7757,21 +7738,21 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 	// classifier. Resolved pre-dispatch: the refusal gate must be armed before
 	// the first upstream byte, and the primary dispatch has to hold its
 	// exhaustion flush so the refusal envelope can still be swallowed.
-	cyberRetryEligible := s.ResolveCyberRefusalRetry(ctx) &&
-		!routeRes.CallerModelPassthrough &&
-		decision.Provider == providers.ProviderOpenAI &&
-		!strings.HasPrefix(decision.Reason, translate.ReasonUserForceModel) &&
-		!s.isHardPinnedTurn(ctx, routeRes.TurnType) &&
-		!billing.SubscriptionOnlyFromContext(ctx) &&
-		!bypassEval
-	var cyberRetryTarget router.Decision
-	cyberRetryViable := false
-	if cyberRetryEligible {
-		target, found := s.cyberRefusalRetryTarget(ctx, decision, routeRes.SessionKey, stickyStateRole(routeRes),
+	cyberRetryFor := func(c context.Context, d router.Decision, res turnLoopResult) (router.Decision, bool) {
+		if !s.ResolveCyberRefusalRetry(c) ||
+			res.CallerModelPassthrough ||
+			d.Provider != providers.ProviderOpenAI ||
+			strings.HasPrefix(d.Reason, translate.ReasonUserForceModel) ||
+			s.isHardPinnedTurn(c, res.TurnType) ||
+			billing.SubscriptionOnlyFromContext(c) ||
+			bypassEval {
+			return router.Decision{}, false
+		}
+		target, found := s.cyberRefusalRetryTarget(c, d, res.SessionKey, stickyStateRole(res),
 			overflowEstimateOAI, env.SignatureTokenSavings(), outputReserveOAI)
-		cyberRetryViable = found && (s.shouldFailover(ctx) || s.gatewaySiblingAllowed(ctx, target))
-		cyberRetryTarget = target
+		return target, found && (s.shouldFailover(c) || s.gatewaySiblingAllowed(c, target))
 	}
+	cyberRetryTarget, cyberRetryViable := cyberRetryFor(ctx, decision, routeRes)
 	cyberRetryArmed = cyberRetryViable
 
 	// Codex-subscription failover: a turn served on the caller's ChatGPT plan is
@@ -7781,26 +7762,14 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 	// rolls over to Weave credits. Suppressed when credits are depleted, where
 	// paid spend is exactly what the caller forbade; a linked-first turn's
 	// credits are intact, so its throttle rolls over like any other.
-	codexRetryViable := decision.Provider == providers.ProviderOpenAI &&
-		servedOnCodexSubscription(ctx) &&
-		!blindExperimentPassthroughActive(ctx) &&
-		!paidFallbackForbidden(ctx) &&
-		s.openaiFallbackKeyAvailable(ctx)
+	//
 	// OpenAI-compatible callers can route to Anthropic too; give their Claude
 	// subscription model-access rejection the same paid recovery as /v1/messages.
-	claudeRetryViable := decision.Provider == providers.ProviderAnthropic &&
-		servedOnSubscription(ctx) &&
-		!blindExperimentPassthroughActive(ctx) &&
-		!paidFallbackForbidden(ctx) &&
-		s.anthropicFallbackKeyAvailable(ctx)
-
-	siblingDecisions := s.siblingFailoverDecisions(ctx, rescueBasisForTurn(decision, routeRes), overflowEstimateOAI, env.SignatureTokenSavings(), outputReserveOAI)
-	siblingViable := s.ResolveSiblingFailover(ctx) &&
-		len(siblingDecisions) > 0 &&
-		!routeRes.CallerModelPassthrough &&
-		!strings.HasPrefix(decision.Reason, translate.ReasonUserForceModel) &&
-		(s.shouldFailover(ctx) || s.gatewaySiblingAllowed(ctx, siblingDecisions[0])) &&
-		!paidFallbackForbidden(ctx)
+	rescues := s.turnRescuesFor(ctx, decision, routeRes, overflowEstimateOAI, env.SignatureTokenSavings(), outputReserveOAI)
+	codexRetryViable := rescues.codexRetry && !blindExperimentPassthroughActive(ctx)
+	claudeRetryViable := rescues.claudeRetry && !blindExperimentPassthroughActive(ctx)
+	siblingDecisions := rescues.siblings
+	siblingViable := rescues.siblingViable && !strings.HasPrefix(decision.Reason, translate.ReasonUserForceModel)
 
 	// A subscription already read spent with no paid key cannot serve the
 	// turn: the prompt goes to the local model and never to the vendor.
@@ -7929,12 +7898,20 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 			targetOpts.ModelSwitched = normalRes.modelSwitched()
 			targetEffort := s.resolveEffort(ctx, target, targetOpts.Capabilities, normalRes.EscalateEffort)
 			targetEffort.apply(&targetOpts)
-			targetCtx := s.resolveCredentials(ctx, target.Provider, target.Model, r.Header)
-			targetOpts.FastMode = fastModeForAttempt(targetCtx, target.Model, target.Provider)
-			targetBindings := s.resolveBindingsForDispatch(targetCtx, target)
-			targetMarker := suppressMarkerIfRequested(ctx, r.Header, localFailure.marker(normalRes))
-			targetAttempt, targetBuildErr := buildAttempt(target, targetOpts, targetMarker)
+			targetSurface, targetSurfaceErr := s.resolveOpenAITurnSurface(ctx, env, target, targetOpts.Capabilities, feats.HasTools, false, r.Header)
+			var targetBindings []catalog.ProviderBinding
+			var targetMarker string
+			var targetAttempt dispatchAttempt
+			var targetBuildErr error
+			if targetSurfaceErr == nil {
+				targetOpts.FastMode = fastModeForAttempt(targetSurface.ctx, target.Model, target.Provider)
+				targetBindings = s.resolveBindingsForDispatch(targetSurface.ctx, target)
+				targetMarker = suppressMarkerIfRequested(ctx, r.Header, localFailure.marker(normalRes))
+				targetAttempt, targetBuildErr = buildAttempt(target, targetOpts, targetMarker)
+			}
 			switch {
+			case targetSurfaceErr != nil:
+				localFailure.logUnavailable(ctx, proxyErr, targetSurfaceErr)
 			case targetBuildErr != nil:
 				localFailure.logUnavailable(ctx, proxyErr, targetBuildErr)
 			case len(targetBindings) == 0:
@@ -7947,10 +7924,28 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 				// model that serves instead.
 				if rw, ok := w.(*translate.ResponsesWriter); ok {
 					responsesPassthrough = false
-					rw.SetBadgeText(targetMarker)
+					if targetMarker == "" {
+						rw.ClearBadgeText()
+					} else {
+						rw.SetBadgeText(targetMarker)
+					}
 				}
+				// The stream already belongs to the translating writer, so a
+				// Responses target is served through translation on either ingress.
+				translateToResponses = targetSurface.responses
+				responsesEndpointKey = targetSurface.endpointKey
+				// The rescues that follow judge the target that now serves.
+				ctx, opts = targetSurface.ctx, targetOpts
+				rescues := s.turnRescuesFor(ctx, target, normalRes, overflowEstimateOAI, env.SignatureTokenSavings(), outputReserveOAI)
+				codexRetryViable = rescues.codexRetry && !blindExperimentPassthroughActive(ctx)
+				claudeRetryViable = rescues.claudeRetry && !blindExperimentPassthroughActive(ctx)
+				siblingDecisions = rescues.siblings
+				siblingViable = rescues.siblingViable && !strings.HasPrefix(target.Reason, translate.ReasonUserForceModel)
+				cyberRetryTarget, cyberRetryViable = cyberRetryFor(ctx, target, normalRes)
+				cyberRetryArmed = cyberRetryViable
+				laterRescueViable = cyberRetryViable || codexRetryViable || claudeRetryViable || siblingViable || localFallbackViable
 				respSummary = translate.ResponseSummary{}
-				winnerIdx, proxyErr = s.dispatchWithFallback(targetCtx, failoverInputs{
+				winnerIdx, proxyErr = s.dispatchWithFallback(ctx, failoverInputs{
 					w:                      contentSink,
 					buf:                    preludeBuf,
 					initialDecision:        target,
@@ -7962,6 +7957,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 					origin:                 normalRes.dispatchOrigin(target),
 				})
 				subscriptionPoolFailure = isSubscriptionPoolError(proxyErr)
+				cyberRefusalSeen = cyberRefusalSeen || providers.IsUpstreamCyberPolicyRefusal(proxyErr)
 				decision, bindings, marker, effortServed = target, targetBindings, targetMarker, targetEffort
 				routeRes = normalRes
 				tt, stickyHit, pinTier = normalRes.TurnType, normalRes.StickyHit, normalRes.PinTier

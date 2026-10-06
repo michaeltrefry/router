@@ -747,7 +747,9 @@ func (s *Service) runTurnLoop(
 	// branch; routeFor receives a copy and cannot populate the caller's request.
 	req.AutomaticExcludedModels = s.globalAutomaticExcludedModels(ctx)
 	req.ClientApp = ClientIdentityFrom(ctx).ClientApp
-	if transforms, ok := ctx.Value(responsesTransformsContextKey{}).([]translate.ResponseTransform); ok {
+	// A reroute after a failed local model re-runs this loop for a request
+	// whose transforms were already recorded.
+	if transforms, ok := ctx.Value(responsesTransformsContextKey{}).([]translate.ResponseTransform); ok && !localRoutingDisabled(ctx) {
 		for _, transform := range transforms {
 			apm.RecordTranslationTransform(
 				ctx,

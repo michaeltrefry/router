@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"weave-os/router/internal/observability"
 	"weave-os/router/internal/providers"
@@ -95,15 +96,15 @@ func (fb *localFailureFallback) normalRoute() (turnLoopResult, error) {
 }
 
 // marker renders the routing badge naming the model that served and the local
-// model that failed. Turns that never carry a badge (hard pins, recap and
-// classifier turns, whose output a harness parses) keep none; the log line
-// still records the fallback.
+// model that failed. It follows the normal route's own badge rules, so a turn
+// whose badge is hidden (hard pins, recap and classifier turns, whose output a
+// harness parses) keeps none; the log line still records the fallback.
 func (fb *localFailureFallback) marker(res turnLoopResult) string {
-	if res.SuggestionMode || res.CallerModelPassthrough || res.HardPinned || isUnpinnedScoredTurn(res.TurnType) {
+	normal := strings.TrimSuffix(routingMarkerFor(res), "\n\n")
+	if normal == "" {
 		return ""
 	}
-	return routingMarkerPrefix + markerModelLabel(res.Decision) + " · " +
-		markerReasonLocalFailure + " " + fb.local.Model + " failed\n\n"
+	return normal + " · " + markerReasonLocalFailure + " " + fb.local.Model + " failed\n\n"
 }
 
 // logServing records the normal route taking over a failed local turn.

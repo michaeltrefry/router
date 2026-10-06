@@ -99,6 +99,20 @@ func newFailingLocal(t *testing.T, mode string) *failingLocal {
 type streamingAnthropic struct {
 	mu     sync.Mutex
 	models []string
+	// oauth and bodyModels record, per dispatch, whether it went out on a
+	// subscription credential and the model its body named.
+	oauth      []bool
+	bodyModels []string
+	// oauthStatus, when set, rejects every dispatch on a subscription credential
+	// with oauthBody, or a rate-limit body when that is empty.
+	oauthStatus int
+	oauthBody   string
+}
+
+func (a *streamingAnthropic) calls() ([]bool, []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]bool(nil), a.oauth...), append([]string(nil), a.bodyModels...)
 }
 
 func (*streamingAnthropic) IncludedOnlySubscriptions() bool { return true }
@@ -109,10 +123,25 @@ func (a *streamingAnthropic) served() []string {
 	return append([]string(nil), a.models...)
 }
 
-func (a *streamingAnthropic) Proxy(_ context.Context, decision router.Decision, prep providers.PreparedRequest, w http.ResponseWriter, _ *http.Request) error {
+func (a *streamingAnthropic) Proxy(ctx context.Context, decision router.Decision, prep providers.PreparedRequest, w http.ResponseWriter, _ *http.Request) error {
+	creds := proxy.CredentialsFromContext(ctx)
+	oauth := creds != nil && creds.OAuth
 	a.mu.Lock()
 	a.models = append(a.models, decision.Model)
+	a.oauth = append(a.oauth, oauth)
+	a.bodyModels = append(a.bodyModels, gjson.GetBytes(prep.Body, "model").String())
 	a.mu.Unlock()
+	if oauth && a.oauthStatus != 0 {
+		body := a.oauthBody
+		if body == "" {
+			body = `{"type":"error","error":{"type":"rate_limit_error","message":"subscription limit reached"}}`
+		}
+		return &providers.UpstreamErrorResponse{
+			Status:  a.oauthStatus,
+			Headers: http.Header{"Content-Type": {"application/json"}},
+			Body:    []byte(body),
+		}
+	}
 	if !gjson.GetBytes(prep.Body, "stream").Bool() {
 		w.Header().Set("Content-Type", "application/json")
 		_, err := io.WriteString(w, `{"id":"msg_n","type":"message","role":"assistant","model":"`+decision.Model+`","content":[{"type":"text","text":"normal route answer"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
@@ -265,7 +294,7 @@ func TestLocalFailure_TurnRouteSubAgentFallsBackToScorer(t *testing.T) {
 	assert.Equal(t, []string{"claude-opus-4-7"}, anthropicClient.served())
 	assert.Contains(t, rec.Body.String(), "normal route answer")
 	assert.Equal(t, 1, strings.Count(rec.Body.String(), "local "+id+" failed"), "the badge names the failed local model once")
-	assert.Contains(t, rec.Body.String(), "→ claude-opus-4-7 · local "+id+" failed")
+	assert.Contains(t, rec.Body.String(), "→ claude-opus-4-7 · best pick for this turn · local "+id+" failed")
 }
 
 // A mid-tier substitute that fails is replaced by the router's own pick.
@@ -294,7 +323,7 @@ func TestLocalFailure_MidTierSubstituteFallsBackToOriginalPick(t *testing.T) {
 			assert.Equal(t, "claude-sonnet-5", rec.Header().Get(proxy.HeaderRouterModel))
 			assert.Contains(t, rec.Body.String(), "normal route answer")
 			if stream {
-				assert.Equal(t, 1, strings.Count(rec.Body.String(), "→ claude-sonnet-5 · local "+id+" failed"))
+				assert.Equal(t, 1, strings.Count(rec.Body.String(), "→ claude-sonnet-5 · best pick for this turn · local "+id+" failed"))
 			}
 			line := logLine(t, &logs, "Local model failed before output; serving the turn on its normal route")
 			assert.Equal(t, "mid_tier_substitute", line["local_source"])
@@ -368,4 +397,59 @@ func TestParseLocalModels_ResponseHeaderTimeout(t *testing.T) {
 		_, err := parseLocalModels(strings.NewReader("models:\n"+entry+"    response_header_timeout: "+bad+"\n"), env)
 		require.ErrorIs(t, err, errLocalModelInvalidField, bad)
 	}
+}
+
+// The normal target that takes over a failed local turn keeps the paid
+// rescue it would have had without local rules: its subscription refusal is
+// retried on the deployment key.
+func TestLocalFailure_NormalTargetSubscriptionRefusalRetriesOnPaidKey(t *testing.T) {
+	const id = "test-lf-sub-retry"
+	local := newFailingLocal(t, "500")
+	scorer := &countingRouter{decision: sonnet5Scorer}
+	svc, anthropicClient := localFailureService(t, id, local, scorer, "mid_tier_substitute:\n  model: "+id+"\n")
+	anthropicClient.oauthStatus = http.StatusTooManyRequests
+	body := strings.Replace(localSubstituteBody, "failing build", "slow query", 1)
+	rec := httptest.NewRecorder()
+
+	require.NoError(t, svc.ProxyMessages(routerKeyedCtx(), []byte(body), rec, claudeCodeRequest("")))
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Positive(t, local.count(), "the substitute is tried first")
+	assert.Contains(t, rec.Body.String(), "normal route answer")
+	oauth, bodyModels := anthropicClient.calls()
+	require.GreaterOrEqual(t, len(oauth), 2)
+	assert.True(t, oauth[0], "the normal target is tried on the subscription first")
+	assert.False(t, oauth[len(oauth)-1], "the subscription refusal is retried on the deployment key")
+	for _, model := range bodyModels {
+		assert.Equal(t, "claude-sonnet-5", model, "every attempt carries the normal target")
+	}
+}
+
+// A Chat Completions caller whose failed local turn lands on a Claude
+// subscription that cannot use the normal target's model is retried on the
+// deployment key, as the same turn would be without local rules.
+func TestLocalFailure_ChatCompletionsNormalTargetModelRejectionRetriesOnPaidKey(t *testing.T) {
+	const id = "test-lf-chat-claude"
+	local := newFailingLocal(t, "500")
+	scorer := &countingRouter{decision: sonnet5Scorer}
+	svc, anthropicClient := localFailureService(t, id, local, scorer, "mid_tier_substitute:\n  model: "+id+"\n")
+	anthropicClient.oauthStatus = http.StatusNotFound
+	anthropicClient.oauthBody = `{"type":"error","error":{"type":"not_found_error","message":"model: claude-sonnet-5"}}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r.Header.Set("Authorization", "Bearer sk-ant-oat01-test-subscription")
+	body := `{"model":"gpt-5.6-sol","stream":true,` +
+		`"tools":[{"type":"function","function":{"name":"shell","parameters":{"type":"object"}}}],` +
+		`"messages":[{"role":"system","content":"You are a coding agent."},{"role":"user","content":"Fix the failing build."}]}`
+	rec := httptest.NewRecorder()
+
+	require.NoError(t, svc.ProxyOpenAIChatCompletion(routerKeyedCtx(), []byte(body), rec, r))
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Positive(t, local.count(), "the substitute is tried first")
+	assert.Equal(t, []string{"claude-sonnet-5", "claude-sonnet-5"}, anthropicClient.served())
+	oauth, bodyModels := anthropicClient.calls()
+	assert.Equal(t, []bool{true, false}, oauth, "the subscription rejection is retried on the deployment key")
+	assert.Equal(t, []string{"claude-sonnet-5", "claude-sonnet-5"}, bodyModels, "both attempts carry the normal target")
+	assert.Contains(t, rec.Body.String(), "normal route answer")
+	assert.NotContains(t, rec.Body.String(), "not_found_error", "the rescued rejection never reaches the client")
 }
