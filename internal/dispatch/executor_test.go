@@ -169,6 +169,20 @@ func TestRunDoesNotFailOverAfterCommit(t *testing.T) {
 	assert.Equal(t, dispatch.FailureReasonCommitted, result.Summary.FallbackReason)
 }
 
+func TestRunDoesNotRetrySameTargetAfterIdleWatchdog(t *testing.T) {
+	upstream := &fakeUpstream{errs: []error{providers.ErrUpstreamIdleTimeout}}
+	exec := newExecutor(t, map[string]providers.Client{providers.ProviderFireworks: upstream}, &recorder{})
+
+	_, err := exec.Run(context.Background(), inference.InvocationRequest{},
+		fakePlan{selected: primary},
+		dispatch.Transport{Attempt: attemptWith([]byte(`{"model":"kimi-k2.5"}`))},
+	)
+
+	require.ErrorIs(t, err, providers.ErrUpstreamIdleTimeout)
+	assert.Equal(t, []string{primary.CatalogID}, upstream.models,
+		"a silent target has already consumed its idle budget; another identical attempt delays rescue")
+}
+
 func TestRunFailsOverOnModelNotFoundButNotOnBadRequest(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

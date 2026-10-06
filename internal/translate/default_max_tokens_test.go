@@ -287,6 +287,17 @@ func TestOpenAISameFormat_ExplicitMaxTokensNotClampedTo8192ForGPT6Astra(t *testi
 	assert.NotContains(t, out, "max_tokens")
 }
 
+func TestOpenAISameFormat_ExplicitMaxTokensNotClampedTo8192ForGPT61Sol(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"max_tokens":64000}`)
+	opts := translate.EmitOptions{
+		TargetModel:  "gpt-6.1-sol",
+		Capabilities: router.Lookup("gpt-6.1-sol"),
+	}
+	out := parseAndEmit(t, body, "openai", opts)
+	assert.Equal(t, float64(64000), out["max_completion_tokens"])
+	assert.NotContains(t, out, "max_tokens")
+}
+
 // Regression: both GLM-5.3 arms missing from modelMaxOutputTokens; max_tokens was
 // clamped to 8192 — always-on reasoning exhausts that budget before answering.
 func TestOpenAISameFormat_ExplicitMaxTokensNotClampedTo8192ForGLM53(t *testing.T) {

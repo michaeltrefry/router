@@ -29,6 +29,7 @@ type Service string
 const (
 	ServiceXGB        Service = "xgb"
 	ServiceSwitchyard Service = "switchyard_llm_v1"
+	ServiceLLM        Service = "llm_escalation"
 )
 
 // Mode identifies a retained activation's immutable routing behavior.

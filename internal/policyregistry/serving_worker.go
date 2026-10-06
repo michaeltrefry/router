@@ -45,7 +45,7 @@ func ResolveAdmissionBinding(ctx context.Context, store ServingStore, admission 
 		return LaneBinding{}, err
 	}
 	if admission.Selection.isLane(store.RootURI()) {
-		lane, err := readLane(ctx, store, admission.Target, admission.ProfileKey, admission.Selection)
+		lane, _, err := readLane(ctx, store, admission.Target, admission.ProfileKey, admission.Selection)
 		if err != nil {
 			return LaneBinding{}, err
 		}

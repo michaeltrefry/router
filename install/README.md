@@ -98,7 +98,7 @@ explicitly to its managed Codex config.
 | Path                                  | Purpose                                                       |
 | ------------------------------------- | ------------------------------------------------------------- |
 | `~/.claude/settings.json`             | Sets `env.ANTHROPIC_BASE_URL`, `env.ANTHROPIC_CUSTOM_HEADERS` with `X-Weave-Router-Key`, `env.ENABLE_TOOL_SEARCH=true` (a custom base URL otherwise inlines tool schemas into every request), `statusLine`, and Claude Code `attribution` so commits/PRs credit Weave Router. Other keys preserved. |
-| `~/.weave/cc-statusline.sh`           | The status line script. Reads the router's decisions log + the CC transcript to show routed-model + savings. |
+| `~/.weave/cc-statusline.sh`           | Shows the response model and an estimated cost comparison, without token counts. It is not a routing health check. |
 
 **Project scope (`--scope project`):**
 
@@ -551,10 +551,20 @@ env var to make the setting editable.
 
 **Claude Code:**
 
-1. Run `claude`. The status line at the bottom should show
-   `WEAVE ROUTER — <routed-model> ← <selected-model>` after one turn.
-2. After several turns it should add `· saved $X turn / $Y session`.
-3. Check `~/.weave-router/decisions.jsonl` — one row per request.
+1. Run `npx @weave-os/router status --claude` to inspect the saved settings
+   in the selected scope. Connectivity verifies the key, not inference.
+2. Run `claude` and send a prompt. The terminal shows
+   `WEAVE ROUTER · response model: <model>`.
+   Model names and pin acknowledgements come from the local
+   transcript, which can also contain direct-provider responses or old sessions.
+3. Confirm a matching new inference request in the router's server-side
+   telemetry. A saved endpoint, a successful key check, and commit/PR attribution
+   do not establish that a running client used the router.
+
+The cost difference is a hypothetical transcript comparison against the current
+selected model, not verified router savings. Positive values mean a lower
+estimated cost, negative values a higher one; missing prices omit the estimate.
+`last pin` describes a recorded control acknowledgement, not a verified live pin.
 
 If the status line never appears, run `claude --debug` and check stderr for
 errors invoking `cc-statusline.sh`. The script needs `jq` on PATH.

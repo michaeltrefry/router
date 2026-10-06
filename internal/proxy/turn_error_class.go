@@ -36,6 +36,9 @@ const (
 // cancel.
 func classifyTurnError(err error, stopReason string, invalidToolArgsBlocks int) TurnErrorClass {
 	if err != nil {
+		if isUpstreamWatchdogError(err) {
+			return TurnErrorStreamStalled
+		}
 		if status := upstreamStatus(err); status != 0 {
 			return classifyUpstreamStatus(status)
 		}

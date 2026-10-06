@@ -109,6 +109,7 @@ INSERT INTO router.model_router_request_telemetry (
     ttft_ms,
     cache_creation_tokens,
     cache_read_tokens,
+    reasoning_tokens,
     device_id,
     session_id,
     router_user_id,
@@ -145,6 +146,11 @@ INSERT INTO router.model_router_request_telemetry (
     credential_key_prefix,
     credential_key_suffix,
     credential_source,
+    subscription_account_id,
+    subscription_owner_id,
+    subscription_tier,
+    intended_model_family,
+    final_model_family,
     unified_limit_headers,
     policy_pin_requested,
     policy_pin_honoured,
@@ -273,6 +279,7 @@ INSERT INTO router.model_router_request_telemetry (
     sqlc.narg('ttft_ms')::bigint,
     sqlc.narg('cache_creation_tokens')::int,
     sqlc.narg('cache_read_tokens')::int,
+    sqlc.narg('reasoning_tokens')::int,
     sqlc.narg('device_id')::varchar,
     sqlc.narg('session_id')::varchar,
     sqlc.narg('router_user_id')::uuid,
@@ -309,6 +316,11 @@ INSERT INTO router.model_router_request_telemetry (
     sqlc.narg('credential_key_prefix')::varchar,
     sqlc.narg('credential_key_suffix')::varchar,
     sqlc.narg('credential_source')::varchar,
+    sqlc.narg('subscription_account_id')::uuid,
+    sqlc.narg('subscription_owner_id')::uuid,
+    sqlc.narg('subscription_tier')::varchar,
+    sqlc.narg('intended_model_family')::varchar,
+    sqlc.narg('final_model_family')::varchar,
     sqlc.narg('unified_limit_headers')::jsonb,
     sqlc.narg('policy_pin_requested')::boolean,
     sqlc.narg('policy_pin_honoured')::boolean,
@@ -784,12 +796,28 @@ SELECT
     t.output_tokens,
     t.cache_creation_tokens,
     t.cache_read_tokens,
-    -- The turn ran on the caller's own Claude/Codex subscription, so its
-    -- quota already paid for it and the export reports $0 against the real
-    -- token counts. credential_source itself stays internal.
+    -- A Claude response with the plain overage claim used paid credits, even though the caller's
+    -- OAuth credential served it. Historical rows retain that evidence in
+    -- unified_limit_headers; newer rows also use subscription_overage source.
     -- COALESCE because credential_source is NULL on deployment-key turns, and
     -- NULL IN (...) is NULL, which cannot scan into the generated bool.
-    COALESCE(t.credential_source IN ('subscription', 'codex_subscription'), false)::boolean AS subscription_served,
+    COALESCE(
+        t.credential_source IN ('subscription', 'codex_subscription')
+        -- Successful rows recorded before status capture carry 0 and no error class.
+        AND ((t.upstream_status_code >= 200 AND t.upstream_status_code < 300)
+             OR (t.upstream_status_code = 0 AND t.error_class IS NULL))
+        AND (
+            t.unified_limit_headers->>'anthropic-ratelimit-unified-representative-claim' = 'overage'
+            AND t.unified_limit_headers->>'anthropic-ratelimit-unified-overage-in-use' = 'true'
+        ) IS DISTINCT FROM true,
+        false
+    )::boolean AS subscription_served,
+    t.credential_source,
+    t.subscription_account_id,
+    t.subscription_owner_id,
+    t.subscription_tier,
+    t.intended_model_family,
+    t.final_model_family,
     t.actual_input_cost_usd,
     t.actual_output_cost_usd,
     t.route_latency_ms,

@@ -12,6 +12,7 @@ import (
 
 	"weave-os/router/internal/auth"
 	"weave-os/router/internal/providers"
+	"weave-os/router/internal/router/catalog"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -30,16 +31,18 @@ const ChatGPTAccountIDHeader = "ChatGPT-Account-ID"
 // Credential sources, for logging and precedence reasoning. Never log the key
 // itself — only the source.
 const (
-	SourceBYOK              = "byok"
-	SourceClient            = "client"
-	SourceSubscription      = "subscription"
-	SourceCodexSubscription = "codex_subscription"
+	SourceBYOK                = "byok"
+	SourceClient              = "client"
+	SourceSubscription        = "subscription"
+	SourceSubscriptionOverage = "subscription_overage"
+	SourceCodexSubscription   = "codex_subscription"
 )
 
 // Credentials holds the API key to use for an upstream request.
 type Credentials struct {
-	APIKey []byte // never logged
-	Source string // SourceBYOK | SourceClient | SourceSubscription | SourceCodexSubscription
+	SubscriptionAccountID string
+	APIKey                []byte // never logged
+	Source                string // SourceBYOK | SourceClient | SourceSubscription | SourceCodexSubscription
 	// OAuth marks a subscription bearer (Claude sk-ant-oat- token, Anthropic
 	// only; or Codex ChatGPT JWT, OpenAI only). Authenticates via
 	// Authorization: Bearer, never x-api-key.
@@ -244,28 +247,36 @@ func CodexSubscriptionCreds(token, accountID string) *Credentials {
 	}
 }
 
-// codexCoveredModels is the fail-closed set of models the Codex CLI may serve
-// through the caller's ChatGPT OAuth credential. Deliberately a curated
-// allowlist, not "every OpenAI model": infrastructure-served OpenAI models
-// share ProviderOpenAI with the native Codex family, but must use BYOK or the
-// router deployment credential instead of chatgpt.com/backend-api/codex.
-var codexCoveredModels = []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-sol"}
-
 // CodexCoveredModels returns a copy of the models a Codex subscription may serve.
 func CodexCoveredModels() []string {
-	return append([]string(nil), codexCoveredModels...)
+	return catalog.CodexSubscriptionModels()
 }
 
-// CodexSubscriptionCoversModel reports whether model may receive the caller's
-// ChatGPT OAuth credential. Exact canonical IDs only; aliases are resolved
-// before routing, and unknown/future models fail closed.
-func CodexSubscriptionCoversModel(model string) bool {
-	for _, covered := range codexCoveredModels {
-		if model == covered {
+// CodexSubscriptionCanAttemptModel reports whether model belongs to the native
+// Codex roster or is explicitly enabled for a subscription-first funding
+// attempt in the catalog. Unknown models fail closed.
+func CodexSubscriptionCanAttemptModel(model string) bool {
+	if CodexSubscriptionCoversModel(model) {
+		return true
+	}
+	m, ok := catalog.ByID(model)
+	if !ok || !m.CodexSubscriptionFallback {
+		return false
+	}
+	for _, binding := range m.Providers {
+		if binding.Provider == providers.ProviderOpenAI {
 			return true
 		}
 	}
 	return false
+}
+
+// CodexSubscriptionCoversModel reports whether model belongs to the curated
+// automatic Codex model roster. This is narrower than
+// CodexSubscriptionCanAttemptModel, which also permits explicitly approved
+// catalog fallback targets outside the automatic roster.
+func CodexSubscriptionCoversModel(model string) bool {
+	return catalog.CodexSubscriptionCoversModel(model)
 }
 
 // ApplyWIFTokenType marks the bearer as a workload attestation, not an upstream-issued token.

@@ -303,6 +303,11 @@ type turnLoopResult struct {
 	// the in-turn rescue can readmit them when honouring them would leave no
 	// candidate. Empty unless transient_rate_limit is on.
 	SessionCooldownModels map[string]time.Time
+	// SessionStrikeReadmitModels are the session-lifetime demotions the
+	// in-turn rescue may readmit as a last resort when no other candidate is
+	// left: a session that has struck out every arm must not 502 a turn that
+	// a previously failed arm could still serve.
+	SessionStrikeReadmitModels []string
 	// AuthorityShadow is the counterfactual HMM cache-gate verdict on an
 	// authoritative-per-turn turn. Observation only: it never touches Decision.
 	AuthorityShadow authorityCacheShadow
@@ -724,7 +729,8 @@ func (s *Service) runTurnLoop(
 		return turnLoopResult{}, compatibilityErr
 	}
 	if planOwnedServingRequest(ctx) {
-		req.ForceModel = ""
+		// Plan-owned profiles ignore installation routing controls, but an
+		// explicit force-model choice remains a caller-owned override.
 		req.ForceCluster = ""
 	}
 	ctx = context.WithValue(ctx, translationPlanAppliedContextKey{}, true)
@@ -768,6 +774,7 @@ func (s *Service) runTurnLoop(
 	}
 	res.AuthoritativePerTurn = authoritativePolicyTurn(res.TurnType) &&
 		s.authoritativePerTurnSelection(ctx)
+	req.TaskDomain = taskDomainInput(ctx, env, apiKeyID, res.TurnType)
 	res.PinRole = roleForTier(res.RequestedTier)
 	// Resolve user-forced state before the policy's no-automatic-routing shortcut.
 	forceModelSessionKey := deriveForceModelSessionKeyForRequest(ctx, env, apiKeyID, threadSessionKey)
@@ -844,10 +851,6 @@ func (s *Service) runTurnLoop(
 
 	// Force state is session-scoped so sub-agents inherit the parent choice.
 	sessionForceControlFound := forceModelFound
-
-	// Discounts covered models' cost term by the caller's observed subscription
-	// headroom. nil (feature off / no headroom yet) leaves scoring unchanged.
-	req.SubsidizedModelCostFactor = s.subsidyFactors(ctx, reqHeaders)
 
 	// Explicit user force outranks every automatic fast path, including hard
 	// pins. Legacy thread-scoped forces keep their original thread boundary.
@@ -1185,6 +1188,7 @@ func (s *Service) runTurnLoop(
 	// failover and every automatic pin reuse at once, and is the only one an
 	// explicit /force-model of the same model still routes through.
 	demoted := mergeSessionStrikes(pin.DemotedModels, hmmHistory.DemotedModels)
+	res.SessionStrikeReadmitModels = harnessSafeModels(imageSafeModels(demoted, req.HasImages), req.HasTools)
 	if s.ResolveTransientRateLimit(ctx) {
 		// A rate-limit strike expires: the arm is only out while its
 		// cooldown is in force.
@@ -1742,6 +1746,9 @@ func (s *Service) runTurnLoop(
 			res.PinTier = "escalation_xgb"
 			if llmTurn != nil && llmTurn.active {
 				res.PinTier = llmEscalationPinTier
+				if llmTurn.session.Config.EffectiveClassifier() == flags.EscalationClassifierLLM {
+					res.PinTier = qwenEscalationPinTier
+				}
 			}
 			return res, nil
 		}
@@ -1832,7 +1839,7 @@ func (s *Service) runTurnLoop(
 			evidenceServedFresh := s.evidenceUpgradeApplies(ctx, res.SessionKey) && res.UpgradeShadow != nil && res.UpgradeShadow.Verdict.Outcome == upgradeAllow
 			upgradeGateActive := s.ResolveAuthoritativeUpgradeGate(ctx) && s.resolveUpgradePolicyMode(ctx) != flags.AuthoritativeUpgradePolicyOff && !evidenceServedFresh
 			if upgradeGateActive && pinFound && pin.Model != "" && pin.Model != fresh.Model &&
-				hmmFreshIsMoreExpensive(pin.Model, fresh.Model, plannerTokens, req.SubsidizedModelCostFactor) {
+				hmmFreshIsMoreExpensive(pin.Model, fresh.Model, plannerTokens) {
 				if confidence, ok := hmmDecisionConfidence(fresh); ok && confidence < s.hmmUpgradeConfidenceThreshold {
 					decision := pinDecision(pin)
 					res.Decision = decision
@@ -1854,7 +1861,7 @@ func (s *Service) runTurnLoop(
 			// default. Order matters -- an unconfident cheaper vote is discarded
 			// before hysteresis sees it, so noise cannot accumulate into a switch.
 			if pinFound && pin.Model != "" && pin.Model != fresh.Model &&
-				!hmmFreshIsMoreExpensive(pin.Model, fresh.Model, plannerTokens, req.SubsidizedModelCostFactor) {
+				!hmmFreshIsMoreExpensive(pin.Model, fresh.Model, plannerTokens) {
 				hysteresisTurns := s.ResolveHMMDowngradeHysteresisTurns(ctx)
 				confidence, scored := hmmDecisionConfidence(fresh)
 				if s.ResolveAuthoritativeDowngradeGate(ctx) && scored && confidence < s.hmmUpgradeConfidenceThreshold {
@@ -2039,9 +2046,6 @@ func (s *Service) runTurnLoop(
 			AvailableModels:       s.availableModels,
 			// A trimmed prefix kills the cache even inside the provider TTL.
 			PinCacheCold: pinFound && pinCacheCold(pin, prefixBroken),
-			// Applies the subsidy discount to pinned sessions too, not just fresh
-			// decisions. nil when subscription-aware routing is off.
-			SubsidizedCostFactor: req.SubsidizedModelCostFactor,
 		}
 		if !pinFound {
 			plannerIn.Pin = sessionpin.Pin{}
@@ -2190,10 +2194,9 @@ func (s *Service) hmmCostGatedDecision(
 		PriorOutputTokens:     stayPin.LastOutputTokens,
 		AvailableModels:       s.availableModels,
 		PinCacheCold:          pinCacheCold(stayPin, prefixBroken),
-		SubsidizedCostFactor:  req.SubsidizedModelCostFactor,
 	}, cfg)
 
-	if hmmFreshIsMoreExpensive(stayPin.Model, fresh.Model, estimatedInputTokens, req.SubsidizedModelCostFactor) {
+	if hmmFreshIsMoreExpensive(stayPin.Model, fresh.Model, estimatedInputTokens) {
 		confidence, ok := hmmDecisionConfidence(fresh)
 		if ok && confidence >= s.hmmUpgradeConfidenceThreshold {
 			base.Outcome = planner.OutcomeSwitch
@@ -2483,22 +2486,19 @@ func hmmDecisionConfidence(dec router.Decision) (float64, bool) {
 	return confidence, true
 }
 
-func hmmFreshIsMoreExpensive(stayModel, freshModel string, inputTokens int, factors map[string]float64) bool {
-	stay, okStay := hmmEffectiveInputUSDPer1M(stayModel, inputTokens, factors)
-	fresh, okFresh := hmmEffectiveInputUSDPer1M(freshModel, inputTokens, factors)
+func hmmFreshIsMoreExpensive(stayModel, freshModel string, inputTokens int) bool {
+	stay, okStay := hmmEffectiveInputUSDPer1M(stayModel, inputTokens)
+	fresh, okFresh := hmmEffectiveInputUSDPer1M(freshModel, inputTokens)
 	return okStay && okFresh && fresh > stay
 }
 
-func hmmEffectiveInputUSDPer1M(model string, inputTokens int, factors map[string]float64) (float64, bool) {
+func hmmEffectiveInputUSDPer1M(model string, inputTokens int) (float64, bool) {
 	price, ok := catalog.PrimaryPriceFor(model)
 	if !ok {
 		return 0, false
 	}
 	price = price.ForInputTokens(inputTokens)
 	value := price.InputUSDPer1M
-	if factor, covered := factors[model]; covered {
-		value *= factor
-	}
 	return value, true
 }
 
@@ -2563,9 +2563,6 @@ func (s *Service) loadPinWithStoreState(ctx context.Context, sessionKey [session
 	}
 	if !found {
 		return sessionpin.Pin{}, false, true
-	}
-	if planOwnedServingRequest(ctx) && isUserForcedReason(pin.Reason) {
-		return pin, false, false
 	}
 	if !pinMatchesEffectiveStrategy(ctx, pin) {
 		return sessionpin.Pin{}, false, false

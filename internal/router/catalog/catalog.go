@@ -10,6 +10,9 @@ import (
 	"weave-os/router/internal/providers"
 )
 
+// ModelGPT6Luna is the canonical GPT-6 Luna model ID.
+const ModelGPT6Luna = "gpt-6-luna"
+
 // Tier is the coarse capability bucket. Higher is stronger; integer
 // ordering is load-bearing (planner compares freshTier > pinTier).
 type Tier int
@@ -194,6 +197,10 @@ type Model struct {
 	// HMMTarget allows an otherwise untiered catalog row to be offered to an HMM
 	// policy sidecar without adding it to the generic cluster candidate set.
 	HMMTarget bool
+	// CodexSubscription marks models served by the native ChatGPT/Codex OAuth
+	// backend. OpenAI API models leave this false even when they share the same
+	// provider binding.
+	CodexSubscription bool
 	// ContextWindow is the model's total input+output token budget in tokens.
 	// 0 means use catalog.DefaultContextWindow.
 	ContextWindow int
@@ -210,6 +217,10 @@ type Model struct {
 	// instead of reasoning_content; the Anthropic translator reroutes a
 	// leading <think> block into Anthropic thinking. Default false.
 	ThinkTagReasoning bool
+	// CodexSubscriptionFallback explicitly permits trying a Codex subscription
+	// for this model outside the native Codex automatic roster. Unsupported
+	// targets must fall back to the selected model's API credential.
+	CodexSubscriptionFallback bool
 	// Providers is the ordered fallback list. First binding whose
 	// Provider name is in the available set wins. Must be non-empty.
 	Providers []ProviderBinding
@@ -407,7 +418,7 @@ var Models = []Model{
 	}},
 
 	// --- OpenAI GPT-5.6 --- Sol/Terra/Luna family, GA 2026-07-09.
-	{ID: "gpt-5.6-luna", Source: SourceClosedSource, Tier: TierMid, ContextWindow: 1_050_000, Providers: []ProviderBinding{
+	{ID: "gpt-5.6-luna", Source: SourceClosedSource, Tier: TierMid, CodexSubscription: true, ContextWindow: 1_050_000, Providers: []ProviderBinding{
 		{Provider: providers.ProviderOpenAI, Price: Pricing{
 			InputUSDPer1M: 0.20, OutputUSDPer1M: 1.20, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10,
 			LongContext: &LongContextPricing{ThresholdTokens: 272_000, InputUSDPer1M: 0.40, OutputUSDPer1M: 1.80, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10},
@@ -426,7 +437,7 @@ var Models = []Model{
 			LongContext: &LongContextPricing{ThresholdTokens: 272_000, InputUSDPer1M: 0.80, OutputUSDPer1M: 3.60, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10},
 		}},
 	}},
-	{ID: "gpt-5.6-terra", Source: SourceClosedSource, Tier: TierHigh, ContextWindow: 1_050_000, Providers: []ProviderBinding{
+	{ID: "gpt-5.6-terra", Source: SourceClosedSource, Tier: TierHigh, CodexSubscription: true, ContextWindow: 1_050_000, Providers: []ProviderBinding{
 		{Provider: providers.ProviderOpenAI, Price: Pricing{
 			InputUSDPer1M: 2.00, OutputUSDPer1M: 12.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10,
 			LongContext: &LongContextPricing{ThresholdTokens: 272_000, InputUSDPer1M: 4.00, OutputUSDPer1M: 18.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10},
@@ -435,7 +446,7 @@ var Models = []Model{
 			LongContext: &LongContextPricing{ThresholdTokens: 272_000, InputUSDPer1M: 8.00, OutputUSDPer1M: 36.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10},
 		}},
 	}},
-	{ID: "gpt-5.6-sol", Source: SourceClosedSource, Tier: TierHigh, ContextWindow: 1_050_000, Providers: []ProviderBinding{
+	{ID: "gpt-5.6-sol", Source: SourceClosedSource, Tier: TierHigh, CodexSubscription: true, ContextWindow: 1_050_000, Providers: []ProviderBinding{
 		{Provider: providers.ProviderOpenAI, Price: Pricing{
 			InputUSDPer1M: 4.00, OutputUSDPer1M: 20.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10,
 			LongContext: &LongContextPricing{ThresholdTokens: 272_000, InputUSDPer1M: 8.00, OutputUSDPer1M: 30.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10},
@@ -453,7 +464,7 @@ var Models = []Model{
 			LongContext: &LongContextPricing{ThresholdTokens: 272_000, InputUSDPer1M: 16.00, OutputUSDPer1M: 60.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10},
 		}},
 	}},
-	{ID: "gpt-6-astra", Source: SourceClosedSource, Tier: TierHigh, ContextWindow: 1_050_000, Providers: []ProviderBinding{
+	{ID: "gpt-6-astra", Source: SourceClosedSource, Tier: TierHigh, ContextWindow: 1_050_000, CodexSubscriptionFallback: true, Providers: []ProviderBinding{
 		{Provider: providers.ProviderOpenAI, Price: Pricing{
 			InputUSDPer1M: 10.00, OutputUSDPer1M: 50.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10,
 			LongContext: &LongContextPricing{ThresholdTokens: 272_000, InputUSDPer1M: 20.00, OutputUSDPer1M: 75.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10},
@@ -464,7 +475,7 @@ var Models = []Model{
 	}},
 	// --- OpenAI GPT-6 Sol/Luna --- same >272K (2x in, 1.5x out) and 2x fast
 	// schedule as Astra.
-	{ID: "gpt-6-sol", Source: SourceClosedSource, Tier: TierHigh, ContextWindow: 1_050_000, Providers: []ProviderBinding{
+	{ID: "gpt-6-sol", Source: SourceClosedSource, Tier: TierHigh, CodexSubscription: true, ContextWindow: 1_050_000, Providers: []ProviderBinding{
 		{Provider: providers.ProviderOpenAI, Price: Pricing{
 			InputUSDPer1M: 2.00, OutputUSDPer1M: 10.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10,
 			LongContext: &LongContextPricing{ThresholdTokens: 272_000, InputUSDPer1M: 4.00, OutputUSDPer1M: 15.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10},
@@ -473,7 +484,16 @@ var Models = []Model{
 			LongContext: &LongContextPricing{ThresholdTokens: 272_000, InputUSDPer1M: 8.00, OutputUSDPer1M: 30.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10},
 		}},
 	}},
-	{ID: "gpt-6-luna", Source: SourceClosedSource, Tier: TierMid, ContextWindow: 1_050_000, Providers: []ProviderBinding{
+	{ID: "gpt-6.1-sol", Source: SourceClosedSource, Tier: TierHigh, CodexSubscription: true, ContextWindow: 1_050_000, Providers: []ProviderBinding{
+		{Provider: providers.ProviderOpenAI, Price: Pricing{
+			InputUSDPer1M: 2.00, OutputUSDPer1M: 10.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.05,
+			LongContext: &LongContextPricing{ThresholdTokens: 272_000, InputUSDPer1M: 4.00, OutputUSDPer1M: 15.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.05},
+		}, FastPrice: Pricing{
+			InputUSDPer1M: 4.00, OutputUSDPer1M: 20.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.05,
+			LongContext: &LongContextPricing{ThresholdTokens: 272_000, InputUSDPer1M: 8.00, OutputUSDPer1M: 30.00, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.05},
+		}},
+	}},
+	{ID: ModelGPT6Luna, Source: SourceClosedSource, Tier: TierMid, CodexSubscription: true, ContextWindow: 1_050_000, Providers: []ProviderBinding{
 		{Provider: providers.ProviderOpenAI, Price: Pricing{
 			InputUSDPer1M: 0.10, OutputUSDPer1M: 0.50, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10,
 			LongContext: &LongContextPricing{ThresholdTokens: 272_000, InputUSDPer1M: 0.20, OutputUSDPer1M: 0.75, CacheWriteMultiplier: 1.25, CacheReadMultiplier: 0.10},
@@ -589,21 +609,22 @@ var Models = []Model{
 	// DeepSeek V4 natively serves 1,048,576 tokens; the 131_072 carried over
 	// from V3.2 was filtering requests over ~128K (excludeContextOverflowModels
 	// in proxy/service.go).
-	{ID: "deepseek/deepseek-v4-flash", Source: SourceOpenSource, Tier: TierLow, ContextWindow: 1_048_576, ImageInput: ImageInputUnsupported, AgenticUse: AgenticLow, Providers: []ProviderBinding{
-		{Provider: providers.ProviderMakora, UpstreamID: "deepseek-ai/DeepSeek-V4-Flash",
-			Price: Pricing{InputUSDPer1M: 0.1134, OutputUSDPer1M: 0.2791, CacheReadMultiplier: 0.20}},
+	// Makora retired V4 Flash; explicit version pins remain available on other providers.
+	{ID: "deepseek/deepseek-v4-flash", Source: SourceOpenSource, ContextWindow: 1_048_576, ImageInput: ImageInputUnsupported, AgenticUse: AgenticLow, Providers: []ProviderBinding{
 		{Provider: providers.ProviderOpenRouter, Price: Pricing{InputUSDPer1M: 0.140, OutputUSDPer1M: 0.280, CacheReadMultiplier: 0.10}},
 		// Trailing Wafer bindings ($0.28/$0.56 fast tier): resolve only when
-		// Makora and OpenRouter are unwired; wafer_anthropic trails wafer.
+		// OpenRouter is unwired; wafer_anthropic trails wafer.
 		{Provider: providers.ProviderWafer, UpstreamID: "DeepSeek-V4-Flash-0731-Fast",
 			Price: Pricing{InputUSDPer1M: 0.280, OutputUSDPer1M: 0.560, CacheReadMultiplier: 0.07 / 0.280}},
 		{Provider: providers.ProviderWaferAnthropic, UpstreamID: "DeepSeek-V4-Flash-0731-Fast",
 			Price: Pricing{InputUSDPer1M: 0.280, OutputUSDPer1M: 0.560, CacheReadMultiplier: 0.07 / 0.280}},
 	}},
 	// V4.1-Flash: 552B MoE (8B active prefill / 16B decode), natively
-	// multimodal, 1M context. Fireworks serverless is primary; OpenRouter
-	// trails as the self-hoster fallback.
+	// multimodal, 1M context. Makora replaces its retired V4 Flash endpoint;
+	// Fireworks and OpenRouter remain fallbacks.
 	{ID: "deepseek/deepseek-v4.1-flash", Source: SourceOpenSource, Tier: TierLow, ContextWindow: 1_048_576, Providers: []ProviderBinding{
+		{Provider: providers.ProviderMakora, UpstreamID: "deepseek-ai/DeepSeek-V4.1-Flash",
+			Price: Pricing{InputUSDPer1M: 0.200, OutputUSDPer1M: 0.990, CacheReadMultiplier: 0.006 / 0.200}},
 		{Provider: providers.ProviderFireworks, UpstreamID: "accounts/fireworks/models/deepseek-v4p1-flash",
 			Price: Pricing{InputUSDPer1M: 0.220, OutputUSDPer1M: 0.660, CacheReadMultiplier: 0.007 / 0.220}},
 		{Provider: providers.ProviderOpenRouter, Price: Pricing{InputUSDPer1M: 0.100, OutputUSDPer1M: 0.500, CacheReadMultiplier: 0.10}},

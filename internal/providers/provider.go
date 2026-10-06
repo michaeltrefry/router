@@ -17,6 +17,13 @@ import (
 	"weave-os/router/internal/router"
 )
 
+// IncludedOnlySubscriptionTransport is implemented only by adapters that enforce
+// rejection before consuming paid subscription extra usage. Quota observations
+// or a dedicated OAuth endpoint do not establish this guarantee.
+type IncludedOnlySubscriptionTransport interface {
+	IncludedOnlySubscriptions() bool
+}
+
 // UpstreamHeaderObserver records subscription rate-limit headroom (see
 // internal/proxy/usage) without coupling adapters to the observer. Ctx lets it
 // check the resolved credential so only responses on the caller's own
@@ -305,7 +312,10 @@ var ErrNotImplemented = errors.New("provider: not implemented")
 // been written to the client. Handlers seeing c.Writer.Written() must NOT
 // write their own JSON envelope.
 type UpstreamStatusError struct {
-	Status int
+	Status    int
+	Headers   http.Header
+	Body      []byte
+	BodyBytes int64
 	// Cause is the dispatch error an in-stream error frame stands in for;
 	// nil when Status was read off a real upstream response.
 	Cause error
@@ -321,12 +331,44 @@ func (e *UpstreamStatusError) Unwrap() error { return e.Cause }
 // response instead of streaming it, so the proxy can retry on a different
 // provider or flush it to the client. Body capped at MaxBufferedErrorBytes.
 type UpstreamErrorResponse struct {
-	Status  int
-	Headers http.Header
-	Body    []byte
+	Status     int
+	Headers    http.Header
+	Body       []byte
+	BodyBytes  int64
+	BodyCapped bool
 	// Cause carries a classified upstream failure that is not represented by
 	// the HTTP status alone, such as a successful HTTP response with no answer.
 	Cause error
+}
+
+type ProviderErrorType string
+
+const (
+	ProviderErrorTypeInvalidRequest     ProviderErrorType = "invalid_request_error"
+	ProviderErrorTypeAuthentication     ProviderErrorType = "authentication_error"
+	ProviderErrorTypePermission         ProviderErrorType = "permission_error"
+	ProviderErrorTypeNotFound           ProviderErrorType = "not_found_error"
+	ProviderErrorTypeRateLimit          ProviderErrorType = "rate_limit_error"
+	ProviderErrorTypeAPI                ProviderErrorType = "api_error"
+	ProviderErrorTypeOverloaded         ProviderErrorType = "overloaded_error"
+	ProviderErrorTypeServiceUnavailable ProviderErrorType = "service_unavailable"
+)
+
+func KnownProviderErrorType(value string) (ProviderErrorType, bool) {
+	errorType := ProviderErrorType(value)
+	switch errorType {
+	case ProviderErrorTypeInvalidRequest,
+		ProviderErrorTypeAuthentication,
+		ProviderErrorTypePermission,
+		ProviderErrorTypeNotFound,
+		ProviderErrorTypeRateLimit,
+		ProviderErrorTypeAPI,
+		ProviderErrorTypeOverloaded,
+		ProviderErrorTypeServiceUnavailable:
+		return errorType, true
+	default:
+		return "", false
+	}
 }
 
 func (e *UpstreamErrorResponse) Error() string {
@@ -424,7 +466,7 @@ func IsRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	if isResponseHeaderTimeout(err) {
+	if IsResponseHeaderTimeout(err) {
 		return true
 	}
 	// All three stall sentinels are upstream-owned even though the watchdog
@@ -452,7 +494,9 @@ func IsRetryable(err error) bool {
 	return true
 }
 
-func isResponseHeaderTimeout(err error) bool {
+// IsResponseHeaderTimeout reports whether err is the upstream transport's
+// response-header timeout rather than a caller request deadline.
+func IsResponseHeaderTimeout(err error) bool {
 	var urlErr *url.Error
 	if !errors.As(err, &urlErr) || urlErr.Err == nil {
 		return false

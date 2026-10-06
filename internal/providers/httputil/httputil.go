@@ -293,29 +293,47 @@ func StartIdleWatchdogCause(ctx context.Context, cancel context.CancelCauseFunc,
 	if idleTimeout <= 0 || cancel == nil {
 		return func() {}, func() {}
 	}
-	var lastNS atomic.Int64
-	lastNS.Store(time.Now().UnixNano())
+	var mu sync.Mutex
+	lastProgress := time.Now()
+	stopped := false
 	done := make(chan struct{})
 	go func() {
-		interval := max(idleTimeout/3, 100*time.Millisecond)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+		timer := time.NewTimer(idleTimeout)
+		defer timer.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-done:
 				return
-			case <-ticker.C:
-				if time.Since(time.Unix(0, lastNS.Load())) > idleTimeout {
-					cancel(cause)
+			case <-timer.C:
+				mu.Lock()
+				if stopped {
+					mu.Unlock()
 					return
 				}
+				remaining := idleTimeout - time.Since(lastProgress)
+				if remaining <= 0 {
+					stopped = true
+					cancel(cause)
+					mu.Unlock()
+					return
+				}
+				mu.Unlock()
+				timer.Reset(remaining)
 			}
 		}
 	}()
-	return func() { lastNS.Store(time.Now().UnixNano()) },
-		sync.OnceFunc(func() { close(done) })
+	return func() {
+			mu.Lock()
+			lastProgress = time.Now()
+			mu.Unlock()
+		}, sync.OnceFunc(func() {
+			mu.Lock()
+			stopped = true
+			mu.Unlock()
+			close(done)
+		})
 }
 
 // StartThroughputWatchdog cancels ctx with cause when the upstream keeps

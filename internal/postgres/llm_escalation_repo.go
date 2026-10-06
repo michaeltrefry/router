@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"weave-os/router/internal/flags"
 	"weave-os/router/internal/postgres/dbbudget"
 	"weave-os/router/internal/providers"
 	"weave-os/router/internal/router/escalation"
@@ -111,16 +112,26 @@ func (r *LLMEscalationRepo) Complete(ctx context.Context, request llmescalation.
 			return nil
 		}
 		session.CompletedTurns++
-		if session.CompletedTurns%int64(session.Config.Cadence) == 0 && session.Floor == "" {
+		qwenReady := session.Config.EffectiveClassifier() != flags.EscalationClassifierLLM || session.CompletedTurns >= 10
+		if session.CompletedTurns%int64(session.Config.Cadence) == 0 && session.Floor == "" && qwenReady {
 			session.LatestCheckpoint = session.CompletedTurns
 			job := llmescalation.Job{
 				ID: uuid.NewString(), Scope: session.Scope, Lifetime: session.Lifetime,
 				Generation: session.Generation, Checkpoint: session.LatestCheckpoint,
 				RequestID: request.RequestID, Status: llmescalation.JobRunning, CreatedAt: time.Now().UTC(),
-				Model: policy.EscalationJudgeModel, Provider: providers.ProviderFireworks,
-				Version: llmescalation.Version, PromptRevision: llmescalation.SwitchyardRevision,
-				SchemaRevision: llmescalation.SwitchyardRevision, RendererRevision: llmescalation.SwitchyardRevision,
 				ConfigDigest: session.Config.Digest,
+			}
+			switch session.Config.EffectiveClassifier() {
+			case flags.EscalationClassifierSwitchyard:
+				job.Model, job.Provider = policy.EscalationJudgeModel, providers.ProviderFireworks
+				job.Version = llmescalation.Version
+				job.PromptRevision, job.SchemaRevision, job.RendererRevision = llmescalation.SwitchyardRevision, llmescalation.SwitchyardRevision, llmescalation.SwitchyardRevision
+			case flags.EscalationClassifierLLM:
+				job.Model, job.Provider = llmescalation.QwenReleaseName, llmescalation.QwenProvider
+				job.Version = string(flags.EscalationClassifierLLM)
+				job.PromptRevision, job.SchemaRevision, job.RendererRevision = llmescalation.QwenPromptSHA256, llmescalation.QwenSchemaVersion, llmescalation.QwenRendererVersion
+			default:
+				return errors.New("unsupported LLM escalation classifier")
 			}
 			_, liveErr := queries.GetLLMEscalationLiveJob(ctx, sqlc.GetLLMEscalationLiveJobParams{Lifetime: lifetime, Status: string(llmescalation.JobRunning)})
 			if liveErr != nil && !errors.Is(liveErr, sql.ErrNoRows) {
@@ -135,6 +146,9 @@ func (r *LLMEscalationRepo) Complete(ctx context.Context, request llmescalation.
 				job.Failure = llmescalation.FailureInFlight
 			case !request.Capacity:
 				job.Failure = llmescalation.FailureCapacity
+				if request.IntervalFailure != llmescalation.FailureNone {
+					job.Failure = request.IntervalFailure
+				}
 			}
 			if job.Failure != llmescalation.FailureNone {
 				job.Status = llmescalation.JobSkipped
@@ -459,7 +473,7 @@ func (r *LLMEscalationRepo) Summary(ctx context.Context, installation string) (l
 		PositiveJudgments: row.PositiveJudgments, ActualInterventions: row.ActualInterventions,
 		ShadowInterventions: row.ShadowInterventions, StaleResults: row.StaleResults,
 		Timeouts: row.Timeouts, InvalidResponses: row.InvalidResponses,
-		CapacitySkips: row.CapacitySkips, AttemptLimitExhaustion: row.AttemptLimitExhaustion,
+		CapacitySkips: row.CapacitySkips, IntervalUnavailableSkips: row.IntervalUnavailableSkips, AttemptLimitExhaustion: row.AttemptLimitExhaustion,
 	}, nil
 }
 

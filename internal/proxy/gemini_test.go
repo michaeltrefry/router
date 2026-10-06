@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -13,6 +14,7 @@ import (
 	"weave-os/router/internal/providers"
 	"weave-os/router/internal/proxy"
 	"weave-os/router/internal/router"
+	"weave-os/router/internal/router/sessionpin"
 	"weave-os/router/internal/subscriptions/entitlement"
 
 	"github.com/stretchr/testify/assert"
@@ -55,7 +57,7 @@ func TestProxyGeminiGenerateContent_RoutesToGoogleProvider(t *testing.T) {
 		nil,
 	)
 
-	ctx := authedCtx("00000000-0000-0000-0000-000000000001")
+	ctx := context.WithValue(authedCtx("00000000-0000-0000-0000-000000000001"), proxy.ManagedSubscriptionEnrollmentUnavailableContextKey{}, true)
 	rec := httptest.NewRecorder()
 	httpReq := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-1.5-pro:generateContent", strings.NewReader(""))
 	require.NoError(t, svc.ProxyGeminiGenerateContent(ctx, []byte(geminiInjectedBody), rec, httpReq))
@@ -164,6 +166,52 @@ func TestProxyGeminiGenerateContent_RetriesBuffered429WithoutMarkerLeak(t *testi
 	assert.Contains(t, rec.Body.String(), "retry later")
 }
 
+func TestProxyGeminiGenerateContent_DemotesUnrescuedResponseHeaderTimeout(t *testing.T) {
+	store := newFakePinStore()
+	googleProvider := &fakeProvider{proxyErr: &url.Error{
+		Op:  "Post",
+		URL: "https://upstream.example/v1beta/models/gemini-1.5-pro:generateContent",
+		Err: errors.Join(errors.New("net/http: timeout awaiting response headers"), context.DeadlineExceeded),
+	}}
+	svc := proxy.NewService(
+		&fakeRouter{decision: router.Decision{Provider: providers.ProviderGoogle, Model: "gemini-1.5-pro", Reason: "cluster"}},
+		map[string]providers.Client{providers.ProviderGoogle: googleProvider},
+		nil, false, nil, store, false, providers.ProviderGoogle, "gemini-2.5-flash", nil,
+	).WithRetrySleep(noRetrySleep).WithRescuedFailureArmDemotion(true)
+	recorder := httptest.NewRecorder()
+	body := strings.Replace(geminiInjectedBody, `"stream":false`, `"stream":true`, 1)
+	err := svc.ProxyGeminiGenerateContent(authedCtx("00000000-0000-0000-0000-000000000001"), []byte(body), recorder,
+		httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-1.5-pro:streamGenerateContent", nil))
+
+	require.Error(t, err)
+	require.Len(t, store.demotions, 2)
+	for _, demotion := range store.demotions {
+		assert.Equal(t, "gemini-1.5-pro", demotion.Model)
+		assert.Equal(t, sessionpin.DemotionReasonResponseHeaderTimeout, demotion.Reason)
+	}
+}
+
+func TestProxyGeminiGenerateContent_DemotesUnrescuedWatchdogStall(t *testing.T) {
+	store := newFakePinStore()
+	googleProvider := &fakeProvider{proxyErr: providers.ErrUpstreamOutputStall}
+	svc := proxy.NewService(
+		&fakeRouter{decision: router.Decision{Provider: providers.ProviderGoogle, Model: "gemini-1.5-pro", Reason: "cluster"}},
+		map[string]providers.Client{providers.ProviderGoogle: googleProvider},
+		nil, false, nil, store, false, providers.ProviderGoogle, "gemini-2.5-flash", nil,
+	).WithRetrySleep(noRetrySleep).WithRescuedFailureArmDemotion(true)
+	recorder := httptest.NewRecorder()
+	body := strings.Replace(geminiInjectedBody, `"stream":false`, `"stream":true`, 1)
+	err := svc.ProxyGeminiGenerateContent(authedCtx("00000000-0000-0000-0000-000000000001"), []byte(body), recorder,
+		httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-1.5-pro:streamGenerateContent", nil))
+
+	require.ErrorIs(t, err, providers.ErrUpstreamOutputStall)
+	require.Len(t, store.demotions, 2)
+	for _, demotion := range store.demotions {
+		assert.Equal(t, "gemini-1.5-pro", demotion.Model)
+		assert.Equal(t, sessionpin.DemotionReasonUnrescuedStall, demotion.Reason)
+	}
+}
+
 // Under transient_rate_limit the Gemini path paces same-binding retries like
 // Messages does: a Retry-After above the cap ends them after the first attempt.
 func TestProxyGeminiGenerateContent_TransientRateLimitHonoursRetryAfterCap(t *testing.T) {
@@ -223,7 +271,7 @@ func TestProxyGeminiGenerateContent_PersistsPassthroughExperimentTelemetry(t *te
 	assert.Equal(t, int32(4), row.OutputTokens)
 	require.NotNil(t, row.CacheReadTokens)
 	assert.Equal(t, int32(1024), *row.CacheReadTokens)
-	assert.Zero(t, row.UpstreamStatusCode, "successful rows follow the existing telemetry convention of zero status")
+	assert.Equal(t, int32(http.StatusOK), row.UpstreamStatusCode, "successful rows carry actual successful HTTP status")
 	assert.Positive(t, row.ActualInputCostUSD)
 	assert.Positive(t, row.ActualOutputCostUSD)
 }

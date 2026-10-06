@@ -248,6 +248,37 @@ type RouterInstallationRoutingPolicy struct {
 	UpdatedAt      pgtype.Timestamptz
 }
 
+type RouterInternalTestBudget struct {
+	SubjectID        uuid.UUID
+	InstallationID   uuid.UUID
+	Label            string
+	BalanceUsdMicros int64
+	Enabled          bool
+	CreatedAt        pgtype.Timestamptz
+}
+
+type RouterInternalTestCreditLedger struct {
+	ID              uuid.UUID
+	SubjectID       uuid.UUID
+	DeltaUsdMicros  int64
+	RouterRequestID string
+	RouterModel     string
+	APIKeyID        uuid.UUID
+	CreatedAt       pgtype.Timestamptz
+}
+
+type RouterInternalTestPlanLaunch struct {
+	ID             uuid.UUID
+	TokenSha256    string
+	SubjectID      uuid.UUID
+	InstallationID uuid.UUID
+	Launch         []byte
+	SessionID      pgtype.UUID
+	CreatedAt      pgtype.Timestamptz
+	ExpiresAt      pgtype.Timestamptz
+	RevokedAt      pgtype.Timestamptz
+}
+
 type RouterLlmEscalationCompletion struct {
 	Lifetime uuid.UUID
 	Boundary []byte
@@ -435,6 +466,7 @@ type RouterModelRouterInstallation struct {
 	TrialShadowSampleRate            pgtype.Numeric
 	TrialShadowDailyCeilingUsdMicros *int64
 	ShowModelSelectionReasoning      bool
+	SubscriptionSharingEnabled       bool
 }
 
 type RouterModelRouterRequestTelemetry struct {
@@ -656,6 +688,12 @@ type RouterModelRouterRequestTelemetry struct {
 	ErrorClass              *string
 	LatestToolCallCounts    []byte
 	ServingTarget           *string
+	ReasoningTokens         *int32
+	SubscriptionAccountID   pgtype.UUID
+	SubscriptionOwnerID     pgtype.UUID
+	SubscriptionTier        *string
+	IntendedModelFamily     *string
+	FinalModelFamily        *string
 }
 
 type RouterModelRouterSubscriptionAccount struct {
@@ -676,7 +714,14 @@ type RouterModelRouterSubscriptionAccount struct {
 	SubscriberID           pgtype.UUID
 	HealthState            string
 	// Provider-supplied human-readable account label; never used for identity or deduplication.
-	DisplayName *string
+	DisplayName    *string
+	ProviderUserID *string
+}
+
+type RouterModelRouterSubscriptionAccountInstallation struct {
+	InstallationID        uuid.UUID
+	SubscriptionAccountID uuid.UUID
+	CreatedAt             pgtype.Timestamptz
 }
 
 // End-user identities seen on inbound requests, scoped to an installation. Replaces the per-user API key pattern.
@@ -1168,4 +1213,14 @@ type RouterSubscriberEntitlement struct {
 	ProjectedAt                      pgtype.Timestamptz
 	CreatedAt                        pgtype.Timestamptz
 	UpdatedAt                        pgtype.Timestamptz
+}
+
+type RouterTaskDomainProfile struct {
+	ConversationKey string
+	RootSha256      string
+	ReleaseSha256   string
+	EvidenceSha256  string
+	Outcome         []byte
+	ExpiresAt       pgtype.Timestamptz
+	RetryAfter      pgtype.Timestamptz
 }

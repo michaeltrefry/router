@@ -26,6 +26,7 @@ import (
 	"weave-os/router/internal/config"
 	"weave-os/router/internal/dispatch"
 	"weave-os/router/internal/entra"
+	"weave-os/router/internal/escalationmodal"
 	"weave-os/router/internal/feedback"
 	"weave-os/router/internal/flags"
 	"weave-os/router/internal/observability"
@@ -235,6 +236,9 @@ func main() {
 	// Managed without billing stays BYOK-only (avoids spending platform-key
 	// budget if billing fails to wire); managed with billing flips to
 	// platform-key mode gated by balance checks. Self-hosted is never BYOK-only.
+	if billingSvc != nil {
+		billingSvc.WithInternalTestPrepaid(servingpostgres.NewInternalTestBook(pool))
+	}
 	byokOnly := deploymentMode == server.DeploymentModeManaged && billingSvc == nil
 
 	// Always registered. With ANTHROPIC_API_KEY (selfhosted only) the router
@@ -578,8 +582,7 @@ func main() {
 		WithRoutingPolicies(repo.RoutingPolicies, routingPolicyCache).
 		WithWIFTokenSource(buildWIFTokenSource(logger)).
 		WithEntraTokenSource(buildEntraTokenSource(logger)).
-		WithFlagOverridesDisabled(flagOverridesDisabled).
-		WithRequestIdentities(repo.RequestIdentities)
+		WithFlagOverridesDisabled(flagOverridesDisabled)
 	subscriptionPoolsEnabled := config.GetOr("ROUTER_SUBSCRIPTION_POOLS_ENABLED", "false") == "true"
 	var subscriptionRuntime *subscriptions.Runtime
 	if subscriptionPoolsEnabled {
@@ -588,16 +591,12 @@ func main() {
 		if codexIssuer := strings.TrimRight(config.GetOr("WEAVE_CODEX_OAUTH_ISSUER", ""), "/"); codexIssuer != "" {
 			codexTokenURL = codexIssuer + "/oauth/token"
 		}
-		subscriptionRuntime = subscriptions.NewRuntime(
-			authSvc,
-			subscriptions.NewOAuthClient(
-				&http.Client{Timeout: subscriptions.RefreshHTTPTimeout},
-				codexTokenURL,
-				config.GetOr("WEAVE_ANTHROPIC_OAUTH_TOKEN", ""),
-				time.Now,
-			),
-			time.Now,
+		subscriptionOAuth := subscriptions.NewOAuthClient(
+			&http.Client{Timeout: subscriptions.RefreshHTTPTimeout}, codexTokenURL,
+			config.GetOr("WEAVE_ANTHROPIC_OAUTH_TOKEN", ""), time.Now,
 		)
+		authSvc.WithCodexEnrollmentVerifier(subscriptionOAuth)
+		subscriptionRuntime = subscriptions.NewRuntime(authSvc, subscriptionOAuth, time.Now)
 		logger.Info("Server-side subscription account pools enabled")
 	} else {
 		logger.Info("Server-side subscription account pools disabled")
@@ -777,8 +776,9 @@ func main() {
 	// Session-level demotion of an arm whose stream died after commit. Off
 	// until the upstream owner of those cuts is identified.
 	committedStreamArmDemotion := config.GetOr("ROUTER_COMMITTED_STREAM_ARM_DEMOTION", "false") == "true"
-	// Session-level demotion of the primary arm after a sibling rescue. Off
-	// until baked off against the committed-stream demotion.
+	// Session-level demotion of the primary arm after a response-header timeout
+	// or another pre-commit failure followed by sibling rescue. Off until baked
+	// off against the committed-stream demotion.
 	rescuedFailureArmDemotion := config.GetOr("ROUTER_RESCUED_FAILURE_ARM_DEMOTION", "false") == "true"
 	// Upstream 429s as transient throttling: cooldown demotion, fail-open
 	// rescue and Retry-After-aware same-binding retry. Off until baked off.
@@ -1028,10 +1028,21 @@ func main() {
 	var hmmRosterModels admin.HMMRosterSource
 	var hmmBetaCapabilities policy.Capabilities
 	var servingAdmission *middleware.ServingAdmissionConfig
+	testPlansEnabled := strings.EqualFold(config.GetOr("ROUTER_TEST_PLANS_ENABLED", "false"), "true")
 	policyEnvironmentRaw := strings.TrimSpace(config.GetOr("ROUTER_POLICY_ENVIRONMENT", ""))
+	taskRuntime, taskErr := loadTaskDomainRuntime(pool)
+	if taskErr != nil {
+		logger.Error("Task classifier configuration invalid; refusing to boot", "err", taskErr)
+		panic(taskErr)
+	}
+	if taskRuntime != nil {
+		taskSweepCtx, cancelTaskSweep := context.WithCancel(context.Background())
+		defer cancelTaskSweep()
+		safeGo(logger, "task-domain-sweep", func() { taskRuntime.sweep(taskSweepCtx) })
+	}
 	if managedServingEnabled() {
 		prepareCtx, cancelPrepare := context.WithTimeout(context.Background(), 60*time.Second)
-		admission, baseline, closeRegistry, err := buildManagedServingRuntime(prepareCtx, availableProviders)
+		admission, baseline, closeRegistry, err := buildManagedServingRuntime(prepareCtx, availableProviders, taskRuntime)
 		cancelPrepare()
 		if err != nil {
 			logger.Error("Managed worker preparation failed; refusing to boot", "target", config.GetOr("ROUTER_SERVING_TARGET", ""), "registry_uri", config.GetOr("ROUTER_SERVING_REGISTRY_URI", ""), "err", err)
@@ -1039,6 +1050,7 @@ func main() {
 		}
 		defer closeRegistry()
 		servingAdmission = admission
+		servingAdmission.TestBudgetEnabled = testPlansEnabled && billingSvc != nil
 		servingAdmission.Attribution = servingpostgres.NewRequestAttributionRepo(pool)
 		admittedRouter := policyregistry.NewAdmittedRouter(router.StrategyHMM, baseline)
 		hmmRouter = admittedRouter
@@ -1254,6 +1266,16 @@ func main() {
 		}
 		escalationJudge = judge
 	}
+	qwenEscalationURL := strings.TrimSpace(os.Getenv("ROUTER_LLM_ESCALATION_URL"))
+	qwenEscalationKey := strings.TrimSpace(os.Getenv("ROUTER_LLM_ESCALATION_API_KEY"))
+	var qwenEscalationJudge llmescalation.Judge
+	if qwenEscalationURL != "" || qwenEscalationKey != "" {
+		judge, judgeErr := escalationmodal.NewJudge(qwenEscalationURL, qwenEscalationKey, nil)
+		if judgeErr != nil {
+			panic(judgeErr)
+		}
+		qwenEscalationJudge = judge
+	}
 	servedModels := proxyRoutableModels(routingTargets, availableProviders, hmmRouter != nil)
 
 	proxySvc := proxy.NewService(routeEntry, providerMap, telemetryEmitter, embedOnlyUser, semanticCache, pinStore, hardPinExplore, hardPinProvider, hardPinModel, repo.Telemetry).
@@ -1262,6 +1284,7 @@ func main() {
 		WithEscalation(escalationStore, escalationObserver).
 		WithEscalationDashboard(escalationDashboardStore).
 		WithLLMEscalation(llmEscalationStore, escalationJudge).
+		WithQwenEscalation(qwenEscalationJudge).
 		WithEscalationConfiguration(llmEscalationStore, authSvc.InvalidateInstallation, escalationJudgeActiveEnabled).
 		WithTranslationCompatibilityMode(proxy.TranslationCompatibilityMode(translationCompatibilityMode)).
 		WithScopedSearchRequirement(scopedSearchRequirement, searchRequirementDecayTurns).
@@ -1429,24 +1452,8 @@ func main() {
 	}()
 	proxySvc = proxySvc.WithUsageObserver(usageObserver)
 
-	// Discounts a covered model's cost term by the caller's observed
-	// subscription rate-limit headroom (~epsilon with slack, →1 as it binds).
-	// Defaults ON; only affects turns with an observed subscription, so
-	// blast radius is narrow. Disabling here leaves the observer/bypass gate wired.
-	if config.GetOr("ROUTER_SUBSCRIPTION_AWARE_ROUTING", "true") == "true" {
-		epsilon := 0.05
-		if v, err := strconv.ParseFloat(config.GetOr("ROUTER_SUBSCRIPTION_COST_EPSILON", "0.05"), 64); err == nil {
-			epsilon = v
-		}
-		gamma := 2.0
-		if v, err := strconv.ParseFloat(config.GetOr("ROUTER_SUBSCRIPTION_COST_GAMMA", "2"), 64); err == nil {
-			gamma = v
-		}
-		proxySvc = proxySvc.WithSubscriptionAwareRouting(usageObserver, epsilon, gamma)
-		logger.Info("Subscription-aware routing configured", "epsilon", epsilon, "gamma", gamma, "observation_ttl", subscriptionTTL)
-	} else {
-		logger.Info("Usage observer wired; subscription-aware cost discount disabled", "observation_ttl", subscriptionTTL)
-	}
+	logger.Info("Subscription quota observer configured", "observation_ttl", subscriptionTTL)
+
 	trafficCapture, err := newTrafficCaptureFromEnvironment()
 	if err != nil {
 		logger.Error("Unable to initialize local HTTP traffic capture", "err", err)
@@ -1498,7 +1505,15 @@ func main() {
 			WithSubscriberAllowance(subscriberAllowanceSvc)
 		logger.Info("Individual subscriber allowance enforcement enabled")
 	}
+	var testPlans *policyregistry.TestPlanTools
+	if testPlansEnabled {
+		if servingAdmission == nil || billingSvc == nil {
+			panic("internal test plan preparation requires managed serving and isolated prepaid billing")
+		}
+		testPlans = &policyregistry.TestPlanTools{Repository: servingpostgres.NewTestPlanRepo(pool), Store: servingAdmission.Store, Clock: time.Now}
+	}
 	serverFeatures := server.Features{
+		TestPlans:           testPlans,
 		PolicyPinEnabled:    policyPinEnabled,
 		ServingAdmission:    servingAdmission,
 		SubscriberAllowance: subscriberAllowanceSvc,

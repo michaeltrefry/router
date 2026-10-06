@@ -11,8 +11,11 @@ import (
 // Out-of-band role:"system" notices are skipped, and the wrapper blocks Claude
 // Code injects (<system-reminder>, <command-name>, ...) are not visible text,
 // so harness follow-ups that only carry those do not count. Any other tagged
-// text is the person's own. Anthropic/OpenAI shapes only.
+// text is the person's own. Anthropic, OpenAI, and Gemini shapes.
 func (e *RequestEnvelope) EndsWithUserPrompt() bool {
+	if e.format == FormatGemini {
+		return geminiEndsWithUserPrompt(e.body)
+	}
 	switch e.format {
 	case FormatAnthropic, FormatOpenAI:
 	default:
@@ -38,6 +41,25 @@ func (e *RequestEnvelope) EndsWithUserPrompt() bool {
 			return false
 		case "assistant":
 			return sawTypedText && !assistantCallsTools(all[i])
+		}
+	}
+	return sawTypedText
+}
+
+func geminiEndsWithUserPrompt(body []byte) bool {
+	contents := gjson.GetBytes(body, "contents").Array()
+	sawTypedText := false
+	for i := len(contents) - 1; i >= 0; i-- {
+		if contents[i].Get("role").String() == "model" {
+			return sawTypedText
+		}
+		for _, part := range contents[i].Get("parts").Array() {
+			if part.Get("functionResponse").Exists() {
+				return false
+			}
+			if !isOnlyKnownInjectedText(part.Get("text").String()) {
+				sawTypedText = true
+			}
 		}
 	}
 	return sawTypedText
@@ -89,9 +111,9 @@ func assistantCallsTools(assistant gjson.Result) bool {
 
 // LatestToolCallOutcomes returns the outcomes of the most recent assistant
 // message's tool_use blocks: the calls whose results this request delivers.
-// Unlike AssistantToolCallOutcomes, earlier turns' calls are not repeated, so
-// summing it across a session's requests counts each call once. Anthropic
-// format only.
+// Earlier assistant messages are excluded. Client retries can deliver the
+// same results again; these are observations, not distinct executions.
+// Anthropic format only.
 func (e *RequestEnvelope) LatestToolCallOutcomes() []ToolCallOutcome {
 	if e.format != FormatAnthropic {
 		return nil

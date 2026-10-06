@@ -214,6 +214,27 @@ func TestStartIdleWatchdog_DoesNotFireWhenMarked(t *testing.T) {
 	assert.NoError(t, context.Cause(ctx))
 }
 
+func TestStartIdleWatchdog_ExpiresAtLastProgressDeadline(t *testing.T) {
+	const idleTimeout = 600 * time.Millisecond
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	mark, stop := StartIdleWatchdog(ctx, cancel, idleTimeout)
+	defer stop()
+
+	time.Sleep(50 * time.Millisecond)
+	markAt := time.Now()
+	mark()
+
+	select {
+	case <-ctx.Done():
+		assert.ErrorIs(t, context.Cause(ctx), ErrUpstreamIdleTimeout)
+		assert.GreaterOrEqual(t, time.Since(markAt), idleTimeout-15*time.Millisecond,
+			"accepted progress must receive the full idle budget")
+	case <-time.After(idleTimeout + 110*time.Millisecond):
+		t.Fatal("watchdog missed the last-progress deadline by more than scheduler tolerance")
+	}
+}
+
 func TestSSEIdleTimeoutFromEnv_DefaultsTo45s(t *testing.T) {
 	t.Setenv("ROUTER_SSE_IDLE_TIMEOUT_SECONDS", "")
 	assert.Equal(t, 45*time.Second, idleTimeoutFromEnv("ROUTER_SSE_IDLE_TIMEOUT_SECONDS", 45*time.Second))

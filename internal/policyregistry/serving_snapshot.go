@@ -3,6 +3,7 @@ package policyregistry
 import (
 	"context"
 	"errors"
+	"maps"
 
 	"github.com/google/uuid"
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -11,11 +12,22 @@ import (
 )
 
 type servingSnapshotContextKey struct{}
+type servingAssertionContextKey struct{}
+
+// ServingAssertionFromContext returns the verified test admission for cost-free preflight.
+func ServingAssertionFromContext(ctx context.Context) *ServingAssertion {
+	assertion, _ := ctx.Value(servingAssertionContextKey{}).(*ServingAssertion)
+	return assertion
+}
 
 const servingRuntimeCacheSize = 128
 
 // WithServingAssertion derives attribution and isolated state keys from verified admission.
 func WithServingAssertion(ctx context.Context, assertion ServingAssertion) context.Context {
+	if assertion.TestPlan != nil {
+		ctx = context.WithValue(ctx, servingAssertionContextKey{}, &assertion)
+		ctx = requestcontext.WithInternalTestIdentity(ctx, requestcontext.InternalTestIdentity{SubjectID: assertion.TestPlan.SubjectID, SessionID: assertion.TestPlan.SessionID})
+	}
 	admission := assertion.Admission
 	namespace, _ := CanonicalBytes(struct {
 		Scope      AdmissionScope
@@ -114,6 +126,7 @@ func (c *ServingRuntimeCache) Snapshot(ctx context.Context, admission SessionRel
 		return nil, errors.New("admitted policy contains arms absent from the worker catalog")
 	}
 	candidate := Candidate{
+		AuxiliaryModels: maps.Clone(prepared.Candidate.Classifier.AuxiliaryModels),
 		HeadSnapshot: HeadSnapshot{
 			// Binding generations are request-scoped, not properties of cached bytes.
 			Generation: 0,
@@ -126,7 +139,7 @@ func (c *ServingRuntimeCache) Snapshot(ctx context.Context, admission SessionRel
 		},
 		Release: Release{
 			Classifier: prepared.Candidate.Classifier.Identity,
-			Policy:     prepared.Candidate.Policy,
+			Policy:     prepared.PolicyReference,
 		},
 		Policy:             prepared.Policy,
 		ClassifierAudience: prepared.Binding.Classifier.Audience,

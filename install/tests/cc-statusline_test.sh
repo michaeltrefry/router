@@ -158,29 +158,135 @@ render() { # render <installed_script> <cache_home> <url> <model_id> [transcript
 
 echo "cc-statusline.sh"
 
-# Baseline: a priced selection reports real savings. Guards against the whole
-# suite passing vacuously because savings never render at all.
+# A transcript and a successful display-settings response establish neither the
+# destination nor the serving outcome of the current inference request.
+c="$work/routing-evidence"; mkdir -p "$c/cache"; make_installed "$c/cc.sh"
+printf '{"hide_terminal_surfaces": false}' > "$c/display-settings.json"
+for response_model in claude-sonnet-4-5 deepseek/deepseek-v4-pro; do
+  jq -cn --arg model "$response_model" '{type:"assistant",message:{id:"msg_local",model:$model,usage:{input_tokens:1000,output_tokens:200,cache_read_input_tokens:3000,cache_creation_input_tokens:500}}}' > "$c/transcript.jsonl"
+  out="$(WEAVE_STATUSLINE_UPDATE=0 WEAVE_ROUTER_KEY=rk_synthetic \
+    WEAVE_ROUTER_BASE_URL="file://$c/display-settings.json" \
+    render "$c/cc.sh" "$c/cache" "file://$upstream" claude-sonnet-4-5 "$c/transcript.jsonl")"
+  check_not_contains "$response_model does not show a routing warning" "$out" "routing unverified"
+  check_contains "$response_model has a clear response label" "$out" "response model: $response_model"
+  check_not_contains "$response_model does not use transcript jargon" "$out" "transcript model:"
+  check_not_contains "$response_model omits input/output token totals" "$out" " in / "
+  check_not_contains "$response_model omits cache read totals" "$out" "cache read"
+  check_not_contains "$response_model omits cache write totals" "$out" "cache write"
+  check_not_contains "$response_model does not claim realized savings" "$out" "saved "
+  check_not_contains "$response_model does not imply a verified model swap" "$out" "←"
+done
+
+cat > "$c/pin.jsonl" <<'JSONL'
+{"type":"assistant","message":{"id":"msg_ack","model":"weave-router","content":[{"type":"text","text":"force-model applied: claude-opus-4-7 (anthropic)"}]}}
+{"type":"assistant","message":{"id":"msg_later","model":"claude-sonnet-4-5","usage":{"input_tokens":123,"output_tokens":456}}}
+JSONL
+out="$(WEAVE_STATUSLINE_UPDATE=0 WEAVE_ROUTER_KEY=rk_synthetic \
+  WEAVE_ROUTER_BASE_URL="file://$c/display-settings.json" \
+  render "$c/cc.sh" "$c/cache" "file://$upstream" claude-sonnet-4-5 "$c/pin.jsonl")"
+check_not_contains "historical pin does not show a routing warning" "$out" "routing unverified"
+check_contains "historical pin is labeled as historical" "$out" "last pin: claude-opus-4-7"
+check_contains "historical pin does not replace the latest response model" "$out" "response model: claude-sonnet-4-5"
+check_not_contains "historical pin does not claim an active force" "$out" "[forced]"
+
+printf '{"type":"assistant","message":{"model":"<synthetic>"}}\n' >> "$c/pin.jsonl"
+out="$(WEAVE_STATUSLINE_UPDATE=0 WEAVE_ROUTER_KEY=rk_synthetic \
+  WEAVE_ROUTER_BASE_URL="file://$c/display-settings.json" \
+  render "$c/cc.sh" "$c/cache" "file://$upstream" claude-sonnet-4-5 "$c/pin.jsonl")"
+check_contains "historical pin cannot mask a later failure" "$out" "last response failed"
+check_not_contains "failed response does not show a routing warning" "$out" "routing unverified"
+
+out="$(WEAVE_STATUSLINE_UPDATE=0 WEAVE_ROUTER_KEY=rk_synthetic \
+  WEAVE_ROUTER_BASE_URL="file://$c/display-settings.json" \
+  render "$c/cc.sh" "$c/cache" "file://$upstream" claude-sonnet-4-5 "$c/missing.jsonl")"
+check_not_contains "missing transcript does not show a routing warning" "$out" "routing unverified"
+check_contains "missing transcript labels the selected model" "$out" "selected: claude-sonnet-4-5"
+check_not_contains "missing transcript does not invent a response model" "$out" "response model:"
+
+for transcript_state in empty malformed; do
+  : > "$c/$transcript_state.jsonl"
+  if [ "$transcript_state" = malformed ]; then printf 'not-json\n' > "$c/$transcript_state.jsonl"; fi
+  out="$(WEAVE_STATUSLINE_UPDATE=0 WEAVE_ROUTER_KEY=rk_synthetic \
+    WEAVE_ROUTER_BASE_URL="file://$c/display-settings.json" \
+    render "$c/cc.sh" "$c/cache" "file://$upstream" claude-sonnet-4-5 "$c/$transcript_state.jsonl")"
+  check_not_contains "$transcript_state transcript does not show a routing warning" "$out" "routing unverified"
+  check_not_contains "$transcript_state transcript does not invent a price comparison" "$out" "est. cost difference"
+  check_not_contains "$transcript_state transcript does not invent a response model" "$out" "response model:"
+done
+
+head -n 1 "$c/pin.jsonl" > "$c/ack.jsonl"
+out="$(WEAVE_STATUSLINE_UPDATE=0 WEAVE_ROUTER_KEY=rk_synthetic \
+  WEAVE_ROUTER_BASE_URL="file://$c/display-settings.json" \
+  render "$c/cc.sh" "$c/cache" "file://$upstream" claude-sonnet-4-5 "$c/ack.jsonl")"
+check_not_contains "control acknowledgement does not show a routing warning" "$out" "routing unverified"
+check_contains "control acknowledgement is not labeled as an inference response" "$out" "control acknowledgement"
+check_not_contains "control acknowledgement does not imply an active force" "$out" "[forced]"
+
+cat > "$c/duplicate.jsonl" <<'JSONL'
+{"type":"assistant","message":{"id":"msg_repeat","model":"claude-opus-5","content":[{"type":"text","text":"Synthetic response."}],"usage":{"input_tokens":10000,"output_tokens":2000}}}
+{"type":"assistant","message":{"id":"msg_repeat","model":"claude-opus-5","content":[{"type":"text","text":"Another synthetic block."}],"usage":{"input_tokens":10000,"output_tokens":2000}}}
+JSONL
+out="$(WEAVE_STATUSLINE_UPDATE=0 WEAVE_ROUTER_KEY=rk_synthetic \
+  WEAVE_ROUTER_BASE_URL="file://$c/display-settings.json" \
+  render "$c/cc.sh" "$c/cache" "file://$upstream" deepseek/deepseek-v4-pro "$c/duplicate.jsonl")"
+check_contains "more expensive transcript preserves a signed comparison" "$out" "est. cost difference -\$0.08"
+check_not_contains "content-block copies do not display token totals" "$out" " in / "
+
+jq -c '.message.usage = {input_tokens:100,output_tokens:20}' "$c/duplicate.jsonl" > "$c/tiny-difference.jsonl"
+out="$(WEAVE_STATUSLINE_UPDATE=0 WEAVE_ROUTER_KEY=rk_synthetic \
+  WEAVE_ROUTER_BASE_URL="file://$c/display-settings.json" \
+  render "$c/cc.sh" "$c/cache" "file://$upstream" deepseek/deepseek-v4-pro "$c/tiny-difference.jsonl")"
+check_contains "sub-cent negative comparison keeps its sign" "$out" "est. cost difference -<\$0.01"
+
+# Pin the hypothetical price comparison independently of routing verification.
 c="$work/c1"; mkdir -p "$c/cache"; make_installed "$c/cc.sh"
 out="$(render "$c/cc.sh" "$c/cache" "file://$upstream" "$STALE_MODEL")"
-check_not_contains "priced selection reports nonzero savings" "$out" "saved \$0.00"
+check_contains "priced selection reports the estimated difference" "$out" "est. cost difference \$0.08"
 check_contains "priced selection still names the routed model" "$out" "deepseek/deepseek-v4-pro"
 check "priced selection writes no miss stamp" "$(count_stamps "$c/cache" .miss.)" 0
+
+for sentinel_model in '<synthetic>' weave-router; do
+  jq -cn --arg model "$sentinel_model" '{type:"assistant",message:{id:"msg_control",model:$model,usage:{input_tokens:5000,output_tokens:3000}}}' > "$c/sentinel.jsonl"
+  cat "$transcript" >> "$c/sentinel.jsonl"
+  out="$(WEAVE_STATUSLINE_UPDATE=0 render "$c/cc.sh" "$c/cache" "file://$upstream" "$STALE_MODEL" "$c/sentinel.jsonl")"
+  check_contains "$sentinel_model does not poison later inference estimates" "$out" "est. cost difference \$0.08"
+  check_not_contains "$sentinel_model followed by inference does not display token totals" "$out" " in / "
+  check_not_contains "$sentinel_model followed by inference does not show a routing warning" "$out" "routing unverified"
+
+  head -n 1 "$c/sentinel.jsonl" > "$c/sentinel-only.jsonl"
+  out="$(WEAVE_STATUSLINE_UPDATE=0 render "$c/cc.sh" "$c/cache" "file://$upstream" "$STALE_MODEL" "$c/sentinel-only.jsonl")"
+  check_not_contains "$sentinel_model alone does not invent an estimate" "$out" "est. cost difference"
+  check_not_contains "$sentinel_model alone does not count as inference tokens" "$out" " in / "
+done
+
+jq -c 'select(.type == "assistant") | .message.model = "model-nobody-prices"' "$transcript" > "$c/unpriced.jsonl"
+out="$(WEAVE_STATUSLINE_UPDATE=0 render "$c/cc.sh" "$c/cache" "file://$upstream" model-nobody-prices "$c/unpriced.jsonl")"
+check_not_contains "same unpriced model does not invent a zero comparison" "$out" "est. cost difference"
+check_contains "same unpriced model still names the response model" "$out" "response model: model-nobody-prices"
+check_not_contains "same unpriced model does not display token totals" "$out" " in / "
+
+cat "$transcript" >> "$c/unpriced.jsonl"
+out="$(WEAVE_STATUSLINE_UPDATE=0 render "$c/cc.sh" "$c/cache" "file://$upstream" "$STALE_MODEL" "$c/unpriced.jsonl")"
+check_not_contains "unpriced inference still prevents a session estimate" "$out" "est. cost difference"
+
+out="$(WEAVE_STATUSLINE_UPDATE=0 render "$c/cc.sh" "$c/cache" "file://$upstream" deepseek/deepseek-v4-pro)"
+check_contains "same priced model retains a zero comparison" "$out" "est. cost difference \$0.00"
 
 # Cache-heavy routes must price each side with its own catalog multiplier.
 c="$work/c-cache"; mkdir -p "$c/cache"; make_installed "$c/cc.sh"
 out="$(render "$c/cc.sh" "$c/cache" "file://$upstream" "gpt-5.4-pro" "$cache_transcript")"
-check_contains "cache reads use per-model multipliers" "$out" "saved \$29.75"
+check_contains "cache reads use per-model multipliers" "$out" "est. cost difference \$29.75"
 
 # The bug this path exists for: an unpriced selection renders $0.00, and the
-# script heals itself for the next turn instead of waiting out the interval.
+# script restores the missing comparison instead of waiting out the interval.
 c="$work/c2"; mkdir -p "$c/cache"; make_installed "$c/cc.sh" stale
 seed_periodic_stamp "$c/cache" "$c/cc.sh"
 out="$(render "$c/cc.sh" "$c/cache" "file://$upstream" "$STALE_MODEL")"
-check_contains "unpriced selection renders \$0.00" "$out" "saved \$0.00"
+check_not_contains "unpriced selection does not invent a price comparison" "$out" "est. cost difference"
 if wait_for 20 grep -q "\"$STALE_MODEL\":" "$c/cc.sh"; then
   ok "unpriced selection refreshes the on-disk copy"
   out="$(render "$c/cc.sh" "$c/cache" "file://$upstream" "$STALE_MODEL")"
-  check_not_contains "next turn reports real savings" "$out" "saved \$0.00"
+  check_contains "next turn reports the estimated difference" "$out" "est. cost difference \$0.08"
 else
   no "unpriced selection refreshes the on-disk copy" "price entries restored" "still missing after 20s"
 fi
@@ -260,6 +366,7 @@ fi
 c="$work/c5"; mkdir -p "$c/cache"; make_installed_bad_prices "$c/cc.sh"
 out="$(render "$c/cc.sh" "$c/cache" "file://$upstream" "$STALE_MODEL")"
 check_contains "malformed prices still render the routed model" "$out" "deepseek/deepseek-v4-pro"
+check_not_contains "malformed prices do not invent a price comparison" "$out" "est. cost difference"
 sleep 1
 check "malformed prices trigger no refresh" "$(count_stamps "$c/cache" .miss.)" 0
 
@@ -522,6 +629,7 @@ out="$(echo "{\"model\":{\"id\":\"$STALE_MODEL\"},\"transcript_path\":\"$transcr
     WEAVE_ROUTER_BASE_URL='' ANTHROPIC_BASE_URL='' WEAVE_ROUTER_KEY='' ANTHROPIC_CUSTOM_HEADERS='' \
     bash "$c/proj/.claude/cc-statusline.sh" 2>&1 | sed 's/\x1b\[[0-9;]*m//g')"
 check_contains "visible org still renders the statusline" "$out" "deepseek/deepseek-v4-pro"
+check_not_contains "successful display-settings fetch does not show a routing warning" "$out" "routing unverified"
 
 # A fresh hidden cache decides without any network access: the install points
 # at an unreachable endpoint, but the pre-seeded fresh cache blanks the

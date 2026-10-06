@@ -41,15 +41,12 @@ func (s *Service) ProxyGeminiGenerateContent(ctx context.Context, body []byte, w
 	if returnErr != nil {
 		return returnErr
 	}
-	if managedSubscriptionEnrollmentUnavailable(ctx) {
-		return ErrSubscriptionPoolUnavailable
-	}
 	ctx = requestcontext.WithContentLogging(ctx, s.effectiveCaptureMode(ctx) != CaptureOff)
 	ctx, err := s.checkUserMonthlySpendLimit(ctx, r.Header, r.URL.Path)
 	if err != nil {
 		return err
 	}
-	ctx = s.withPlanAwareSubscriptionModels(ctx, r.Header)
+
 	ctx, rateLimit := s.withRateLimitTurn(ctx)
 	log := observability.FromContext(ctx)
 	requestStart := time.Now()
@@ -86,6 +83,7 @@ func (s *Service) ProxyGeminiGenerateContent(ctx context.Context, body []byte, w
 		return fmt.Errorf("parse request: %w", parseErr)
 	}
 	inboundLastUser := env.LastUserMessage()
+	inboundUserPrompt := env.EndsWithUserPrompt()
 	var responseBuffer *responseCostBuffer
 	if !env.Stream() {
 		responseBuffer = newResponseCostBuffer(w)
@@ -153,33 +151,32 @@ func (s *Service) ProxyGeminiGenerateContent(ctx context.Context, body []byte, w
 	}
 
 	routeRequest := router.Request{
-		RequestedModel:                   feats.Model,
-		ForceCluster:                     forceCluster,
-		EstimatedInputTokens:             feats.Tokens,
-		HasTools:                         feats.HasTools,
-		HasImages:                        feats.HasImages,
-		TranslationRequirements:          env.TranslationRequirements(router.EndpointGeminiGenerate),
-		ReasoningConfigurationSHA256:     env.ReasoningConfigurationSHA256(),
-		ToolConfigurationSHA256:          env.ToolConfigurationSHA256(),
-		PromptText:                       promptText,
-		ConversationMessages:             conversationMessagesForRouting(env),
-		AvailableTools:                   availableToolsForRouting(env),
-		Tools:                            toolsForRouting(env),
-		ClientSessionID:                  clientSessionIDForRequest(ctx, env),
-		EnabledProviders:                 enabledProviders,
-		CustomBindings:                   s.customBindingsForRequest(ctx),
-		GatewayProviders:                 s.gatewayProvidersForRequest(ctx),
-		ExcludedModels:                   excluded,
-		AllowedModels:                    allowedModelsForRequest(ctx),
-		SafetyExcludedModels:             withoutModelsKeep(s.safetyExcludedModels(env, outputReserve, enabledProviders), overflowAdmitted, geminiUnsigned),
-		ContextWindowExcludedModels:      contextWindowOnlyExclusions(ctxOverflowed, overflowAdmitted, geminiUnsigned),
-		UnsignedHistoryExcludedModels:    modelSet(geminiUnsigned),
-		OverflowAdmittedModels:           modelSet(overflowAdmitted),
-		PreferredModels:                  s.preferredModelsForRequest(ctx),
-		SubscriptionStatePreferredModels: subscriptionStatePreferredModelsFromContext(ctx),
-		RoutingKnobs:                     router.RoutingKnobsFromContext(ctx),
-		ClusterArmOverrides:              clusterArmOverridesForRequest(ctx),
-		ProductEligibility:               entitlement.ModelBoundaryFromContext(ctx),
+		RequestedModel:                feats.Model,
+		ForceCluster:                  forceCluster,
+		EstimatedInputTokens:          feats.Tokens,
+		HasTools:                      feats.HasTools,
+		HasImages:                     feats.HasImages,
+		TranslationRequirements:       env.TranslationRequirements(router.EndpointGeminiGenerate),
+		ReasoningConfigurationSHA256:  env.ReasoningConfigurationSHA256(),
+		ToolConfigurationSHA256:       env.ToolConfigurationSHA256(),
+		PromptText:                    promptText,
+		ConversationMessages:          conversationMessagesForRouting(env),
+		AvailableTools:                availableToolsForRouting(env),
+		Tools:                         toolsForRouting(env),
+		ClientSessionID:               clientSessionIDForRequest(ctx, env),
+		EnabledProviders:              enabledProviders,
+		CustomBindings:                s.customBindingsForRequest(ctx),
+		GatewayProviders:              s.gatewayProvidersForRequest(ctx),
+		ExcludedModels:                excluded,
+		AllowedModels:                 allowedModelsForRequest(ctx),
+		SafetyExcludedModels:          withoutModelsKeep(s.safetyExcludedModels(env, outputReserve, enabledProviders), overflowAdmitted, geminiUnsigned),
+		ContextWindowExcludedModels:   contextWindowOnlyExclusions(ctxOverflowed, overflowAdmitted, geminiUnsigned),
+		UnsignedHistoryExcludedModels: modelSet(geminiUnsigned),
+		OverflowAdmittedModels:        modelSet(overflowAdmitted),
+		PreferredModels:               s.preferredModelsForRequest(ctx),
+		RoutingKnobs:                  router.RoutingKnobsFromContext(ctx),
+		ClusterArmOverrides:           clusterArmOverridesForRequest(ctx),
+		ProductEligibility:            entitlement.ModelBoundaryFromContext(ctx),
 	}
 	routeStart := time.Now()
 	routeCtx, routeSpan := startRoutingSpan(ctx, routeRequest)
@@ -192,7 +189,7 @@ func (s *Service) ProxyGeminiGenerateContent(ctx context.Context, body []byte, w
 	routeMs := time.Since(routeStart).Milliseconds()
 	if err != nil {
 		log.Error("Routing failed for Gemini request", "err", err, "route_ms", routeMs, "requested_model", feats.Model, "total_input_tokens", feats.Tokens)
-		s.recordPolicyPinRouteFailure(ctx, requestID, requestStart, feats.Model, routeRes.TurnType, err)
+		s.recordPolicyPinRouteFailure(ctx, requestID, requestStart, feats.Model, routeRes.TurnType, inboundUserPrompt, err)
 		return err
 	}
 	ctx = requestcontext.WithCallerModelPassthrough(ctx, routeRes.CallerModelPassthrough)
@@ -203,6 +200,9 @@ func (s *Service) ProxyGeminiGenerateContent(ctx context.Context, body []byte, w
 		ctx = context.WithValue(ctx, SessionDemotedModelsContextKey{}, routeRes.SessionDemotedModels)
 		if len(routeRes.SessionCooldownModels) > 0 {
 			ctx = context.WithValue(ctx, SessionCooldownModelsContextKey{}, routeRes.SessionCooldownModels)
+		}
+		if len(routeRes.SessionStrikeReadmitModels) > 0 {
+			ctx = context.WithValue(ctx, SessionStrikeReadmitModelsContextKey{}, routeRes.SessionStrikeReadmitModels)
 		}
 	}
 	routeRes.SuggestionMode = r.Header.Get("x-weave-suggestion-mode") == "true"
@@ -256,6 +256,7 @@ func (s *Service) ProxyGeminiGenerateContent(ctx context.Context, body []byte, w
 	applySidecarAttrs(geminiDecisionBuilder, routeRes)
 	applyPlannerAttrs(geminiDecisionBuilder, routeRes)
 	applyRoutingStateAttrs(geminiDecisionBuilder, routeRes, decision.ServedIdentity(), sessionKey)
+	applyCallerRoutingAttrs(ctx, geminiDecisionBuilder)
 	otel.Record(ctx, otel.Span{
 		Name:  "router.decision",
 		Start: requestStart,
@@ -305,6 +306,7 @@ func (s *Service) ProxyGeminiGenerateContent(ctx context.Context, body []byte, w
 	preludeBuf := newPreludeBuffer(contentSink)
 	marker := suppressMarkerIfRequested(ctx, r.Header, modelSelectionMarkerForRequest(ctx, routeRes, routingMarkerFor(routeRes), decision.Model, ""))
 	bindings := s.resolveBindingsForDispatch(ctx, decision)
+	primaryDecision := decision
 	attempt := func(actx context.Context, d router.Decision, p providers.Client) error {
 		attemptSink := http.ResponseWriter(preludeBuf)
 		if marker != "" {
@@ -337,6 +339,7 @@ func (s *Service) ProxyGeminiGenerateContent(ctx context.Context, body []byte, w
 		purpose:         routeRes.dispatchPurpose(inference.PurposeGeminiGenerateContent),
 		origin:          routeRes.dispatchOrigin(decision),
 	})
+	primaryFailureErr := proxyErr
 	proxyMs := time.Since(proxyStart).Milliseconds()
 	primaryProvider := decision.Provider
 	finalProvider := primaryProvider
@@ -377,14 +380,19 @@ func (s *Service) ProxyGeminiGenerateContent(ctx context.Context, body []byte, w
 		Float64("cost.requested_output_usd", catalog.EffectiveOutputCost(in, out, reqPricing)).
 		Float64("cost.actual_input_usd", catalog.EffectiveInputCost(in, cacheCreation, cacheRead, actPricing, decision.Provider)).
 		Float64("cost.actual_output_usd", catalog.EffectiveOutputCost(in, out, actPricing)).
-		Bool("cost.subscription_served", servedOnSubscription(ctx)).
+		Bool("cost.subscription_served", s.costNeutralSubscriptionServed(ctx)).
 		Int64("latency.upstream_ms", proxyMs).
 		Int64("latency.total_ms", time.Since(requestStart).Milliseconds()).
 		Int64("upstream.status_code", int64(upstreamStatus(proxyErr))).
 		Bool("routing.cross_format", false)
+	if s.effectiveCaptureMode(ctx) == CaptureOff {
+		geminiUpstreamBuilder.Int64("request.message_count", int64(feats.MessageCount)).
+			Bool("request.has_tools", feats.HasTools)
+	}
 	applyPlannerAttrs(geminiUpstreamBuilder, routeRes)
 	applyRoutingStateAttrs(geminiUpstreamBuilder, routeRes, decision.ServedIdentity(), sessionKey)
 	applyEffortAttrs(geminiUpstreamBuilder, effortServed)
+	s.applySubscriptionSpanTelemetry(ctx, geminiUpstreamBuilder, feats.Model, decision.Model)
 	addTimingAttrs(ctx, geminiUpstreamBuilder)
 	geminiObs := buildObservationContext(ctx, decision, routeRes.Fresh, s.effectiveCaptureMode(ctx))
 	geminiObs.applySpanAttrs(geminiUpstreamBuilder)
@@ -395,7 +403,7 @@ func (s *Service) ProxyGeminiGenerateContent(ctx context.Context, body []byte, w
 		Attrs: geminiUpstreamBuilder.Build(),
 	})
 	respBody, respTrunc := capturedResponse(contentCap)
-	s.recordCallLog(ctx, geminiUpstreamBuilder.Build(), routeMs, proxyErr != nil, body, respBody, respTrunc)
+	s.recordCallLog(ctx, geminiUpstreamBuilder.Build(), routeMs, proxyErr, body, respBody, respTrunc)
 	otel.Flush(ctx)
 
 	// Persist last-turn usage to the pin row so the next turn's planner
@@ -456,6 +464,7 @@ func (s *Service) ProxyGeminiGenerateContent(ctx context.Context, body []byte, w
 			TTFTMs:                 geminiObs.TTFTMs,
 			CacheCreationTokens:    cacheTokenPtr(cacheCreation),
 			CacheReadTokens:        cacheTokenPtr(cacheRead),
+			ReasoningTokens:        cacheTokenPtr(extractor.ReasoningTokens()),
 			DeviceID:               clientID.DeviceID,
 			SessionID:              clientID.SessionID,
 			RouterUserID:           auth.UserIDFrom(ctx),
@@ -470,10 +479,12 @@ func (s *Service) ProxyGeminiGenerateContent(ctx context.Context, body []byte, w
 			PinAgeSec:              int64PtrIf(stickyHit && pinAgeSec > 0, pinAgeSec),
 			ToolResultBytes:        toolResultBytesPtr(inboundLastUser, tt),
 			ErrorClass:             errorClass,
+			UserPrompt:             &inboundUserPrompt,
 			CredentialKeyPrefix:    credentialKeyPrefix,
 			CredentialKeySuffix:    credentialKeySuffix,
 			CredentialSource:       credentialSource,
 		}
+		applyServedGroupTelemetry(ctx, &telemetryParams, routeRes, decision)
 		applyPlannerTelemetry(&telemetryParams, routeRes)
 		applyEffortTelemetry(&telemetryParams, effortServed)
 		applyAuthorityShadowTelemetry(&telemetryParams, routeRes)
@@ -499,13 +510,30 @@ func (s *Service) ProxyGeminiGenerateContent(ctx context.Context, body []byte, w
 	// Two-strike provider disable: see ProxyMessages. Gemini rarely produces a
 	// real 529, but covers a future translate-layer path that might synthesize one.
 	armDemoted := ""
+	var armDemotionReason sessionpin.DemotionReason
+	primaryFailureDemoted := ""
+	var primaryFailureDemotionReason sessionpin.DemotionReason
 	if !routeRes.CallerModelPassthrough {
 		s.maybeDisableProviderAfterOverload(ctx, stickyHit, proxyErr, finalProvider, decision.Reason, installationID, routeRes.SessionKey, stickyStateRole(routeRes), routeRes.PinRole)
 		// See ProxyMessages for the committed-stream demotion rationale.
 		armDemoted = s.maybeDemoteArmAfterCommittedStreamFailure(ctx, committed(preludeBuf), routeRes.HardPinned, proxyErr, decision.Model, decision.Reason, installationID, routeRes.SessionKey, stickyStateRole(routeRes), routeRes.PinRole)
+		if armDemoted != "" {
+			armDemotionReason = sessionpin.DemotionReasonCommittedStreamFailure
+		}
+		if providers.IsResponseHeaderTimeout(primaryFailureErr) && (proxyErr != nil || decision.Model != primaryDecision.Model) {
+			primaryFailureDemoted, primaryFailureDemotionReason = s.maybeStrikeArmAfterRescuedFailure(ctx, false, routeRes.HardPinned, primaryFailureErr, primaryDecision, installationID, routeRes.SessionKey, stickyStateRole(routeRes), routeRes.PinRole)
+		}
+		if proxyErr != nil {
+			unrescuedStallDemoted := s.maybeDemoteArmAfterUnrescuedStall(ctx, false, committed(preludeBuf), routeRes.HardPinned, primaryFailureErr, primaryDecision, installationID, routeRes.SessionKey, stickyStateRole(routeRes), routeRes.PinRole)
+			if unrescuedStallDemoted != "" {
+				armDemoted = unrescuedStallDemoted
+				armDemotionReason = sessionpin.DemotionReasonUnrescuedStall
+			}
+		}
 	}
 
-	log.Info("ProxyGeminiGenerateContent complete", append([]any{"requested_model", feats.Model, "baseline_model", s.baselineFor(feats.Model), "decision_model", decision.Model, "decision_provider", decision.Provider, "decision_reason", decision.Reason, "embedded_tokens", len(promptText) / 4, "total_input_tokens", feats.Tokens, "has_tools", feats.HasTools, "embed_input", embedInput, "sticky_hit", stickyHit, "pin_tier", pinTier, "turn_type", string(tt), "route_ms", routeMs, "proxy_ms", proxyMs, "proxy_err", proxyErr, "upstream_status", upstreamStatus(proxyErr), "arm_demoted", armDemoted, "arm_demotion_reason", armDemotionReason(armDemoted)}, append(plannerLogFields(routeRes), rateLimit.completionLogFields()...)...)...)
+	demotionLogFields := armStrikeLogFieldsWithPrimaryReason(armDemoted, armDemotionReason, primaryFailureDemoted, primaryFailureDemotionReason)
+	log.Info("ProxyGeminiGenerateContent complete", append(append([]any{"requested_model", feats.Model, "baseline_model", s.baselineFor(feats.Model), "decision_model", decision.Model, "decision_provider", decision.Provider, "decision_reason", decision.Reason, "embedded_tokens", len(promptText) / 4, "total_input_tokens", feats.Tokens, "has_tools", feats.HasTools, "embed_input", embedInput, "sticky_hit", stickyHit, "pin_tier", pinTier, "turn_type", string(tt), "route_ms", routeMs, "proxy_ms", proxyMs, "proxy_err", proxyErr, "upstream_status", upstreamStatus(proxyErr)}, demotionLogFields...), append(plannerLogFields(routeRes), rateLimit.completionLogFields()...)...)...)
 	s.reportPolicyOutcome(ctx, routeRes, decision, effortServed, decision.Provider, false, feats.Tokens, in, out, cacheCreation, cacheRead, routeMs, proxyMs, proxyErr, nil)
 	return proxyErr
 }

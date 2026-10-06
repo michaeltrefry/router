@@ -23,6 +23,7 @@ import (
 
 const llmEscalationBookkeepingTimeout = 100 * time.Millisecond
 const llmEscalationPinTier = "escalation_switchyard_llm_v1"
+const qwenEscalationPinTier = "escalation_llm_escalation"
 
 type llmEscalationTurn struct {
 	active       bool
@@ -43,6 +44,15 @@ func (s *Service) WithLLMEscalation(store llmescalation.Store, judge llmescalati
 	return s
 }
 
+// WithQwenEscalation wires the pinned L4 classifier into the asynchronous judge slot.
+func (s *Service) WithQwenEscalation(judge llmescalation.Judge) *Service {
+	s.qwenEscalationJudge = judge
+	if s.llmEscalationSlots == nil {
+		s.llmEscalationSlots = make(chan struct{}, llmescalation.MaxWorkers)
+	}
+	return s
+}
+
 func (t *llmEscalationTurn) constraint() *escalation.Constraint {
 	if !t.active {
 		return nil
@@ -56,16 +66,24 @@ func (t *llmEscalationTurn) constraint() *escalation.Constraint {
 
 func (s *Service) beginLLMEscalation(ctx context.Context, env *translate.RequestEnvelope, req router.Request, res *turnLoopResult, apiKeyID string) *llmEscalationTurn {
 	selection := flags.EscalationFromContext(ctx)
-	active := selection.Active == flags.EscalationClassifierSwitchyard && s.llmEscalationActiveEnabled
-	shadow := selection.Shadow == flags.EscalationClassifierSwitchyard
-	if (!active && !shadow) || s.llmEscalationStore == nil || s.llmEscalationJudge == nil || (active && res.Strategy != router.StrategyHMMEmbedding) || req.ShadowMode || req.ForceModel != "" || req.ForceCluster != "" || res.InstallationID == uuid.Nil || (res.TurnType != turntype.MainLoop && res.TurnType != turntype.ToolResult) {
+	active := flags.IsLLMEscalationClassifier(selection.Active) && (selection.Active != flags.EscalationClassifierSwitchyard || s.llmEscalationActiveEnabled)
+	shadow := flags.IsLLMEscalationClassifier(selection.Shadow)
+	classifier := selection.Shadow
+	if active {
+		classifier = selection.Active
+	}
+	judge := s.llmEscalationJudge
+	if classifier == flags.EscalationClassifierLLM {
+		judge = s.qwenEscalationJudge
+	}
+	if (!active && !shadow) || s.llmEscalationStore == nil || judge == nil || (active && res.Strategy != router.StrategyHMMEmbedding) || req.ShadowMode || req.ForceModel != "" || req.ForceCluster != "" || res.InstallationID == uuid.Nil || (res.TurnType != turntype.MainLoop && res.TurnType != turntype.ToolResult) {
 		return nil
 	}
-	if len(req.GatewayProviders) > 0 || slices.Contains(installationExcludedProvidersFromContext(ctx), providers.ProviderFireworks) {
+	if len(req.GatewayProviders) > 0 || (classifier == flags.EscalationClassifierSwitchyard && slices.Contains(installationExcludedProvidersFromContext(ctx), providers.ProviderFireworks)) {
 		observability.FromContext(ctx).Info("LLM escalation skipped", "reason", "provider_restricted")
 		return nil
 	}
-	if _, excluded := req.ExcludedModels[policy.EscalationJudgeModel]; excluded {
+	if _, excluded := req.ExcludedModels[policy.EscalationJudgeModel]; excluded && classifier == flags.EscalationClassifierSwitchyard {
 		observability.FromContext(ctx).Info("LLM escalation skipped", "reason", "judge_model_restricted")
 		return nil
 	}
@@ -75,6 +93,11 @@ func (s *Service) beginLLMEscalation(ctx context.Context, env *translate.Request
 	}
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%s/%s/%s/%s/%d", llmescalation.Version, policy.EscalationJudgeModel, providers.ProviderFireworks, llmescalation.SwitchyardRevision, llmescalation.SystemPrompt, llmescalation.ResponseSchema, selection.Cadence)))
 	config := llmescalation.Config{Mode: mode, Epoch: selection.Epoch, Cadence: selection.Cadence, Digest: fmt.Sprintf("%x", digest)}
+	if classifier == flags.EscalationClassifierLLM {
+		digest = sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%s/%s/%d", classifier, llmescalation.QwenModelSHA256, llmescalation.QwenPromptSHA256, llmescalation.QwenRendererVersion, selection.Cadence)))
+		config.Classifier = classifier
+		config.Digest = fmt.Sprintf("%x", digest)
+	}
 	scope := sha256.Sum256([]byte(fmt.Sprintf("%s/%x/%s/%s/%d/%s", res.InstallationID, res.SessionKey, res.Strategy, mode, selection.Epoch, config.Digest)))
 	activation := escalationActivationID(ctx, res.InstallationID, fmt.Sprintf("%s/%s/%s/%d/%s", sessionCredentialIdentity(ctx, apiKeyID), res.Strategy, mode, selection.Epoch, config.Digest))
 	observation, err := env.EscalationObservation()
@@ -195,14 +218,30 @@ func (s *Service) completeLLMEscalation(ctx context.Context, res turnLoopResult,
 	if turn.applied || turn.session.Floor != "" {
 		return
 	}
+	transcript := llmescalation.RenderTranscript(messages)
+	judge := s.llmEscalationJudge
+	ready := true
+	if turn.session.Config.EffectiveClassifier() == flags.EscalationClassifierLLM {
+		transcript, ready = llmescalation.RenderQwenInterval(messages, turn.session.CompletedTurns+1)
+		judge = s.qwenEscalationJudge
+		if !ready {
+			observability.FromContext(ctx).Info("LLM escalation interval unavailable", "completed_turns", turn.session.CompletedTurns+1)
+		}
+	}
 	capacity := false
-	select {
-	case s.llmEscalationSlots <- struct{}{}:
-		capacity = true
-	default:
+	if ready {
+		select {
+		case s.llmEscalationSlots <- struct{}{}:
+			capacity = true
+		default:
+		}
 	}
 	completionCtx, cancelCompletion := context.WithTimeout(context.WithoutCancel(ctx), llmEscalationBookkeepingTimeout)
-	completion, err := s.llmEscalationStore.Complete(completionCtx, llmescalation.CompleteRequest{Session: turn.session, Boundary: turn.boundary, RequestID: turn.requestID, Capacity: capacity})
+	intervalFailure := llmescalation.FailureNone
+	if !ready {
+		intervalFailure = llmescalation.FailureIntervalUnavailable
+	}
+	completion, err := s.llmEscalationStore.Complete(completionCtx, llmescalation.CompleteRequest{Session: turn.session, Boundary: turn.boundary, RequestID: turn.requestID, Capacity: capacity, IntervalFailure: intervalFailure})
 	cancelCompletion()
 	if err != nil || completion.Job == nil {
 		if capacity {
@@ -214,14 +253,13 @@ func (s *Service) completeLLMEscalation(ctx context.Context, res turnLoopResult,
 		return
 	}
 	job := *completion.Job
-	transcript := llmescalation.RenderTranscript(messages)
 	log := observability.FromContext(ctx).With("escalation_job_id", job.ID, "escalation_checkpoint", job.Checkpoint)
 	observability.SafeGo(log, llmescalation.JudgeTimeout+time.Second, "escalation-judge", func(background context.Context) {
 		defer func() { <-s.llmEscalationSlots }()
 		background = observability.WithLogger(background, log)
 		background = observability.WithRequestID(background, turn.requestID)
 		judgeCtx, judgeCancel := context.WithTimeout(background, llmescalation.JudgeTimeout)
-		judgment, judgeErr := s.llmEscalationJudge.Judge(judgeCtx, llmescalation.JudgeRequest{Transcript: transcript, RequestID: turn.requestID, OperationID: job.ID})
+		judgment, judgeErr := judge.Judge(judgeCtx, llmescalation.JudgeRequest{Transcript: transcript, RequestID: turn.requestID, OperationID: job.ID})
 		judgeContextErr := judgeCtx.Err()
 		judgeCancel()
 		failure := llmEscalationFailure(judgeErr, judgeContextErr)
@@ -249,7 +287,7 @@ func llmEscalationFailure(judgeErr, judgeContextErr error) llmescalation.Failure
 		return llmescalation.FailureNone
 	case errors.Is(judgeErr, context.DeadlineExceeded), errors.Is(judgeErr, context.Canceled) && errors.Is(judgeContextErr, context.DeadlineExceeded):
 		return llmescalation.FailureTimeout
-	case errors.Is(judgeErr, ErrInvalidEscalationJudgment):
+	case errors.Is(judgeErr, ErrInvalidEscalationJudgment), errors.Is(judgeErr, llmescalation.ErrInvalidJudgment):
 		return llmescalation.FailureInvalid
 	default:
 		return llmescalation.FailureJudge

@@ -98,19 +98,20 @@ var forceModelAliases = map[string]string{
 	// they pointed at gpt-5.5 until it was retired. Version-specific aliases
 	// (gpt-5-5*) deliberately still resolve to their exact model, which stays
 	// available as priced passthrough.
-	"gpt":        "gpt-6-sol",
-	"openai":     "gpt-6-sol",
+	"gpt":        "gpt-6.1-sol",
+	"openai":     "gpt-6.1-sol",
 	"gpt-6":      "gpt-6-astra",
 	"gpt6":       "gpt-6-astra",
 	"gpt-6astra": "gpt-6-astra",
 	"astra":      "gpt-6-astra",
 	// Bare sol/luna follow the GPT-6 generation; gpt-5-6-* keeps the 5.6 rows.
-	"sol":       "gpt-6-sol",
-	"gpt6sol":   "gpt-6-sol",
-	"gpt-6sol":  "gpt-6-sol",
-	"luna":      "gpt-6-luna",
-	"gpt6luna":  "gpt-6-luna",
-	"gpt-6luna": "gpt-6-luna",
+	"sol":         "gpt-6.1-sol",
+	"gpt-6-1-sol": "gpt-6.1-sol",
+	"gpt6sol":     "gpt-6-sol",
+	"gpt-6sol":    "gpt-6-sol",
+	"luna":        "gpt-6-luna",
+	"gpt6luna":    "gpt-6-luna",
+	"gpt-6luna":   "gpt-6-luna",
 	// The bare gpt-5.6 alias routes to Sol, matching OpenAI's own alias.
 	"gpt-5.6":       "gpt-5.6-sol",
 	"gpt-5-6":       "gpt-5.6-sol",
@@ -144,23 +145,23 @@ var forceModelAliases = map[string]string{
 	"gpt-5-4-pro":           "gpt-5.4-pro",
 	"gpt-5-4-mini":          "gpt-5.4-mini",
 	"gpt-5-4-nano":          "gpt-5.4-nano",
-	"google":                "gemini-3-pro-preview",
-	"gemini":                "gemini-3-pro-preview",
-	"gemini-pro":            "gemini-3-pro-preview",
-	"gemini-flash":          "gemini-3-flash-preview",
+	"google":                "gemini-3.1-pro-preview",
+	"gemini":                "gemini-3.1-pro-preview",
+	"gemini-pro":            "gemini-3.1-pro-preview",
+	"gemini-flash":          "gemini-3.8-flash",
 	"gemini-3-6-flash":      "gemini-3.6-flash",
 	"gemini-3-5-flash-lite": "gemini-3.5-flash-lite",
 	"gemini-3-7-flash":      "gemini-3.7-flash",
 	"gemini-3-8-flash":      "gemini-3.8-flash",
-	// The family alias follows Makora's V4-Pro EOL onto Flash; deepseek-pro
-	// still names V4-Pro explicitly, which is passthrough-only now.
-	"deepseek":            "deepseek/deepseek-v4-flash",
-	"deepseek-pro":        "deepseek/deepseek-v4-pro",
-	"deepseek-flash":      "deepseek/deepseek-v4-flash",
+	// V4 Flash is retired on Makora. Explicit version pins stay versioned.
+	"deepseek":            "deepseek/deepseek-v4.1-flash",
+	"deepseek-pro":        "deepseek/deepseek-v4-pro-0813",
+	"deepseek-flash":      "deepseek/deepseek-v4.1-flash",
 	"deepseek-v4-1-flash": "deepseek/deepseek-v4.1-flash",
 	"deepseek-v4p1-flash": "deepseek/deepseek-v4.1-flash",
-	"qwen":                "qwen/qwen3-coder",
-	"qwen-coder":          "qwen/qwen3-coder",
+	// Generic Qwen follows the current flagship; coder remains a specialized alias.
+	"qwen":       "qwen/qwen3.8-max",
+	"qwen-coder": "qwen/qwen3-coder",
 	// qwen3.7-plus is retired from routing but still servable as passthrough;
 	// keep its own-name alias so direct pins resolve.
 	"qwen3.7-plus": "qwen/qwen3.7-plus",
@@ -171,17 +172,15 @@ var forceModelAliases = map[string]string{
 	"qwen/qwen-3.8-max": "qwen/qwen3.8-max",
 	"qwen-3.8-max":      "qwen/qwen3.8-max",
 	"qwen-3.8":          "qwen/qwen3.8-max",
-	// Generic kimi alias stays on 2.7; k3 is ~3x the price, so it needs an
-	// explicit pin rather than silently repricing everyone on the family alias.
-	"kimi":      "moonshotai/kimi-k2.7",
+	// Generic Kimi aliases follow K3; version-specific K2 pins stay exact.
+	"kimi":      "moonshotai/kimi-k3",
 	"kimi-k3":   "moonshotai/kimi-k3",
 	"kimi-k2.7": "moonshotai/kimi-k2.7",
 	"kimi-k2.6": "moonshotai/kimi-k2.6",
-	// Generic glm/zai aliases stay on 5.1 (Together/Fireworks/OpenRouter);
-	// 5.2 is Fireworks-only day-0, so it requires an explicit pin.
-	"glm":           "z-ai/glm-5.1",
-	"zai":           "z-ai/glm-5.1",
-	"z-ai":          "z-ai/glm-5.1",
+	// Generic GLM aliases follow 5.3; version-specific pins stay exact.
+	"glm":           "z-ai/glm-5.3",
+	"zai":           "z-ai/glm-5.3",
+	"z-ai":          "z-ai/glm-5.3",
 	"glm-5.3-flash": "z-ai/glm-5.3-flash",
 	"glm-5.3":       "z-ai/glm-5.3",
 	"glm-5.2":       "z-ai/glm-5.2",
@@ -368,7 +367,7 @@ func (s *Service) loadForceModelSessionPin(
 	ctx context.Context,
 	sessionKey [sessionpin.SessionKeyLen]byte,
 ) (sessionpin.Pin, bool, bool) {
-	if s.pinStore == nil || planOwnedServingRequest(ctx) {
+	if s.pinStore == nil {
 		return sessionpin.Pin{}, false, false
 	}
 	pin, found, err := s.pinStore.Get(ctx, sessionKey, forceModelSessionRole)
@@ -490,18 +489,16 @@ func (s *Service) clearForceModelSessionPin(
 // silently routing elsewhere would serve a model the caller never asked for.
 //
 // A `:level` suffix is stashed on the returned context (and on *r) as
-// router.Overrides.ForceEffort so pin + effort land in one header; callers
-// must continue with the returned context for routingKnobsForRequest to
-// see it.
+// router.Overrides.ForceEffort. The returned model spec also keeps the suffix
+// so plan-owned callers that omit routing knobs carry effort into same-turn
+// req.ForceModel; callers must continue with the returned context for
+// routingKnobsForRequest to see it.
 func (s *Service) applyForceModelHeader(
 	ctx context.Context,
 	r *http.Request,
 	installationID uuid.UUID,
 	forceModelSessionKey [sessionpin.SessionKeyLen]byte,
 ) (context.Context, string, error) {
-	if planOwnedServingRequest(ctx) {
-		return ctx, "", nil
-	}
 	raw := strings.TrimSpace(r.Header.Get(ForceModelHeader))
 	if raw == "" {
 		return ctx, "", nil
@@ -540,9 +537,16 @@ func (s *Service) applyForceModelHeader(
 		return ctx, "", &ForcedModelExcludedError{Model: canonicalModel, Reason: reason}
 	}
 	provider = binding
+	forcedModel := canonicalModel
+	if effortLevel != "" {
+		// The caller feeds this value into req.ForceModel for the same turn.
+		// Keep the effort suffix there because plan-owned routing deliberately
+		// omits routing knobs from the request passed to the scorer.
+		forcedModel += ":" + effortLevel
+	}
 	if err := s.setForceModelSessionPin(ctx, forceModelSessionKey, installationID, canonicalModel, provider, effortLevel); err != nil {
 		log.Error("x-weave-force-model: session pin upsert failed", "err", err)
-		return ctx, canonicalModel, nil
+		return ctx, forcedModel, nil
 	}
 	log.Info("x-weave-force-model applied",
 		"input_model", raw,
@@ -552,7 +556,7 @@ func (s *Service) applyForceModelHeader(
 		"force_model_session_key_hex", fmt.Sprintf("%x", forceModelSessionKey),
 		"role", forceModelSessionRole,
 	)
-	return ctx, canonicalModel, nil
+	return ctx, forcedModel, nil
 }
 
 // handleForceModelCommand processes a user-issued directive and writes a
@@ -596,13 +600,6 @@ func (s *Service) applyForceModelCommand(
 	// StripRoutingMarkerFromMessages strips it from later inbound requests;
 	// otherwise it'd persist in history and leak router internals upstream.
 	var msg string
-	if planOwnedServingRequest(ctx) && !cmd.Clear {
-		msg = "✦ **Weave Router** → this subscription uses automatic model selection\n\n"
-		if env.SourceFormat() == translate.FormatOpenAI {
-			msg = "Weave Router: this subscription uses automatic model selection."
-		}
-		return "", msg, nil
-	}
 	if cmd.Clear {
 		if err := s.clearLegacyForceModelPins(ctx, installationID, threadSessionKey); err != nil {
 			log.Error("/unforce-model: legacy pin cleanup failed", "err", err)

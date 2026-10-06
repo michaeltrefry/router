@@ -247,9 +247,17 @@ func fillProposalSources(document map[string]any, selectionSet, candidate policy
 }
 
 // selectionSetLanes returns the default lane and every profile lane by key. Anything that is not
-// shaped like a lane is left to the decoder of the filled bytes to reject.
+// shaped like a lane is left to the decoder of the filled bytes to reject. V3 binds only
+// its shared code candidate; roster assignments are already immutable policy references.
 func selectionSetLanes(document map[string]any) (map[string]map[string]any, error) {
 	lanes := map[string]map[string]any{}
+	if document["schema_version"] == string(policyregistry.ServingSelectionSetV3) {
+		code, ok := document["code"].(map[string]any)
+		if !ok {
+			return nil, errors.New("selection set requires a code binding")
+		}
+		return map[string]map[string]any{"code": code}, nil
+	}
 	if lane, ok := document["default"].(map[string]any); ok {
 		lanes["default"] = lane
 	}

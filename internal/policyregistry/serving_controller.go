@@ -32,14 +32,16 @@ type ServingValidationStore interface {
 
 // PreparedSelection contains the complete independently validated effective tuple. It is the
 // same DTO whether the selection was stored as v1 release/classifier/binding/profile objects or
-// as a lane embedded in a v2 selection set.
+// as a lane embedded in a v2/v3 selection set. PolicyReference is the effective
+// policy; Candidate retains the immutable build composition.
 type PreparedSelection struct {
-	Selection  ServingSelection
-	ProfileKey string
-	Target     ServingTarget
-	Candidate  CandidateComposition
-	Binding    LaneBinding
-	Policy     *rosterdata.Roster
+	Selection       ServingSelection
+	ProfileKey      string
+	Target          ServingTarget
+	Candidate       CandidateComposition
+	Binding         LaneBinding
+	Policy          *rosterdata.Roster
+	PolicyReference PolicyObject
 }
 
 // ServingValidator verifies exact revision attestations, catalog compatibility and private endpoint smoke.
@@ -259,6 +261,7 @@ func (c *ServingController) validateProposal(ctx context.Context, proposal Propo
 		return fmt.Errorf("default selection: %w", err)
 	}
 	base, baseBinding := prepared.Candidate, prepared.Binding
+	base.Policy = prepared.PolicyReference
 	for key, lane := range set.Profiles {
 		profile, err := c.validateSelection(ctx, destinations, proposal.Target, key, lane.Selection)
 		if err != nil {
@@ -309,6 +312,12 @@ func (c *ServingController) validateProposal(ctx context.Context, proposal Propo
 		c.logger.Warn("Rejected exact rollback: selection set was not previously activated on target", "target", proposal.Target, "selection_set_sha256", proposal.SelectionSet.SHA256)
 		return errors.New("exact rollback requires a selection set previously activated on the same target")
 	}
+	if set.ConfigurationOnly && (proposal.Scope == ChangeRoster || proposal.Scope == ChangeProfile) {
+		if proposal.SourceCandidate != set.Default.Candidate || set.Default.Candidate != previous.Default.Candidate || set.Default.Binding != previous.Default.Binding {
+			c.logger.Warn("Rejected configuration-only promotion", "target", proposal.Target, "scope", proposal.Scope, "selection_set_sha256", proposal.SelectionSet.SHA256, "previous_candidate_sha256", previous.Default.Candidate.SHA256, "candidate_sha256", set.Default.Candidate.SHA256, "source_candidate_sha256", proposal.SourceCandidate.SHA256)
+			return errors.New("configuration-only promotion must retain the exact code candidate and binding")
+		}
+	}
 	for key, lane := range previous.Profiles {
 		next, exists := set.Profiles[key]
 		if !exists {
@@ -341,16 +350,16 @@ func (c *ServingController) validateProposal(ctx context.Context, proposal Propo
 		if !exists || !sameDefault {
 			return errors.New("profile-only promotion must preserve the default and name a registered profile")
 		}
-		profileCandidate, err := lanes.candidate(ctx, lane.Candidate)
+		profileCandidate, err := lanes.effectiveCandidate(ctx, lane)
 		if err != nil {
 			return err
 		}
-		if profileCandidate.Policy != source.Policy {
+		if !set.ConfigurationOnly && profileCandidate.Policy != source.Policy {
 			return errors.New("profile promotion does not use the selected source policy")
 		}
 		return nil
 	}
-	oldBase, err := lanes.candidate(ctx, previous.Default.Candidate)
+	oldBase, err := lanes.effectiveCandidate(ctx, previous.Default)
 	if err != nil {
 		return err
 	}
@@ -368,7 +377,7 @@ func (c *ServingController) validateProposal(ctx context.Context, proposal Propo
 			return err
 		}
 	case ChangeRoster:
-		if base.Policy != source.Policy || base.RouterImageDigest != oldBase.RouterImageDigest || !base.Classifier.Equal(oldBase.Classifier) {
+		if (!set.ConfigurationOnly && base.Policy != source.Policy) || base.RouterImageDigest != oldBase.RouterImageDigest || !base.Classifier.Equal(oldBase.Classifier) {
 			return errors.New("roster-only promotion must retain destination image and classifier")
 		}
 	case ChangeClassifier:
@@ -411,11 +420,11 @@ func (c *ServingController) validateRouterOnlyLane(ctx context.Context, lanes *l
 	if next.Candidate == previous.Candidate || next.Binding == previous.Binding {
 		return errors.New("router-only promotion must publish a new release and binding for every lane")
 	}
-	previousCandidate, err := lanes.candidate(ctx, previous.Candidate)
+	previousCandidate, err := lanes.effectiveCandidate(ctx, previous)
 	if err != nil {
 		return fmt.Errorf("read predecessor release: %w", err)
 	}
-	nextCandidate, err := lanes.candidate(ctx, next.Candidate)
+	nextCandidate, err := lanes.effectiveCandidate(ctx, next)
 	if err != nil {
 		return fmt.Errorf("read successor release: %w", err)
 	}
@@ -447,10 +456,11 @@ func (c *ServingController) validateRouterOnlyLane(ctx context.Context, lanes *l
 // compare candidates, bindings and profile pins by content, so a v2 successor is judged against a
 // v1 predecessor whose lane was stored as separate binding and profile objects.
 type resolvedLane struct {
-	Selection ServingSelection
-	Candidate ObjectRef
-	Binding   LaneBinding
-	Profile   *laneProfile
+	Selection       ServingSelection
+	Candidate       ObjectRef
+	Binding         LaneBinding
+	Profile         *laneProfile
+	PolicyReference PolicyObject
 }
 
 type laneProfile struct {
@@ -460,9 +470,10 @@ type laneProfile struct {
 }
 
 type resolvedSelectionSet struct {
-	Target   ServingTarget
-	Default  resolvedLane
-	Profiles map[string]resolvedLane
+	Target            ServingTarget
+	Default           resolvedLane
+	Profiles          map[string]resolvedLane
+	ConfigurationOnly bool
 }
 
 func sameLaneProfile(left, right *laneProfile) bool {
@@ -478,14 +489,14 @@ func (r *laneReader) sameLane(ctx context.Context, left, right resolvedLane) (bo
 	if left.Binding != right.Binding || !sameLaneProfile(left.Profile, right.Profile) {
 		return false, nil
 	}
-	if left.Candidate == right.Candidate {
+	if left.Candidate == right.Candidate && left.PolicyReference == right.PolicyReference {
 		return true, nil
 	}
-	leftCandidate, err := r.candidate(ctx, left.Candidate)
+	leftCandidate, err := r.effectiveCandidate(ctx, left)
 	if err != nil {
 		return false, err
 	}
-	rightCandidate, err := r.candidate(ctx, right.Candidate)
+	rightCandidate, err := r.effectiveCandidate(ctx, right)
 	if err != nil {
 		return false, err
 	}
@@ -515,12 +526,35 @@ func (r *laneReader) candidate(ctx context.Context, ref ObjectRef) (CandidateCom
 	return candidate, nil
 }
 
+// effectiveCandidate is used only for component comparisons; stored candidate identity is unchanged.
+func (r *laneReader) effectiveCandidate(ctx context.Context, lane resolvedLane) (CandidateComposition, error) {
+	candidate, err := r.candidate(ctx, lane.Candidate)
+	if err != nil {
+		return CandidateComposition{}, fmt.Errorf("read lane candidate %s: %w", lane.Candidate.SHA256, err)
+	}
+	if lane.PolicyReference != (PolicyObject{}) {
+		candidate.Policy = lane.PolicyReference
+	}
+	return candidate, nil
+}
+
 func (r *laneReader) selectionSet(ctx context.Context, ref ObjectRef) (resolvedSelectionSet, error) {
 	manifest, _, err := readServingFamily(ctx, r.store, ServingSelectionSet, ref)
 	if err != nil {
 		return resolvedSelectionSet{}, err
 	}
 	switch typed := manifest.(type) {
+	case *SelectionSetV3:
+		candidate, err := r.candidate(ctx, typed.Code.Candidate)
+		if err != nil {
+			return resolvedSelectionSet{}, fmt.Errorf("read code candidate %s for target %s selection %s: %w", typed.Code.Candidate.SHA256, typed.Target, ref.SHA256, err)
+		}
+		view := typed.View(ref)
+		profiles := make(map[string]resolvedLane, len(typed.Profiles))
+		for key, policy := range typed.Profiles {
+			profiles[key] = resolvedLane{Selection: view.Profiles[key], Candidate: typed.Code.Candidate, Binding: typed.Code.LaneBinding, Profile: &laneProfile{Key: key, Policy: policy, Requirements: candidate.Requirements}, PolicyReference: policy}
+		}
+		return resolvedSelectionSet{Target: typed.Target, Default: resolvedLane{Selection: view.Default, Candidate: typed.Code.Candidate, Binding: typed.Code.LaneBinding, PolicyReference: typed.DefaultPolicy}, Profiles: profiles, ConfigurationOnly: true}, nil
 	case *SelectionSetV2:
 		view := typed.View(ref)
 		profiles := make(map[string]resolvedLane, len(typed.Profiles))
@@ -571,6 +605,8 @@ func readSelectionSetView(ctx context.Context, store ServingStore, ref ObjectRef
 		return SelectionSetView{}, err
 	}
 	switch typed := manifest.(type) {
+	case *SelectionSetV3:
+		return typed.View(ref), nil
 	case *SelectionSetV2:
 		return typed.View(ref), nil
 	case *SelectionSet:
@@ -650,7 +686,7 @@ func readServingFamily(ctx context.Context, store ServingStore, kind ServingKind
 	if err != nil {
 		return nil, nil, err
 	}
-	if isServingV2Manifest(manifest) != isServingArtifactURI(ref.URI, store.RootURI()) {
+	if isServingArtifactManifest(manifest) != isServingArtifactURI(ref.URI, store.RootURI()) {
 		return nil, nil, errors.New("serving object schema does not belong to its storage layout")
 	}
 	if err := manifest.Validate(store.RootURI()); err != nil {
@@ -683,46 +719,61 @@ func readCandidate(ctx context.Context, store ServingStore, ref ObjectRef) (Cand
 	}
 }
 
-// readLane resolves the lane a normalized v2 selection names inside its selection set.
-func readLane(ctx context.Context, store ServingStore, target ServingTarget, profileKey string, selection ServingSelection) (ServingLane, error) {
+// readLane resolves an embedded lane and, for v3, its independent policy assignment.
+func readLane(ctx context.Context, store ServingStore, target ServingTarget, profileKey string, selection ServingSelection) (ServingLane, PolicyObject, error) {
 	manifest, _, err := readServingFamily(ctx, store, ServingSelectionSet, selection.Binding)
 	if err != nil {
-		return ServingLane{}, err
+		return ServingLane{}, PolicyObject{}, err
 	}
-	set, ok := manifest.(*SelectionSetV2)
-	if !ok {
-		return ServingLane{}, errors.New("lane selection must name a v2 selection set")
+	var lane ServingLane
+	var policy PolicyObject
+	var setTarget ServingTarget
+	var exists bool
+	switch set := manifest.(type) {
+	case *SelectionSetV2:
+		setTarget = set.Target
+		lane, exists = set.lane(profileKey)
+	case *SelectionSetV3:
+		setTarget = set.Target
+		lane = ServingLane{Candidate: set.Code.Candidate, LaneBinding: set.Code.LaneBinding}
+		policy, exists = set.DefaultPolicy, true
+		if profileKey != "" {
+			policy, exists = set.Profiles[profileKey]
+		}
+	default:
+		return ServingLane{}, PolicyObject{}, errors.New("lane selection must name an artifacts/ selection set")
 	}
-	if set.Target != target {
-		return ServingLane{}, errors.New("selection set belongs to another target")
+	if setTarget != target {
+		return ServingLane{}, PolicyObject{}, errors.New("selection set belongs to another target")
 	}
-	lane, exists := set.lane(profileKey)
 	if !exists || lane.Candidate != selection.Release {
-		return ServingLane{}, errors.New("selection set has no lane for the selected candidate and profile")
+		return ServingLane{}, PolicyObject{}, errors.New("selection set has no lane for the selected candidate and profile")
 	}
-	return lane, nil
+	return lane, policy, nil
 }
 
 // ReadPreparedSelection reads and cross-validates one exact tuple without consulting mutable heads.
 // v1 selections traverse release, binding, classifier and profile objects; v2 selections read the
-// lane embedded in their selection set. Both normalize to the same PreparedSelection.
+// lane embedded in their selection set. V3 supplies the policy independently of code.
 func ReadPreparedSelection(ctx context.Context, store ServingStore, target ServingTarget, profileKey string, selection ServingSelection) (PreparedSelection, error) {
 	if err := selection.validate(store.RootURI(), profileKey != ""); err != nil {
 		return PreparedSelection{}, err
 	}
 	var candidate CandidateComposition
 	var binding LaneBinding
+	var policyReference PolicyObject
 	if selection.isLane(store.RootURI()) {
-		lane, err := readLane(ctx, store, target, profileKey, selection)
+		lane, configuredPolicy, err := readLane(ctx, store, target, profileKey, selection)
 		if err != nil {
 			return PreparedSelection{}, err
 		}
 		if candidate, err = readCandidate(ctx, store, lane.Candidate); err != nil {
 			return PreparedSelection{}, err
 		}
-		if profileKey != "" && (*lane.ProfilePolicy != candidate.Policy || *lane.ProfileRequirements != candidate.Requirements) {
+		if configuredPolicy == (PolicyObject{}) && profileKey != "" && (*lane.ProfilePolicy != candidate.Policy || *lane.ProfileRequirements != candidate.Requirements) {
 			return PreparedSelection{}, errors.New("effective tuple differs from the assigned profile's immutable policy")
 		}
+		policyReference = configuredPolicy
 		binding = lane.LaneBinding
 	} else {
 		release, err := readServing[*ServingRelease](ctx, store, ServingReleases, selection.Release)
@@ -758,12 +809,15 @@ func ReadPreparedSelection(ctx context.Context, store ServingStore, target Servi
 	if binding.Router.ImageDigest != candidate.RouterImageDigest || binding.Classifier.ImageDigest != candidate.Classifier.Identity.ImageDigest || binding.Classifier.Configuration != candidate.Classifier.Configuration {
 		return PreparedSelection{}, errors.New("deployment binding differs from release or classifier identity/configuration")
 	}
-	policy, err := store.ReadServingPolicy(ctx, ObjectRef{URI: candidate.Policy.URI, SHA256: candidate.Policy.SHA256, Generation: candidate.Policy.Generation})
+	if policyReference == (PolicyObject{}) {
+		policyReference = candidate.Policy
+	}
+	policy, err := store.ReadServingPolicy(ctx, ObjectRef{URI: policyReference.URI, SHA256: policyReference.SHA256, Generation: policyReference.Generation})
 	if err != nil {
-		return PreparedSelection{}, err
+		return PreparedSelection{}, fmt.Errorf("read policy %s for target %s profile %q: %w", policyReference.SHA256, target, profileKey, err)
 	}
 	if policy.SchemaVersion != candidate.Requirements.PolicySchema || !slices.Equal(policy.ClassOrder, candidate.Classifier.Identity.ClassOrder) {
 		return PreparedSelection{}, errors.New("compiled policy does not match classifier schema/taxonomy")
 	}
-	return PreparedSelection{Selection: selection, ProfileKey: profileKey, Target: target, Candidate: candidate, Binding: binding, Policy: policy}, nil
+	return PreparedSelection{Selection: selection, ProfileKey: profileKey, Target: target, Candidate: candidate, Binding: binding, Policy: policy, PolicyReference: policyReference}, nil
 }

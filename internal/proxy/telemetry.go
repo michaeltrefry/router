@@ -139,6 +139,7 @@ type InsertTelemetryParams struct {
 	TTFTMs                *int64
 	CacheCreationTokens   *int32
 	CacheReadTokens       *int32
+	ReasoningTokens       *int32
 	DeviceID              string
 	SessionID             string
 	RouterUserID          string
@@ -210,9 +211,14 @@ type InsertTelemetryParams struct {
 	// client). Empty on deployment-key turns, leaving the columns NULL. Equal
 	// prefix/suffix values across distinct RouterUserIDs reveal one subscription
 	// paying for many seats.
-	CredentialKeyPrefix string
-	CredentialKeySuffix string
-	CredentialSource    string
+	CredentialKeyPrefix   string
+	CredentialKeySuffix   string
+	CredentialSource      string
+	SubscriptionAccountID string
+	SubscriptionOwnerID   string
+	SubscriptionTier      auth.SubscriptionTier
+	IntendedModelFamily   string
+	FinalModelFamily      string
 
 	// UnifiedLimitHeaders is the verbatim anthropic-ratelimit-unified-* header
 	// set, pre-marshaled JSON. Phase 0 instrumentation — nil on non-subscription
@@ -297,8 +303,8 @@ type InsertTelemetryParams struct {
 	// ErrorClass is empty on a normal completion.
 	ErrorClass TurnErrorClass
 	// LatestToolCallCounts is pre-marshaled JSON {tool name: {calls, errors}}
-	// over only the tool results this request delivered. nil when it delivered
-	// none.
+	// over incoming Anthropic tool results. {} marks an observed empty result;
+	// nil means outcomes were not collected, including unsupported input formats.
 	LatestToolCallCounts []byte
 }
 
@@ -615,7 +621,7 @@ const DecisionReasonRoutingFailed = "routing_failed"
 // carried an honoured policy pin, so replay analysis sees requested=true,
 // honoured=false even though no upstream dispatch happened. Unauthorized pins
 // and other routing failures write no row.
-func (s *Service) recordPolicyPinRouteFailure(ctx context.Context, requestID string, requestStart time.Time, requestedModel string, turnType turntype.TurnType, routeErr error) {
+func (s *Service) recordPolicyPinRouteFailure(ctx context.Context, requestID string, requestStart time.Time, requestedModel string, turnType turntype.TurnType, userPrompt bool, routeErr error) {
 	if _, honoured := router.HonouredPolicyPin(ctx); !honoured {
 		return
 	}
@@ -634,6 +640,7 @@ func (s *Service) recordPolicyPinRouteFailure(ctx context.Context, requestID str
 		TurnType:       string(turnType),
 		DecisionReason: DecisionReasonPolicyPinUnservable,
 		ErrorClass:     TurnErrorRoutingRefused,
+		UserPrompt:     &userPrompt,
 		Strategy:       string(router.StrategyFromContext(ctx)),
 		RouterUserID:   auth.UserIDFrom(ctx),
 	}

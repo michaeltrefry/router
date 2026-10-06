@@ -350,6 +350,9 @@ func validatePreviewResult(result PreviewResult, expectedSchemaVersion string) e
 }
 
 func (r *SidecarRouter) Route(ctx context.Context, req router.Request) (router.Decision, error) {
+	if req.Unscorable {
+		return r.RouteWithoutUserText(ctx, req)
+	}
 	strategy := r.config.Strategy
 	r.capabilitiesMu.RLock()
 	capabilities := r.capabilities
@@ -378,6 +381,7 @@ func (r *SidecarRouter) Route(ctx context.Context, req router.Request) (router.D
 		return router.Decision{}, fmt.Errorf("%s: roster pin requires router-owned arm selection: %w", strategy, router.ErrPolicyPinUnavailable)
 	}
 	res, err := r.decider.Decide(ctx, Query{
+		TaskDomain:           req.TaskDomain,
 		ClassifierPrediction: req.ClassifierPrediction,
 		ArtifactSHA256:       pin.ArtifactSHA256,
 		SchemaVersion:        r.resolver.SchemaVersion(),

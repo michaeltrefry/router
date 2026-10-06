@@ -1,9 +1,13 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"weave-os/router/internal/policyregistry"
+	"weave-os/router/internal/requestcontext"
 
 	"weave-os/router/internal/auth"
 	"weave-os/router/internal/flags"
@@ -28,8 +32,8 @@ const RouterKeyHeader = auth.RouterKeyHeader
 //
 // byokRequiresOptIn gates BYOK keys behind the installation's own opt-in.
 // Managed-mode deployments pass true; self-hosted always passes false.
-func WithAuth(svc *auth.Service, byokRequiresOptIn bool) gin.HandlerFunc {
-	return withAPIKey(svc, byokRequiresOptIn)
+func WithAuth(svc *auth.Service, byokRequiresOptIn bool, serving ...*ServingAdmissionConfig) gin.HandlerFunc {
+	return withAPIKey(svc, byokRequiresOptIn, serving...)
 }
 
 // WithAdminOrAuth accepts either a signed admin session cookie OR a bearer rk_ token.
@@ -71,37 +75,79 @@ func WithAdminOnly(svc *auth.Service) gin.HandlerFunc {
 // unless the installation set ByokEnabled. Every downstream BYOK consumer
 // (credential resolution, provider gating, usage bookkeeping) reads that
 // single ctx key, so gating it here decides the whole path in one place.
-func withAPIKey(svc *auth.Service, byokRequiresOptIn bool) gin.HandlerFunc {
+func withAPIKey(svc *auth.Service, byokRequiresOptIn bool, serving ...*ServingAdmissionConfig) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		parentCtx := c.Request.Context()
+		var testPlan *policyregistry.TestPlanScope
+		if len(serving) > 0 && serving[0] != nil {
+			body, err := io.ReadAll(io.LimitReader(c.Request.Body, requestcontext.MaxRequestBodyBytes+1))
+			if err != nil || len(body) > requestcontext.MaxRequestBodyBytes {
+				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid_request_body"})
+				return
+			}
+			c.Request.Body = io.NopCloser(bytes.NewReader(body))
+			assertion, err := serving[0].Signer.Verify(c.GetHeader(policyregistry.ServingAssertionHeader), c.Request, body, extractToken(c))
+			if err != nil {
+				observability.FromGin(c).Debug("Serving assertion rejected before identity resolution", "err", err)
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "serving_assertion_required"})
+				return
+			}
+			testPlan = assertion.TestPlan
+			if testPlan != nil && !serving[0].TestBudgetEnabled {
+				c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "test_budget_unavailable"})
+				return
+			}
+			if testPlan != nil {
+				parentCtx = policyregistry.WithServingAssertion(parentCtx, assertion)
+				c.Request = c.Request.WithContext(parentCtx)
+			}
+		}
 		clientSessionID := proxy.ClientIdentityFromHeaders(c.Request.Header).SessionID
+		if testPlan != nil {
+			clientSessionID = testPlan.SessionID
+		}
 		authCtx, authSpan := startAuthSpan(parentCtx, clientSessionID)
 		token := extractToken(c)
-		installation, apiKey, externalKeys, clusterModelLists, err := svc.VerifyAPIKey(authCtx, token)
+		var installation *auth.Installation
+		var apiKey *auth.APIKey
+		var externalKeys []*auth.ExternalAPIKey
+		var clusterModelLists []auth.ClusterModelList
+		var err error
+		if testPlan != nil {
+			installation, apiKey, clusterModelLists, err = svc.VerifyPlatformAPIKey(authCtx, token)
+		} else {
+			installation, apiKey, externalKeys, clusterModelLists, err = svc.VerifyAPIKey(authCtx, token)
+		}
 		if err != nil {
 			finishAuthSpan(authSpan, err)
 			handleAuthError(c, err)
 			return
 		}
+		if testPlan != nil && (apiKey.CredentialSubjectID != testPlan.SubjectID || apiKey.InstallationID != installation.ID) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "test_identity_mismatch"})
+			return
+		}
 		c.Set(ctxKeyInstallation, installation)
 		c.Set(ctxKeyAPIKey, apiKey)
 		ctx := authCtx
-		ctx, err = svc.WithRoutingPolicy(ctx, installation.ID)
-		if err != nil {
-			observability.FromContext(ctx).Error("Failed to load installation routing policy", "installation_id", installation.ID, "err", err)
-			finishAuthSpan(authSpan, err)
-			c.Header("Retry-After", "1")
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "routing_policy_unavailable"})
-			return
+		if testPlan == nil {
+			ctx, err = svc.WithRoutingPolicy(ctx, installation.ID)
+			if err != nil {
+				observability.FromContext(ctx).Error("Failed to load installation routing policy", "installation_id", installation.ID, "err", err)
+				finishAuthSpan(authSpan, err)
+				c.Header("Retry-After", "1")
+				c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "routing_policy_unavailable"})
+				return
+			}
 		}
 		if apiKey != nil {
 			ctx = context.WithValue(ctx, proxy.APIKeyIDContextKey{}, apiKey.ID)
 			ctx = proxy.WithManagedSubscriptionUsage(ctx)
-			owner := subscriptionOwnerForRequest(c, svc, apiKey)
+			owner := subscriptionOwnerForRequest(c, apiKey)
 			c.Set(ctxKeySubscriptionOwner, owner)
 			ctx = proxy.WithSubscriptionOwner(ctx, owner)
-			if svc.SubscriptionAccountsEnabled() {
-				accounts, listErr := svc.ListSubscriptionAccounts(ctx, owner)
+			if testPlan == nil && svc.SubscriptionAccountsEnabled() {
+				accounts, listErr := svc.ListSubscriptionCandidates(ctx, owner)
 				if listErr != nil {
 					observability.FromContext(ctx).Error("Failed to load subscription account enrollment", "err", listErr)
 					ctx = context.WithValue(ctx, proxy.ManagedSubscriptionEnrollmentUnavailableContextKey{}, true)
@@ -113,10 +159,7 @@ func withAPIKey(svc *auth.Service, byokRequiresOptIn bool) gin.HandlerFunc {
 					if len(enrolled) > 0 {
 						ctx = context.WithValue(ctx, proxy.ManagedSubscriptionProvidersContextKey{}, enrolled)
 					}
-					planStates := proxy.ManagedSubscriptionPlanStates(accounts, svc.CurrentTime())
-					if len(planStates) > 0 {
-						ctx = context.WithValue(ctx, proxy.ManagedSubscriptionPlanStatesContextKey{}, planStates)
-					}
+
 				}
 			}
 		}
@@ -200,7 +243,7 @@ func withAPIKey(svc *auth.Service, byokRequiresOptIn bool) gin.HandlerFunc {
 				ctx = flags.WithOverrides(ctx, installation.FlagOverrides)
 			}
 		}
-		byokAllowed := !byokRequiresOptIn || (installation != nil && installation.ByokEnabled)
+		byokAllowed := testPlan == nil && (!byokRequiresOptIn || (installation != nil && installation.ByokEnabled))
 		if externalKeys != nil && byokAllowed {
 			ctx = context.WithValue(ctx, proxy.ExternalAPIKeysContextKey{}, externalKeys)
 			ctx = proxy.WithForwardedHeaderSnapshot(ctx, externalKeys, c.Request.Header)
@@ -298,6 +341,9 @@ func APIKeyFrom(c *gin.Context) *auth.APIKey {
 // as, which on a key shared across an organization is not the key's owner.
 // Requests authenticated before the owner was resolved fall back to the key.
 func SubscriptionOwnerFrom(c *gin.Context) auth.SubscriptionOwner {
+	if _, ok := requestcontext.InternalTestIdentityFrom(c.Request.Context()); ok {
+		return auth.SubscriptionOwner{}
+	}
 	if owner, ok := c.Get(ctxKeySubscriptionOwner); ok {
 		resolved, _ := owner.(auth.SubscriptionOwner)
 		if resolved.Valid() {
@@ -311,35 +357,27 @@ func SubscriptionOwnerFrom(c *gin.Context) auth.SubscriptionOwner {
 // for the subscription-management endpoints: their owner decides whose linked
 // account is listed, disabled or deleted, so they must not act on an identity
 // the cache still remembers after Weave withdrew it.
-func SubscriptionOwnerLive(c *gin.Context, svc *auth.Service) auth.SubscriptionOwner {
+func SubscriptionOwnerLive(c *gin.Context, svc *auth.Service) (auth.SubscriptionOwner, error) {
 	apiKey := APIKeyFrom(c)
 	if apiKey == nil || svc == nil {
-		return SubscriptionOwnerFrom(c)
+		return auth.SubscriptionOwner{}, nil
 	}
-	email := proxy.ClientIdentityFromHeaders(c.Request.Header).Email
-	owner, err := svc.SubscriptionOwnerForRequestUncached(c.Request.Context(), apiKey, email)
+	owner, err := svc.SubscriptionOwnerForRequestUncached(c.Request.Context(), apiKey)
 	if err != nil {
 		observability.FromGin(c).Error("Failed to resolve request identity for subscription management", "err", err)
-		return SubscriptionOwnerFrom(c)
+		return auth.SubscriptionOwner{}, err
 	}
-	return owner
+	return owner, nil
 }
 
-// subscriptionOwnerForRequest resolves the caller behind the request email.
-// The resolution never writes to the *auth.APIKey: VerifyAPIKey hands out a
-// cached pointer shared by every concurrent request presenting that key, so a
-// per-request identity written there would leak across callers.
-//
-// A resolution failure falls back to the key's own identity rather than
-// refusing the turn: the projection is an attribution improvement, and an
-// unavailable one must not take routing down.
-func subscriptionOwnerForRequest(c *gin.Context, svc *auth.Service, apiKey *auth.APIKey) auth.SubscriptionOwner {
-	email := proxy.ClientIdentityFromHeaders(c.Request.Header).Email
-	owner, err := svc.SubscriptionOwnerForRequest(c.Request.Context(), apiKey, email)
-	if err != nil {
-		observability.FromGin(c).Error("Failed to resolve request identity; billing the key's own subscriber", "err", err)
+// subscriptionOwnerForRequest binds personal capacity to the authenticated key
+// subject. Client-asserted email is attribution only and cannot grant ownership;
+// live candidate SQL revalidates subject eligibility and installation membership.
+func subscriptionOwnerForRequest(c *gin.Context, apiKey *auth.APIKey) auth.SubscriptionOwner {
+	if _, ok := requestcontext.InternalTestIdentityFrom(c.Request.Context()); ok {
+		return auth.SubscriptionOwner{}
 	}
-	return owner
+	return auth.SubscriptionOwnerForKey(apiKey)
 }
 
 // AdminPrincipalFrom retrieves the admin principal set when the request authenticated via the session cookie. Returns nil for rk_-keyed or unauthed requests.

@@ -175,7 +175,7 @@ func TestGCSManagedServingPublishRejectsV1KindsAndSchemasButStillReadsThem(t *te
 		require.ErrorContains(t, err, "folded into \""+string(folded)+"\"", string(kind))
 	}
 	_, err = registry.PublishServingManifest(ctx, policyregistry.ServingSelectionSet, v1Payload)
-	require.ErrorContains(t, err, "requires a v2 schema", "a v1 object cannot be smuggled into artifacts/ under its family kind")
+	require.ErrorContains(t, err, "requires an artifacts/ schema", "a v1 object cannot be smuggled into artifacts/ under its family kind")
 	require.Empty(t, fixture.objects, "rejected publications write nothing")
 
 	// Objects already stored under the legacy namespace stay readable through the family kind.

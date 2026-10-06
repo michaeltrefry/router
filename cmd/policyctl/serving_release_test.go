@@ -348,3 +348,30 @@ func TestServingCLIPublishReleaseRequiresEveryManifestFlag(t *testing.T) {
 func lane(files cliReleaseFiles) map[string]any {
 	return files.selectionSet["default"].(map[string]any)
 }
+
+func TestServingCLIPublishReleaseV3BindsOnlySharedCode(t *testing.T) {
+	registry, _, legacy := cliServingFixture(t)
+	files := cliReleaseFixture(t, registry, legacy)
+	files.selectionSet = map[string]any{
+		"schema_version": string(policyregistry.ServingSelectionSetV3), "target": string(policyregistry.TargetStable),
+		"code": files.selectionSet["default"], "default_policy": cliDocument(t, files.candidate.Policy),
+		"profiles": map[string]any{"10000000-0000-4000-8000-000000000001": cliDocument(t, files.candidate.Policy)},
+	}
+	var output any
+	opens := 0
+	dependencies := cliDependencies(registry, nil, &output, nil)
+	dependencies.openRegistry = func(context.Context, string) (servingRegistry, error) { opens++; return registry, nil }
+	args := cliReleaseArgs(t, files)
+	require.NoError(t, runServingWith(context.Background(), append(args, "--dry-run"), dependencies))
+	require.Zero(t, opens)
+	require.NoError(t, runServingWith(context.Background(), args, dependencies))
+	refs := output.(servingReleaseRefs)
+	published := cliObject[*policyregistry.SelectionSetV3](t, registry, policyregistry.ServingSelectionSet, refs.SelectionSet)
+	require.Equal(t, refs.Candidate, published.Code.Candidate)
+	require.GreaterOrEqual(t, published.Code.Candidate.Generation, cliFirstGeneration)
+	require.Equal(t, files.candidate.Policy, published.DefaultPolicy)
+	require.Equal(t, files.candidate.Policy, published.Profiles["10000000-0000-4000-8000-000000000001"])
+	require.Zero(t, registry.writes)
+	require.NoError(t, runServingWith(context.Background(), args, dependencies))
+	require.Equal(t, refs, output.(servingReleaseRefs))
+}

@@ -63,7 +63,7 @@ func escalationDashboardFilter(c *gin.Context) (escalationdashboard.Filter, bool
 }
 
 func validEscalationDashboardFilter(filter escalationdashboard.Filter) bool {
-	validService := filter.Service == "" || filter.Service == escalationdashboard.ServiceXGB || filter.Service == escalationdashboard.ServiceSwitchyard
+	validService := filter.Service == "" || filter.Service == escalationdashboard.ServiceXGB || filter.Service == escalationdashboard.ServiceSwitchyard || filter.Service == escalationdashboard.ServiceLLM
 	validMode := filter.Mode == "" || filter.Mode == escalationdashboard.ModeActive || filter.Mode == escalationdashboard.ModeShadow || filter.Mode == escalationdashboard.ModeUnknown
 	validOutcome := filter.SessionOutcome == "" || filter.SessionOutcome == escalationdashboard.SessionOutcomeRecommended || filter.SessionOutcome == escalationdashboard.SessionOutcomeApplied || filter.SessionOutcome == escalationdashboard.SessionOutcomeShadow || filter.SessionOutcome == escalationdashboard.SessionOutcomeNoEvaluation
 	return validService && validMode && validOutcome

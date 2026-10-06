@@ -397,6 +397,8 @@ func servingFamilyManifest(kind ServingKind, schema ServingSchema) (ServingManif
 		return &SelectionSet{}, nil
 	case kind == ServingSelectionSet && schema == ServingSelectionSetV2:
 		return &SelectionSetV2{}, nil
+	case kind == ServingSelectionSet && schema == ServingSelectionSetV3:
+		return &SelectionSetV3{}, nil
 	case kind == ServingProposal && schema == ServingProposalV1:
 		return &DeploymentProposal{}, nil
 	case kind == ServingProposal && schema == ServingProposalV2:
@@ -436,7 +438,7 @@ func ValidatePublishableServingKind(kind ServingKind) error {
 }
 
 // DecodePublishableServingManifest applies every check a publish performs before it writes:
-// the kind must be a v2 family and the bytes must strictly decode to a valid v2 object.
+// the kind must be an artifact family and the bytes must strictly decode to a publishable schema.
 func DecodePublishableServingManifest(payload []byte, root string, kind ServingKind) (ServingManifest, error) {
 	if err := ValidatePublishableServingKind(kind); err != nil {
 		return nil, err
@@ -445,16 +447,16 @@ func DecodePublishableServingManifest(payload []byte, root string, kind ServingK
 	if err != nil {
 		return nil, err
 	}
-	if !isServingV2Manifest(manifest) {
-		return nil, fmt.Errorf("%s publication requires a v2 schema; v1 objects are read-only", kind)
+	if !isServingArtifactManifest(manifest) {
+		return nil, fmt.Errorf("%s publication requires an artifacts/ schema; v1 objects are read-only", kind)
 	}
 	return manifest, nil
 }
 
-// isServingV2Manifest reports whether a decoded manifest is one of the artifacts/ kinds.
-func isServingV2Manifest(manifest ServingManifest) bool {
+// isServingArtifactManifest reports whether a decoded manifest uses the flat artifacts/ layout.
+func isServingArtifactManifest(manifest ServingManifest) bool {
 	switch manifest.(type) {
-	case *CandidateV2, *SelectionSetV2, *DeploymentProposalV2:
+	case *CandidateV2, *SelectionSetV2, *SelectionSetV3, *DeploymentProposalV2:
 		return true
 	default:
 		return false

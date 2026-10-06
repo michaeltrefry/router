@@ -53,7 +53,7 @@ WITH xgb_evaluations AS MATERIALIZED (
     LEFT JOIN xgb_evaluations e ON e.session_id = encode(s.scope, 'hex')
     WHERE s.expires_at > $2::timestamptz AND s.ordinal > 0
     GROUP BY s.scope, i.external_id
-), switchyard_evaluations AS MATERIALIZED (
+), llm_evaluations AS MATERIALIZED (
     SELECT
         s.lifetime::text AS session_id,
         (j.job->>'checkpoint')::integer AS progress,
@@ -66,14 +66,14 @@ WITH xgb_evaluations AS MATERIALIZED (
     FROM router.llm_escalation_jobs j
     JOIN router.llm_escalation_sessions s ON s.lifetime = j.lifetime
     WHERE s.expires_at > $2::timestamptz
-), switchyard_sessions AS MATERIALIZED (
+), llm_sessions AS MATERIALIZED (
     SELECT
         s.lifetime::text AS session_id,
         encode(s.scope, 'hex') AS scope,
         s.lifetime::text AS lifetime,
         i.external_id::text AS organization_id,
         s.installation_id::text AS installation_id,
-        'switchyard_llm_v1'::text AS service,
+        COALESCE(NULLIF(s.state->'config'->>'classifier', ''), 'switchyard_llm_v1')::text AS service,
         CASE WHEN s.state->'config'->>'mode' IN ('active', 'shadow')
             THEN s.state->'config'->>'mode' ELSE 'unknown' END AS mode,
         CASE WHEN s.state->'config' ? 'epoch' THEN (s.state->'config'->>'epoch')::integer END AS epoch,
@@ -89,13 +89,13 @@ WITH xgb_evaluations AS MATERIALIZED (
         false AS continuity_broken
     FROM router.llm_escalation_sessions s
     JOIN router.model_router_installations i ON i.id = s.installation_id AND i.deleted_at IS NULL
-    LEFT JOIN switchyard_evaluations e ON e.session_id = s.lifetime::text
+    LEFT JOIN llm_evaluations e ON e.session_id = s.lifetime::text
     WHERE s.expires_at > $2::timestamptz
     GROUP BY s.scope, s.lifetime, i.external_id
 ), all_sessions AS MATERIALIZED (
     SELECT session_id, scope, lifetime, organization_id, installation_id, service, mode, epoch, observed_progress, evaluations, recommendations, first_recommendation, escalations_applied, floor_constrained_requests, invalid_evaluations, floor, last_activity_at, continuity_broken FROM xgb_sessions
     UNION ALL
-    SELECT session_id, scope, lifetime, organization_id, installation_id, service, mode, epoch, observed_progress, evaluations, recommendations, first_recommendation, escalations_applied, floor_constrained_requests, invalid_evaluations, floor, last_activity_at, continuity_broken FROM switchyard_sessions
+    SELECT session_id, scope, lifetime, organization_id, installation_id, service, mode, epoch, observed_progress, evaluations, recommendations, first_recommendation, escalations_applied, floor_constrained_requests, invalid_evaluations, floor, last_activity_at, continuity_broken FROM llm_sessions
 ), selected_sessions AS MATERIALIZED (
     SELECT session_id, scope, lifetime, organization_id, installation_id, service, mode, epoch, observed_progress, evaluations, recommendations, first_recommendation, escalations_applied, floor_constrained_requests, invalid_evaluations, floor, last_activity_at, continuity_broken FROM all_sessions
     WHERE ($3::text = '' OR service = $3::text)
@@ -106,8 +106,8 @@ WITH xgb_evaluations AS MATERIALIZED (
     SELECT 'xgb'::text AS service, e.session_id, e.progress, e.valid, e.recommended, e.applied, e.constrained, e.invalid, s.mode
     FROM xgb_evaluations e JOIN xgb_sessions s USING (session_id)
     UNION ALL
-    SELECT 'switchyard_llm_v1'::text AS service, e.session_id, e.progress, e.valid, e.recommended, e.applied, e.constrained, e.invalid, s.mode
-    FROM switchyard_evaluations e JOIN switchyard_sessions s USING (session_id)
+    SELECT s.service, e.session_id, e.progress, e.valid, e.recommended, e.applied, e.constrained, e.invalid, s.mode
+    FROM llm_evaluations e JOIN llm_sessions s USING (session_id)
 ), selected_evaluations AS MATERIALIZED (
     SELECT e.service, e.session_id, e.progress, e.valid, e.recommended, e.applied, e.constrained, e.invalid, e.mode FROM all_evaluations e JOIN selected_sessions s USING (session_id, service, mode)
 ), matching_sessions AS MATERIALIZED (
@@ -269,7 +269,7 @@ type CreateEscalationDashboardSnapshotParams struct {
 //	    LEFT JOIN xgb_evaluations e ON e.session_id = encode(s.scope, 'hex')
 //	    WHERE s.expires_at > $2::timestamptz AND s.ordinal > 0
 //	    GROUP BY s.scope, i.external_id
-//	), switchyard_evaluations AS MATERIALIZED (
+//	), llm_evaluations AS MATERIALIZED (
 //	    SELECT
 //	        s.lifetime::text AS session_id,
 //	        (j.job->>'checkpoint')::integer AS progress,
@@ -282,14 +282,14 @@ type CreateEscalationDashboardSnapshotParams struct {
 //	    FROM router.llm_escalation_jobs j
 //	    JOIN router.llm_escalation_sessions s ON s.lifetime = j.lifetime
 //	    WHERE s.expires_at > $2::timestamptz
-//	), switchyard_sessions AS MATERIALIZED (
+//	), llm_sessions AS MATERIALIZED (
 //	    SELECT
 //	        s.lifetime::text AS session_id,
 //	        encode(s.scope, 'hex') AS scope,
 //	        s.lifetime::text AS lifetime,
 //	        i.external_id::text AS organization_id,
 //	        s.installation_id::text AS installation_id,
-//	        'switchyard_llm_v1'::text AS service,
+//	        COALESCE(NULLIF(s.state->'config'->>'classifier', ''), 'switchyard_llm_v1')::text AS service,
 //	        CASE WHEN s.state->'config'->>'mode' IN ('active', 'shadow')
 //	            THEN s.state->'config'->>'mode' ELSE 'unknown' END AS mode,
 //	        CASE WHEN s.state->'config' ? 'epoch' THEN (s.state->'config'->>'epoch')::integer END AS epoch,
@@ -305,13 +305,13 @@ type CreateEscalationDashboardSnapshotParams struct {
 //	        false AS continuity_broken
 //	    FROM router.llm_escalation_sessions s
 //	    JOIN router.model_router_installations i ON i.id = s.installation_id AND i.deleted_at IS NULL
-//	    LEFT JOIN switchyard_evaluations e ON e.session_id = s.lifetime::text
+//	    LEFT JOIN llm_evaluations e ON e.session_id = s.lifetime::text
 //	    WHERE s.expires_at > $2::timestamptz
 //	    GROUP BY s.scope, s.lifetime, i.external_id
 //	), all_sessions AS MATERIALIZED (
 //	    SELECT session_id, scope, lifetime, organization_id, installation_id, service, mode, epoch, observed_progress, evaluations, recommendations, first_recommendation, escalations_applied, floor_constrained_requests, invalid_evaluations, floor, last_activity_at, continuity_broken FROM xgb_sessions
 //	    UNION ALL
-//	    SELECT session_id, scope, lifetime, organization_id, installation_id, service, mode, epoch, observed_progress, evaluations, recommendations, first_recommendation, escalations_applied, floor_constrained_requests, invalid_evaluations, floor, last_activity_at, continuity_broken FROM switchyard_sessions
+//	    SELECT session_id, scope, lifetime, organization_id, installation_id, service, mode, epoch, observed_progress, evaluations, recommendations, first_recommendation, escalations_applied, floor_constrained_requests, invalid_evaluations, floor, last_activity_at, continuity_broken FROM llm_sessions
 //	), selected_sessions AS MATERIALIZED (
 //	    SELECT session_id, scope, lifetime, organization_id, installation_id, service, mode, epoch, observed_progress, evaluations, recommendations, first_recommendation, escalations_applied, floor_constrained_requests, invalid_evaluations, floor, last_activity_at, continuity_broken FROM all_sessions
 //	    WHERE ($3::text = '' OR service = $3::text)
@@ -322,8 +322,8 @@ type CreateEscalationDashboardSnapshotParams struct {
 //	    SELECT 'xgb'::text AS service, e.session_id, e.progress, e.valid, e.recommended, e.applied, e.constrained, e.invalid, s.mode
 //	    FROM xgb_evaluations e JOIN xgb_sessions s USING (session_id)
 //	    UNION ALL
-//	    SELECT 'switchyard_llm_v1'::text AS service, e.session_id, e.progress, e.valid, e.recommended, e.applied, e.constrained, e.invalid, s.mode
-//	    FROM switchyard_evaluations e JOIN switchyard_sessions s USING (session_id)
+//	    SELECT s.service, e.session_id, e.progress, e.valid, e.recommended, e.applied, e.constrained, e.invalid, s.mode
+//	    FROM llm_evaluations e JOIN llm_sessions s USING (session_id)
 //	), selected_evaluations AS MATERIALIZED (
 //	    SELECT e.service, e.session_id, e.progress, e.valid, e.recommended, e.applied, e.constrained, e.invalid, e.mode FROM all_evaluations e JOIN selected_sessions s USING (session_id, service, mode)
 //	), matching_sessions AS MATERIALIZED (

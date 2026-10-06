@@ -257,7 +257,7 @@ func TestServingCLIPublishDryRunAppliesEveryPublishRejection(t *testing.T) {
 			require.ErrorContains(t, publish(kind), "folded into \""+folded+"\"", "dry_run=%t --kind %s", dryRun, kind)
 		}
 		require.ErrorContains(t, publish("lanes"), "unsupported serving object kind")
-		require.ErrorContains(t, publish(string(policyregistry.ServingProposal)), "requires a v2 schema; v1 objects are read-only")
+		require.ErrorContains(t, publish(string(policyregistry.ServingProposal)), "requires an artifacts/ schema; v1 objects are read-only")
 	}
 	require.Zero(t, opened, "kind and schema rejections are offered before the registry is opened")
 	malformed := cliManifestFile(t, []byte(`{"schema_version":"router_serving_proposal_v2","unknown":true}`))

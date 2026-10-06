@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -21,22 +22,24 @@ import (
 )
 
 type llmEscalationStoreStub struct {
-	mu              sync.Mutex
-	completion      llmescalation.Completion
-	finished        chan struct{}
-	judgment        llmescalation.Judgment
-	failure         llmescalation.FailureCode
-	applyCalls      int
-	noTargetCalls   int
-	completeCalls   int
-	continuationErr error
+	mu                sync.Mutex
+	completion        llmescalation.Completion
+	finished          chan struct{}
+	judgment          llmescalation.Judgment
+	failure           llmescalation.FailureCode
+	applyCalls        int
+	noTargetCalls     int
+	completeCalls     int
+	completionRequest llmescalation.CompleteRequest
+	continuationErr   error
 }
 
 func (s *llmEscalationStoreStub) Start(context.Context, llmescalation.StartRequest) (llmescalation.Session, error) {
 	return llmescalation.Session{}, nil
 }
-func (s *llmEscalationStoreStub) Complete(context.Context, llmescalation.CompleteRequest) (llmescalation.Completion, error) {
+func (s *llmEscalationStoreStub) Complete(_ context.Context, request llmescalation.CompleteRequest) (llmescalation.Completion, error) {
 	s.completeCalls++
+	s.completionRequest = request
 	return s.completion, nil
 }
 func (s *llmEscalationStoreStub) FinishJob(_ context.Context, _ llmescalation.Job, judgment llmescalation.Judgment, failure llmescalation.FailureCode) error {
@@ -135,6 +138,47 @@ func TestLLMEscalationJudgeRunsAfterCompletionWithoutBlocking(t *testing.T) {
 	require.Equal(t, llmescalation.FailureNone, store.failure)
 }
 
+func TestQwenEscalationUsesFiveTurnIntervalAndModalJudge(t *testing.T) {
+	job := llmescalation.Job{ID: "qwen-job", Lifetime: "qwen-life", Checkpoint: 12, Model: llmescalation.QwenReleaseName, Provider: llmescalation.QwenProvider}
+	store := &llmEscalationStoreStub{completion: llmescalation.Completion{Job: &job}, finished: make(chan struct{})}
+	switchyard := &blockingEscalationJudge{started: make(chan llmescalation.JudgeRequest, 1), release: make(chan struct{})}
+	qwen := &blockingEscalationJudge{started: make(chan llmescalation.JudgeRequest, 1), release: make(chan struct{}), judgment: llmescalation.Judgment{Escalate: true}}
+	service := (&Service{}).WithLLMEscalation(store, switchyard).WithQwenEscalation(qwen)
+	messages := make([]translate.EscalationMessage, 0, 23)
+	for turnIndex := range 11 {
+		messages = append(messages,
+			translate.EscalationMessage{Role: translate.EscalationRoleUser, Blocks: []translate.EscalationBlock{{Type: translate.EscalationBlockText, Text: fmt.Sprintf("request %d", turnIndex)}}},
+			translate.EscalationMessage{Role: translate.EscalationRoleAssistant, Blocks: []translate.EscalationBlock{{Type: translate.EscalationBlockText, Text: fmt.Sprintf("answer %d", turnIndex)}}},
+		)
+	}
+	messages = append(messages, translate.EscalationMessage{Role: translate.EscalationRoleUser, Blocks: []translate.EscalationBlock{{Type: translate.EscalationBlockText, Text: "request 11"}}})
+	turn := &llmEscalationTurn{requestID: "qwen-request", observation: translate.EscalationObservation{Messages: messages}, session: llmescalation.Session{Lifetime: "qwen-life", InstallationID: "00000000-0000-0000-0000-000000000001", CompletedTurns: 11, Config: llmescalation.Config{Cadence: 3, Classifier: flags.EscalationClassifierLLM}}}
+	capture := newCaptureWriter(httptest.NewRecorder(), escalationHistoryMaxBytes)
+	_, err := capture.Write([]byte(`{"id":"response","content":[{"type":"text","text":"answer 11"}],"stop_reason":"end_turn"}`))
+	require.NoError(t, err)
+
+	service.completeLLMEscalation(context.Background(), turnLoopResult{llmEscalation: turn}, nil, capture, translate.EscalationResponseAnthropic)
+	select {
+	case request := <-qwen.started:
+		require.Contains(t, request.Transcript, "The visible interval contains turns 7..11")
+		require.Contains(t, request.Transcript, "answer 11")
+		require.NotContains(t, request.Transcript, "answer 6")
+	case <-time.After(time.Second):
+		t.Fatal("Qwen judge did not receive the completed interval")
+	}
+	select {
+	case <-switchyard.started:
+		t.Fatal("Switchyard judge received a Qwen job")
+	default:
+	}
+	close(qwen.release)
+	select {
+	case <-store.finished:
+	case <-time.After(time.Second):
+		t.Fatal("Qwen verdict was not persisted")
+	}
+}
+
 func TestLLMEscalationApplicationSeparatesActiveAndShadow(t *testing.T) {
 	positive := &llmescalation.Job{ID: "job", Judgment: &llmescalation.Judgment{Escalate: true}}
 	store := &llmEscalationStoreStub{}
@@ -169,6 +213,86 @@ func TestLLMEscalationConfigurationGatesActiveRollout(t *testing.T) {
 	require.Equal(t, flags.EscalationClassifierSwitchyard, selection.Shadow)
 	require.Equal(t, 1, configuration.updates)
 	require.Equal(t, 1, invalidations)
+}
+
+func TestQwenEscalationSelectionRequiresDeployedJudge(t *testing.T) {
+	configuration := &escalationConfigurationStub{selection: llmescalation.Selection{InstallationID: "installation", Epoch: 2}}
+	service := (&Service{}).
+		WithLLMEscalation(&llmEscalationStoreStub{}, &blockingEscalationJudge{}).
+		WithEscalationConfiguration(configuration, nil, true)
+	update := llmescalation.SelectionUpdate{Active: flags.EscalationClassifierLLM, Cadence: 3, Epoch: 2}
+
+	_, err := service.UpdateEscalationSelection(context.Background(), "installation", update)
+	require.ErrorIs(t, err, ErrEscalationJudgeUnavailable)
+	require.Zero(t, configuration.updates)
+
+	service.WithQwenEscalation(&blockingEscalationJudge{})
+	selection, err := service.UpdateEscalationSelection(context.Background(), "installation", update)
+	require.NoError(t, err)
+	require.Equal(t, flags.EscalationClassifierLLM, selection.Active)
+	require.True(t, selection.Ready)
+	require.Equal(t, 1, configuration.updates)
+}
+
+func TestQwenEscalationDoesNotRequireSwitchyardActiveRollout(t *testing.T) {
+	configuration := &escalationConfigurationStub{selection: llmescalation.Selection{InstallationID: "installation", Epoch: 2}}
+	service := (&Service{}).
+		WithLLMEscalation(&llmEscalationStoreStub{}, nil).
+		WithQwenEscalation(&blockingEscalationJudge{}).
+		WithEscalationConfiguration(configuration, nil, false)
+	selection, err := service.UpdateEscalationSelection(context.Background(), "installation", llmescalation.SelectionUpdate{Active: flags.EscalationClassifierLLM, Cadence: 3, Epoch: 2})
+	require.NoError(t, err)
+	require.True(t, selection.Ready)
+
+	overrides := flags.Overrides{Strings: map[flags.Key]string{
+		flags.KeyEscalationActiveClassifier: string(flags.EscalationClassifierLLM),
+	}}
+	ctx := flags.WithOverrides(router.WithStrategy(context.Background(), router.StrategyHMMEmbedding), overrides)
+	requestResult := turnLoopResult{Strategy: router.StrategyHMMEmbedding, InstallationID: uuid.New(), TurnType: turntype.MainLoop}
+	turn := service.beginLLMEscalation(ctx, escalationTestEnvelope(t, 1), router.Request{}, &requestResult, "test-key")
+	require.NotNil(t, turn)
+	require.True(t, turn.active)
+}
+
+func TestSwitchyardEscalationReadinessReflectsDisabledRollout(t *testing.T) {
+	configuration := &escalationConfigurationStub{selection: llmescalation.Selection{InstallationID: "installation", Active: flags.EscalationClassifierSwitchyard}}
+	service := (&Service{}).
+		WithLLMEscalation(&llmEscalationStoreStub{}, &blockingEscalationJudge{}).
+		WithEscalationConfiguration(configuration, nil, false)
+	selection, err := service.EscalationSelection(context.Background(), "installation")
+	require.NoError(t, err)
+	require.False(t, selection.Ready)
+	require.Equal(t, "active rollout is disabled", selection.UnavailableReason)
+}
+
+func TestQwenEscalationSkipsGatewayOnlyInstallation(t *testing.T) {
+	service := (&Service{}).
+		WithLLMEscalation(&llmEscalationStoreStub{}, nil).
+		WithQwenEscalation(&blockingEscalationJudge{}).
+		WithEscalationConfiguration(nil, nil, false)
+	overrides := flags.Overrides{Strings: map[flags.Key]string{
+		flags.KeyEscalationActiveClassifier: string(flags.EscalationClassifierLLM),
+	}}
+	ctx := flags.WithOverrides(router.WithStrategy(context.Background(), router.StrategyHMMEmbedding), overrides)
+	requestResult := turnLoopResult{Strategy: router.StrategyHMMEmbedding, InstallationID: uuid.New(), TurnType: turntype.MainLoop}
+	request := router.Request{GatewayProviders: map[string]struct{}{providers.ProviderOpenAIGateway: {}}}
+	require.Nil(t, service.beginLLMEscalation(ctx, escalationTestEnvelope(t, 1), request, &requestResult, "test-key"))
+}
+
+func TestQwenEscalationRecordsUnavailableIntervalSeparatelyFromCapacity(t *testing.T) {
+	store := &llmEscalationStoreStub{}
+	service := (&Service{}).WithLLMEscalation(store, nil).WithQwenEscalation(&blockingEscalationJudge{})
+	turn := &llmEscalationTurn{
+		observation: translate.EscalationObservation{Messages: []translate.EscalationMessage{{Role: translate.EscalationRoleUser, Blocks: []translate.EscalationBlock{{Type: translate.EscalationBlockText, Text: "continue"}}}}},
+		session:     llmescalation.Session{CompletedTurns: 11, Config: llmescalation.Config{Cadence: 3, Classifier: flags.EscalationClassifierLLM}},
+	}
+	capture := newCaptureWriter(httptest.NewRecorder(), escalationHistoryMaxBytes)
+	_, err := capture.Write([]byte(`{"id":"response","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}`))
+	require.NoError(t, err)
+	service.completeLLMEscalation(context.Background(), turnLoopResult{llmEscalation: turn}, nil, capture, translate.EscalationResponseAnthropic)
+	require.Equal(t, 1, store.completeCalls)
+	require.Equal(t, llmescalation.FailureIntervalUnavailable, store.completionRequest.IntervalFailure)
+	require.False(t, store.completionRequest.Capacity)
 }
 
 func TestLLMEscalationActiveRolloutGateAppliesToRequestOverrides(t *testing.T) {

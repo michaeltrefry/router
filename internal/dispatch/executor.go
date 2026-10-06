@@ -279,7 +279,11 @@ func (e *Executor) Run(ctx context.Context, req inference.InvocationRequest, pla
 			if transport.Terminal != nil && transport.Terminal(attempt, attemptErr) {
 				break
 			}
-			if !providers.IsRetryable(attemptErr) || sb >= MaxSameBindingRetries || len(targets) > 1 {
+			if !providers.IsRetryable(attemptErr) ||
+				errors.Is(attemptErr, providers.ErrUpstreamIdleTimeout) ||
+				errors.Is(attemptErr, providers.ErrUpstreamOutputStall) ||
+				errors.Is(attemptErr, providers.ErrUpstreamSlowThroughput) ||
+				sb >= MaxSameBindingRetries || len(targets) > 1 {
 				break
 			}
 			if maxAttempts > 0 && result.Outcome.AttemptCount >= maxAttempts {

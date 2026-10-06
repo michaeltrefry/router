@@ -12,10 +12,11 @@ import (
 // Credential sources, for logging and precedence reasoning. Never log the key
 // itself — only the source.
 const (
-	credSourceBYOK              = requestcontext.SourceBYOK
-	credSourceClient            = requestcontext.SourceClient
-	credSourceSubscription      = requestcontext.SourceSubscription
-	credSourceCodexSubscription = requestcontext.SourceCodexSubscription
+	credSourceBYOK                = requestcontext.SourceBYOK
+	credSourceClient              = requestcontext.SourceClient
+	credSourceSubscription        = requestcontext.SourceSubscription
+	credSourceSubscriptionOverage = requestcontext.SourceSubscriptionOverage
+	credSourceCodexSubscription   = requestcontext.SourceCodexSubscription
 )
 
 // Credentials is the request-scoped upstream credential; defined in
@@ -27,7 +28,15 @@ type Credentials = requestcontext.Credentials
 type CredentialsContextKey = requestcontext.CredentialsContextKey
 
 // CredentialsFromContext returns the resolved credentials stashed on ctx.
+// An explicit nil override from clearCredentials keeps synthetic calls off the
+// winning credential.
 func CredentialsFromContext(ctx context.Context) *Credentials {
+	if override, set := ctx.Value(CredentialsContextKey{}).(*Credentials); set && override == nil {
+		return nil
+	}
+	if usage, _ := ctx.Value(ManagedSubscriptionUsageContextKey{}).(*ManagedSubscriptionUsage); usage != nil && usage.Finished {
+		return usage.WinningCredentials
+	}
 	return requestcontext.CredentialsFromContext(ctx)
 }
 

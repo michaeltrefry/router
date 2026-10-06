@@ -57,7 +57,7 @@ collapse them.
 | `global_automatic_routing_exclusions` | deployment | fail-open (soft) | `AutomaticExcludedModels`: scorer, policy resolver, and every automatic-pin gate |
 | `cluster_model_lists` | API key (org default) | fail-open | `policy.ApplyClusterArmOverrides` |
 | `model_router_user_cluster_model_lists` | router user | fail-open | same, after `mergeClusterOverrides` |
-| subscription plan-aware routing | router user | fail-open on unknown/all-exhausted state | request-scoped exclusions from `withPlanAwareSubscriptionModels` |
+| subscription capacity | verified account owner + installation membership | fail-closed | primary candidate admission; personal then sharing; included-only transport enforcement |
 
 **The allowlist is desugared, not separately filtered.** `excludedModelsForRequest`
 adds every routable model absent from a non-empty allowlist to the exclusion
@@ -106,6 +106,22 @@ same flag makes the same-binding retry Retry-After-aware
 died at 11 consecutive client-visible 429s because a burst-time rescue had
 permanently demoted the arm that recovered minutes later.
 
+**A session-lifetime strike is soft for rescue too, as the very last resort.**
+Primary selection already treats a demotion as soft (an emptied pool reroutes
+onto the excluded model), so a session that has struck out every arm keeps
+being served on one. The rescue walk used to treat the same strikes as hard,
+so once both arms of a two-model roster were demoted every pre-commit failure
+reached the client unrescued (Snowflake Cortex, prod 2026-10: hundreds of
+header-timeout 502s with the other arm never tried). `runTurnLoop` now carries
+the strikes as `SessionStrikeReadmitModels` (image-unsafe arms, and
+ToolUseLow/AgenticLow arms on tool turns, dropped), and
+`rescueWalkOrReadmitCooling` readmits them on sibling failover only (never the
+cyber-refusal retry) and only when neither the eligible walk nor cooldown
+readmission yields a candidate. `strikesInRescuePool` filters non-roster
+strikes to the turn's scored pool; roster readmissions are separately bounded
+by `rosterRescueAdmits`. Hard and deployment-wide exclusions still hold, and
+the arm that just failed is never re-served.
+
 **A wholly non-routable allowlist is rejected at the admin API.** Membership
 validation for `PUT /admin/v1/allowed-models` is catalog-wide on purpose —
 force-model and hard-pin reach rows the router never scores — but the
@@ -132,14 +148,6 @@ fail-open would silently defeat it.
 intersects a user's selection with the API-key-scoped list. A plain override
 would let an individual re-admit a model the org deliberately removed —
 privilege escalation through an admin control.
-
-**Subscription plan-aware routing is an overlay, not a roster mutation.** When
-enabled, the request observes the user's Claude and Codex plan families. If at
-least one plan has headroom, models covered only by exhausted plans are added
-to the request's hard exclusions. If every linked plan is exhausted, the
-overlay contributes no exclusions and normal paid/BYOK routing resumes. Unknown
-state also contributes no exclusions; only reliable quota exhaustion changes
-eligibility. The global HMM roster remains unchanged.
 
 **Two paths deliberately bypass `excluded_models` and need explicit allowlist
 handling:** `usageBypassEngaged` (consults `SafetyExcludedModels`, since
@@ -278,7 +286,7 @@ Multi-binding models (deepseek/qwen/moonshot with Fireworks/Makora/Bedrock prima
 
 **OpenAI cyber-refusal retry ([`openai_cyber_refusal.go`](openai_cyber_refusal.go)).** OpenAI's cybersecurity classifier declines whole turns on security-tooling repos: the `/v1/responses` stream opens normally and then carries `{"type":"error","message":"This content was flagged for possible cybersecurity risk. ..."}` followed by `turn.failed`, which Codex treats as a fatal turn abort (SWE-Atlas QnA: 13/248 trials lost, `output_tokens=0`, `failover_used=false`, a 200 as far as the router was concerned). Because the refusal comes from the vendor's classifier rather than a binding, another OpenAI binding meets the same verdict — the rescue has to leave OpenAI. `cyberRefusalGate` wraps the OpenAI attempt sink and withholds the Responses preamble (`response.created`/`queued`/`in_progress`) until it knows whether real output follows; a refusal arriving before any output is swallowed, converted into `providers.CyberPolicyRefusalError()`, and re-dispatched once on a non-OpenAI model, so the client sees a single clean turn on the fallback. Detection is one matcher, `providers.ContainsCyberPolicyRefusal` (the `flagged for possible cybersecurity risk` phrase or a `cyber_policy` code), shared by the streaming gate and buffered error bodies; ordinary OpenAI errors keep today's behavior. Once output has committed the refusal passes through unchanged. Fallback selection is the pin's `PairedModel` first, else `ROUTER_CYBER_REFUSAL_FALLBACK_MODEL` (default `claude-sonnet-5`), filtered through the same rescue machinery as sibling failover (exclusions, allowlist, provider availability, context fit, gateway-exclusive mode) and forced off OpenAI. The rescue attempt is never itself gated, so a refusal from the fallback is not retried again. Gated by `ROUTER_CYBER_REFUSAL_RETRY` (default on, per-org resolvable) and skipped for `/force-model`, hard-pinned turns (probe/compaction/title-gen), subscription-only balances, and eval bypasses; the post-turn session re-pin runs independently under `ROUTER_CYBER_REFUSAL_REPIN` (reason `cyber-refusal-repin`), whether or not the turn was rescued, so turn N+1 starts off-vendor. Telemetry marks the rescued turn with `dispatch.cyber_refusal_retry` and reason `cyber-refusal-retry`, and both attempts bill through the normal failover ledger.
 
-**Codex subscription failover ([`codex_failover.go`](codex_failover.go)).** A turn served on the caller's ChatGPT plan resolves to one credential, so when that plan's window binds (`429 {"type":"usage_limit_reached"}`, or `insufficient_quota` on a spent workspace) there is no binding to walk and Codex renders the raw upstream error (prod `cd5657ee`: three attempts on the same dark destination, `failover_used=false`). The Anthropic analogue in `ProxyMessages`, ported to `ProxyOpenAIChatCompletion` (and therefore `/v1/responses`): pre-commit, `withSuppressedCodexSubscription` drops the spent token so credential resolution falls through to the deployment/BYOK OpenAI key, and the SAME model is re-dispatched once — the plan rolls over to Weave credits instead of failing the turn. The rejection is also recorded in the usage observer (`recordCodexQuotaExhaustion`), which the quota headers can't do because the error response carries none; without it every later turn re-buys the same rejected round-trip until the window resets, so `codexSubscriptionExhausted` suppresses the token pre-dispatch until the upstream-reported `resets_at`. Triggers are the quota rejection, any other retryable fault, and a rejected OAuth token (401/403). Gated on a fallback OpenAI key actually existing (`openaiFallbackKeyAvailable`) — otherwise the subscription is kept rather than dispatching with no credential — and skipped for subscription-only balances, where paid spend is exactly what the caller forbade. Suppression is Codex-scoped: a Claude subscription on the same request is untouched. It carries forward to post-dispatch credential re-resolution only once the retry succeeded, so `cost.subscription_served` and the billing key name the key that actually paid.
+**Codex subscription failover ([`codex_failover.go`](codex_failover.go)).** A turn served on the caller's ChatGPT plan resolves to one credential, so when that plan's window binds (`429 {"type":"usage_limit_reached"}`, or `insufficient_quota` on a spent workspace) there is no binding to walk and Codex renders the raw upstream error (prod `cd5657ee`: three attempts on the same dark destination, `failover_used=false`). The Anthropic analogue in `ProxyMessages`, ported to `ProxyOpenAIChatCompletion` (and therefore `/v1/responses`): pre-commit, `withSuppressedCodexSubscription` drops the spent token so credential resolution falls through to the deployment/BYOK OpenAI key, and the SAME model is re-dispatched once — the plan rolls over to Weave credits instead of failing the turn. The rejection is also recorded in the usage observer (`recordCodexQuotaExhaustion`), which the quota headers can't do because the error response carries none; without it every later turn re-buys the same rejected round-trip until the window resets, so `codexSubscriptionExhausted` suppresses the token pre-dispatch until the upstream-reported `resets_at`. Triggers are the quota rejection, any other retryable fault, a rejected OAuth token (401/403), and an explicit model-availability rejection (`codexSubscriptionModelRejected`: `model_not_found`/`unsupported_model`/`model_not_available`, or `param: "model"` on a 400/404). A catalog model outside the native Codex roster but marked `CodexSubscriptionFallback` tries the personal or managed Codex subscription first under the same model and falls back here when the plan refuses it; a managed account that refuses the model is denied for that model only, not disabled. Gated on a fallback OpenAI key actually existing (`openaiFallbackKeyAvailable`) — otherwise the subscription is kept rather than dispatching with no credential — and skipped for subscription-only balances, where paid spend is exactly what the caller forbade. Suppression is Codex-scoped: a Claude subscription on the same request is untouched. It carries forward to post-dispatch credential re-resolution only once the retry succeeded, so `cost.subscription_served` and the billing key name the key that actually paid.
 
 **Single-binding same-binding retry.** Most catalog models carry one binding (Anthropic/OpenAI/Google), so cross-binding failover has nowhere to walk — a sole-provider 5xx/timeout would kill the request. For these, `dispatchWithFallback` retries the *same* binding in place up to `maxSameBindingRetries` (2) with exponential backoff (`sameBindingBackoff`: 250ms, 500ms), pre-commit only, abortable on ctx cancel (`sleepWithContext`). Multi-binding models skip in-place retry (`len(bindings) > 1` breaks the inner loop) and fail straight over to the next provider — a different upstream beats re-hitting the flaky one. Tests inject `Service.retrySleep` to keep the backoff instant.
 
@@ -301,6 +309,10 @@ Per-attempt body rebuild: each closure constructs `EmitOptions` with `TargetProv
 An installation opts catalog models into the provider's paid fast tier via `PUT /admin/v1/fast-mode-models` (`auth.Installation.FastModeModels`, carried in ctx under `InstallationFastModeModelsContextKey`). [`fastModeForAttempt`](fastmode.go) decides **per attempt** — against the attempt's own ctx, model, and binding — whether `EmitOptions.FastMode` is set: the model must be listed, the `(provider, model)` binding must publish a `FastPrice` (first-party OpenAI → `service_tier:"priority"`, first-party Anthropic → `speed:"fast"` + beta; gateways never), and the resolved credential must not be a subscription OAuth token (Weave does not bill those turns). Raw passthrough is untouched.
 
 **Routing never sees the fast rate.** Scorer, planner, and `Decision` pricing keep using `ProviderBinding.Price`. Only after dispatch does `servedPricing(finalProvider, model, fastServed)` swap in `catalog.FastPriceFor` for debits, cost headers, `cost.actual_*` / `cost.fast_mode` OTel attributes, and the policy-outcome `cost_usd`. Every attempt closure re-evaluates `fastServed` before it dispatches so a failover onto a gateway or subscription is billed at the tier it was actually sent on; an Anthropic-family binding hop that flips the tier goes through [`anthropicTierAttempt`](fastmode.go), which re-emits the body rather than reusing one carrying the other tier's `speed` field — the primary, baseline-failover, and subscription-failover dispatches all wrap their prepared body in it. A fast send that Anthropic refuses for lack of fast-mode allocation (429 naming "fast mode" tokens — `providers.IsAnthropicFastModeQuotaRejection`) is re-sent once at standard speed and billed at list, so an org that opts in without fast access keeps working; an ordinary 429 stays with the failover loop. The OpenAI-chat → Anthropic cross-format path does the same inline.
+
+## Claude Code message threads (`thread` field)
+
+Claude Code may send `anthropic-beta: message-threads-*` with a top-level `thread` field: `{"type":"create"}` carries the full transcript, while `{"type":"continue","previous_message_id":…}` carries only the turns after that anchor and may omit unchanged `system`/`tools`. Routing, turn typing, session keys, handover, and cross-format emit all assume the full transcript, and Anthropic rejects `thread` for some orgs (Inference Hooks enforcement). `ProxyMessages` therefore strips a create (body field and beta token) and serves it statelessly, and answers a continue with a local 400 carrying `error.details.error_code:"thread_unsupported_request"` — the code Claude Code matches to resend that turn with full history and stay stateless on that model for the session. Never forward a continue body as a stateless request.
 
 ## Client-facing SSE keepalive
 
@@ -347,3 +359,5 @@ Proxy attaches a `providers.UpstreamHeaderObserver` to the request context. Prov
 - **Don't move provider-call logic into planner.** Planner must remain pure so EV math is provable. Anything network-touching goes in `proxy.Service`.
 - **Don't add a handover path that doesn't time out.** `Summarizer` contract says implementations MUST respect the context deadline. On timeout/error the proxy keeps the full prior history unchanged — do NOT reintroduce a silent trim-to-last-N fallback (it lobotomized switched-to models; see the handover-fallback fix).
 - **Don't cache streaming responses.** Streaming bypasses cache on purpose — captured bytes would be post-translation SSE frames, and lookup latency budget is hostile to first-token-time. If you think this should change, write a doc first.
+
+Subscription ownership and included-only limitations are documented in [`docs/SUBSCRIPTION_ROUTING.md`](../../docs/SUBSCRIPTION_ROUTING.md). Source selection owns account availability; quota snapshots never change model quality or authorize paid subscription extra usage.

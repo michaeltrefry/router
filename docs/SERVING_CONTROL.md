@@ -29,7 +29,7 @@ policyctl serving status   --target staging|prod/stable|prod/weave-internal | --
 | Command | Required inputs | Effect | Stdout on success |
 | --- | --- | --- | --- |
 | `serving publish` | `--kind`, `--manifest` | Strict-decodes the file (`DisallowUnknownFields`, no trailing JSON), runs the kind's `Validate`, and publishes the bytes immutably at `artifacts/<sha256>.json` with a `DoesNotExist` precondition plus read-back verification. Never activates anything. | `ObjectRef` — `{"uri","sha256","generation"}` |
-| `serving publish --dry-run` | `--kind`, `--manifest` | Every pre-write check a publish performs (v2 kind, strict decode, `Validate`, v2 schema) and reports the digest the bytes would publish under. Opens no registry connection and writes nothing. Any JSON encoding of the manifest is accepted — there is no canonical-byte requirement; surrounding whitespace is trimmed before digesting, exactly as `publish` stores it. | `{"kind","sha256"}` |
+| `serving publish --dry-run` | `--kind`, `--manifest` | Every pre-write check a publish performs (artifact kind, strict decode, `Validate`, supported schema) and reports the digest the bytes would publish under. Opens no registry connection and writes nothing. Any JSON encoding of the manifest is accepted — there is no canonical-byte requirement; surrounding whitespace is trimmed before digesting, exactly as `publish` stores it. | `{"kind","sha256"}` |
 | `serving publish-release` | `--candidate`, `--selection-set`, `--proposal` | The three `serving publish` calls of one release in one invocation: publishes candidate → selection set → proposal through the same create-only path, binding each manifest to the reference — including the registry-assigned generation — of the object published before it. Never activates anything. | `{"candidate","selection_set","proposal"}`, each an `ObjectRef` |
 | `serving publish-release --dry-run` | Same | Every pre-write check on all three manifests, with the references filled in at a placeholder generation, and reports the candidate's digest. Opens no registry connection and writes nothing. | `{"candidate":{"kind","sha256"},"selection_set":{"kind","validated"},"proposal":{"kind","validated"}}` |
 | `serving apply` | `--proposal <ObjectRef.json>` **or** `--proposal-sha256 <digest>` | Reads the proposal at its exact generation, checks `sha256(stored bytes) == ref.sha256`, computes the activation transition against the authoritative target state (replay detection first), validates the proposal (evidence, candidate attestation, every lane against its live worker and classifier revision, scope rules), then CASes the target's single state object, superseding the outgoing activation and applying explicit withdrawals in the same write. A proposal with `scope: rollback` — or any proposal listing `withdraw_activations` — additionally has its `source_candidate` checked against the target's retained activation history before the CAS, on the dry run as well as the commit. | `ActivationResult` — `{"snapshot":{"state","generation"},"activation","outcome":"activated"\|"superseded","replayed"}` |
@@ -66,7 +66,7 @@ destination validation calls the HTTPS origins the selection set's lanes declare
 ## Registry layout
 
 ```
-<root>/artifacts/<sha256>.json               immutable v2 manifests (candidate, selection_set, proposal)
+<root>/artifacts/<sha256>.json               immutable manifests (candidate, selection_set, proposal)
 <root>/state/<env>/<target>.json             mutable, generation-CAS'd control state, one per target
 <root>/router_serving/v1/<kind>/sha256/<sha256>.json     v1 manifests — read-only history
 <root>/runtime_state/router_serving/v1/targets/<env>/<target>/state.json   v1 state — read-only history
@@ -77,7 +77,7 @@ destination validation calls the HTTPS origins the selection set's lanes declare
 
 Objects under `artifacts/` are content-addressed by the digest of the exact bytes
 published; the object's `schema_version` selects the decoder, and `artifacts/` holds
-only v2 schemas. Objects under the legacy `router_serving/v1/...` namespaces decode
+v2 schemas plus the opt-in v3 selection schema described below. Objects under the legacy `router_serving/v1/...` namespaces decode
 forever as v1 objects, because the activation history inside every state object
 references them and content-addressed objects can never be rewritten without orphaning
 those references. Each v2 kind is a read-side family that also admits the v1 object it
@@ -139,6 +139,7 @@ revision's readiness.
 ## Manifest kinds
 
 Three immutable kinds are published; every field is required unless marked optional.
+The v2 shapes below remain supported; [selection v3](#shared-code-cohorts-and-roster-configuration-selection-v3) separates code from policy configuration.
 The exported Go contracts in `internal/policyregistry/` define the exact JSON. Digests
 are `sha256` hex of the stored bytes; `ObjectRef` is `{uri, sha256, generation}` and
 must point inside the registry root.
@@ -520,3 +521,163 @@ rejection, superseded idempotent
 retries, removed-verb rejection, and committed-output failure reconciliation. They
 do not establish live IAM, image attestation, infrastructure ownership, or
 environment-local latency; those remain authorized rollout checks.
+
+## Shared code cohorts and roster configuration (selection v3)
+
+The ordinary production code cohorts are `prod/weave-internal` and `prod/stable`.
+Staging retains its existing target. Customers and subscription profiles are roster
+configuration within a cohort. Internal and stable may run different candidates;
+all customers on a target share one worker image and physical worker/classifier
+binding. Historical revisions still serve retained conversations.
+
+`router_serving_selection_set_v3` is an opt-in schema in the existing
+`selection_set` artifact family:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | `router_serving_selection_set_v3` |
+| `target` | Existing managed target |
+| `code` | `candidate` ObjectRef plus the existing LaneBinding fields: `project`, `region`, `router`, `classifier`, `attestation` |
+| `default_policy` | Immutable PolicyObject: `uri`, `sha256`, `generation`, `schema_version` |
+| `profiles` | Explicit map of authenticated profile UUID to PolicyObject; `{}` is valid |
+
+The candidate stays `router_serving_candidate_v2`. Its `selection_policy` remains
+its immutable bootstrap/build policy. The v3 set's `default_policy` or selected
+profile policy is the **effective** roster. All policies must satisfy that
+candidate's requirements and classifier taxonomy, and every arm must exist in the
+selected worker's Go catalog. A profile cannot specify a candidate, revision or
+classifier. Invalid, unavailable or incompatible assignments fail closed; there
+is no fallback to another profile or the default roster.
+
+Admission still reads the installation/plan assignment from authenticated primary
+storage. Clients cannot select a profile through headers. The existing session and
+assertion tuple represents v3 without a database or wire migration: `release` is
+`code.candidate`, `binding` is the selection-set ObjectRef, and a named profile's
+`profile` is that same set reference. The signed profile key selects the immutable
+policy within it. Worker credential and target validation precede snapshot loading.
+
+The runtime cache keys include target, profile key and full immutable references
+(including generations). Concurrent customers cannot replace each other's policy.
+Eviction reloads the admitted reference, rather than a newer head. Managed roster
+discovery uses the request snapshot; the legacy global TTL source is not used.
+Policy SHA/schema/roster attribution comes from the effective policy, while release
+attribution continues to name the shared candidate.
+
+### Promotion and independent roster rollback
+
+Candidate and proposal v2, control state v1, assertion v1, worker validation and
+classifier wire contracts remain unchanged. `publish-release` fills `code.candidate`
+for a v3 set, leaving the policy references untouched. For a roster-only update,
+reuse the already-published candidate and publish only the set and proposal.
+
+| Proposal scope | V3 contract |
+| --- | --- |
+| `roster` | Change `default_policy`; preserve profiles and the exact code candidate/binding. `source_candidate` names that shared code candidate. |
+| `profile` | Register or change only `profile_key`'s policy; preserve default, all other profiles and exact code candidate/binding. `source_candidate` names shared code. |
+| `router` | Move all customers together to the source image/provenance and one new worker revision; retain effective policies, requirements and classifier. |
+| `classifier` | Reuse the worker and effective policies; validate the new classifier against every roster. |
+| `full` / `custom` | Existing forward profile-preservation rules apply; full promotion reuses the exact source candidate. |
+| `rollback` | Restore the exact previously activated selection set on the same target. This may restore code as well as configuration. |
+
+To roll back only a roster while retaining current code, publish a `roster` or
+`profile` proposal selecting the prior immutable policy. No image build or customer
+revision is required. Existing eligible conversations retain their original policy,
+classifier and worker selection across either forward promotion or rollback. New
+conversations use the current assignment. Preserve assignment generations during
+roster content updates: changing enrollment, authorization, entitlement or profile
+assignment generations deliberately triggers the existing rebind behavior.
+
+Retention remains bounded by the existing session lifecycle: 24 hours idle, seven
+days from activation supersession, then at least 15 minutes drain grace. Explicit
+withdrawals still force rebind. Preserve every policy, selection set, candidate,
+classifier artifact, physical revision and bootstrap closure referenced by eligible
+sessions, feedback attribution or the supported rollback history. Cache eviction
+is not permission to delete an artifact. This runtime performs no history garbage
+collection.
+
+### Reader gate and deployment integration
+
+V1/v2 decoding and v2 profile/candidate equality remain unchanged. New binaries can
+serve old sets. Old binaries cannot decode v3: keep writing v2 while they coexist
+on a target. Before the first v3 activation, upgrade **all** target-state readers
+(gateway and controller/policyctl), destination workers and private deployment
+normalizers/verifiers. An old stable worker may continue on v2 while internal uses
+v3, provided shared readers understand both. Keep old workers available only for
+their compatible retained selections.
+
+Returning the current selection to v2 does not permit an old binary rollback:
+retained v3 sessions, feedback, bootstrap refs and rollback history still need v3
+readers. Roll back configuration or code using compatible binaries and exact
+historical references. Never rewrite content-addressed artifacts or discard history
+to make an old reader appear compatible.
+
+The private integration PR must:
+
+1. Pin this public runtime and upgrade the gateway, workers, controller/policyctl
+   before enabling v3 writes. Preserve candidate build attestations, invocation-time
+   verified internal candidate selection and manual stable promotion without rebuild.
+2. Extend selection normalization, candidate composition, roster promotion and
+   publication to v3. In v3 roster/profile proposals, use the existing shared code
+   candidate as `source_candidate`; read effective policies from the set.
+3. Bind app capabilities to immutable metadata for the actual shared code candidate.
+   Roster changes reuse image capabilities. Verify every effective policy, classifier
+   compatibility, revision readiness/identity and gateway traffic. Retain the Cloud
+   Run controller execution evidence; no new executor receipt is assumed.
+4. Configure the internal/stable shared worker topology and retain historical
+   revisions and artifacts through session and rollback windows. Validate customer
+   isolation, retained/new conversations and independent roster rollback during
+   controlled rollout acceptance.
+5. Retire legacy resources only after proving caller migration and retention/rollback
+   safety. This public runtime merge does not activate the private deployment.
+
+### Why the selection pointer and controller remain
+
+Cloud Run traffic cutover does not provide authenticated roster assignment,
+per-conversation policy/classifier retention, exact serving attribution or atomic
+configuration rollback. Keep the selection-set CAS, immutable activation history,
+signed admission, exact revision forwarding and private destination validation.
+V3 removes per-profile candidate/binding duplication from new configuration; it
+retains legacy readers and historical profile bindings for sessions and rollback.
+No app deployment-time prerequisite gate or routine production live-request test
+is introduced. Implementation tests are separate from live rollout acceptance.
+## Internal production plan tests
+
+`ROUTER_TEST_PLANS_ENABLED` defaults to false. It enables internal launch
+preparation on managed workers with billing and test-grant admission on production
+gateways. Roll out assertion v2 readers to all retained stable workers before
+enabling either writer. Ordinary admissions continue using v1 with no test scope;
+old strict readers reject v2. Enabling this setting is an operational action,
+separate from implementing or validating the feature.
+
+Internal tools require the existing `/internal/v1` shared-token authentication.
+They list eligible personal subjects, preview an exact selection, prepare a
+confirmed one-hour grant, and revoke a grant. Eligibility requires a complete,
+active, internally enrolled credential subject, installation access, an existing
+personal routing key, and an enabled positive isolated test budget. Budget
+provisioning/funding is an explicitly authorized administrative action; preparation
+creates only the short-lived grant and never changes entitlements or issues keys.
+
+Stable, Max and Boost are typed test selectors, separate from subscription plans.
+Every test targets `prod/stable`; enrollment authorizes access without projecting
+the ordinary internal lane. Max/Boost reuse their server-owned profile keys.
+Preparation re-resolves the preview, and each admission checks the grant digest,
+current eligibility, single bound session, expiry/revocation and exact retained
+activation/profile/policy. There is no fallback to a current head.
+
+`X-Weave-Test-Grant` and `X-Weave-Test-Session` are consumed at the gateway and
+removed from the worker hop. The gateway also removes provider credentials and
+client email attribution; only the signed v2 test scope selects identity, plan,
+session and billing subject. Workers verify it before email/subscriber resolution
+and authenticate without provider-secret lookup. `/v1/test-plan/validate` loads the
+exact worker snapshot without inference and returns the admitted scope and tuple.
+
+Test inference is prepaid-only, uses `internal_test_budgets` and
+`internal_test_credit_ledger`, and meters the authenticating key's spend atomically.
+Missing or disabled test funding fails closed. Customer balances, allowance,
+linked subscriptions, BYOK, overrides and autopay cannot fund tests. Settlement
+of already admitted work remains possible after disabling the budget. This path
+tests routing and model eligibility; subscriber included-allowance enforcement
+remains owned by the ordinary subscriber tests.
+
+The synthetic database check lives in `scripts/internal_test_plan_check` and
+requires `ROUTER_TEST_DATABASE_URL` naming a disposable loopback database.

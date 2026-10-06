@@ -28,6 +28,7 @@ func TestEscalationOverrideValidation(t *testing.T) {
 		`{"escalation_active_classifier":"unknown"}`,
 		`{"escalation_shadow_classifier":"switchyard_llm_v1"}`,
 		`{"escalation_active_classifier":"xgb","escalation_shadow_classifier":"xgb"}`,
+		`{"escalation_active_classifier":"llm_escalation","escalation_shadow_classifier":"switchyard_llm_v1"}`,
 		`{"escalation_cadence":2}`,
 		`{"escalation_cadence":6}`,
 		`{"escalation_epoch":-1}`,
@@ -36,5 +37,7 @@ func TestEscalationOverrideValidation(t *testing.T) {
 		require.Error(t, err, raw)
 	}
 	_, err := flags.ParseOverrides([]byte(`{"escalation_active_classifier":"switchyard_llm_v1","escalation_shadow_classifier":"xgb","escalation_cadence":5,"escalation_epoch":1}`))
+	require.NoError(t, err)
+	_, err = flags.ParseOverrides([]byte(`{"escalation_active_classifier":"llm_escalation","escalation_shadow_classifier":"xgb","escalation_cadence":5,"escalation_epoch":1}`))
 	require.NoError(t, err)
 }

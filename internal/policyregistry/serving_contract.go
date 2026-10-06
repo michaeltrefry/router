@@ -519,7 +519,7 @@ func DecodeServingObject(payload []byte, root string, kind ServingKind, ref Obje
 	if err != nil {
 		return nil, err
 	}
-	if isServingV2Manifest(manifest) != isServingArtifactURI(ref.URI, root) {
+	if isServingArtifactManifest(manifest) != isServingArtifactURI(ref.URI, root) {
 		return nil, errors.New("serving object schema does not belong to its storage layout")
 	}
 	return manifest, nil

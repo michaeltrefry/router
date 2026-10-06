@@ -3,6 +3,7 @@ package subscription_enrollment_check_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 	"weave-os/router/internal/auth"
 	"weave-os/router/internal/postgres"
 	"weave-os/router/internal/sqlc"
+	"weave-os/router/internal/subscriptions"
 )
 
 func TestClaudeLoginReconnectsThroughAPIAndPostgres(t *testing.T) {
@@ -55,6 +57,10 @@ func TestClaudeLoginReconnectsThroughAPIAndPostgres(t *testing.T) {
 	require.NoError(t, queries.InsertCredentialSubjectInstallation(ctx, sqlc.InsertCredentialSubjectInstallationParams{
 		SubjectID: subject.ID, InstallationID: installation.ID,
 	}))
+	_, err = tx.Exec(ctx, "UPDATE router.credential_subject_installations SET access_enabled = TRUE WHERE subject_id = $1 AND installation_id = $2", subject.ID, installation.ID)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, "UPDATE router.credential_subjects SET projection_complete = TRUE WHERE id = $1", subject.ID)
+	require.NoError(t, err)
 	keys := map[string]*auth.APIKey{}
 	for _, token := range []string{"rk_fixture_first", "rk_fixture_rotated"} {
 		key, createErr := queries.InsertPersonalRoutingKey(ctx, sqlc.InsertPersonalRoutingKeyParams{
@@ -62,7 +68,7 @@ func TestClaudeLoginReconnectsThroughAPIAndPostgres(t *testing.T) {
 			KeyPrefix: "rk_fixture", KeySuffix: "test", KeyHash: uuid.NewString(),
 		})
 		require.NoError(t, createErr)
-		keys[token] = &auth.APIKey{ID: key.ID.String(), CredentialSubjectID: subject.ID.String()}
+		keys[token] = &auth.APIKey{ID: key.ID.String(), InstallationID: installation.ID.String(), CredentialSubjectID: subject.ID.String()}
 	}
 	owner := auth.SubscriptionOwnerForKey(keys["rk_fixture_first"])
 	repo := postgres.NewSubscriptionAccountRepo(tx)
@@ -73,7 +79,7 @@ func TestClaudeLoginReconnectsThroughAPIAndPostgres(t *testing.T) {
 	encryptor, err := auth.NewTinkEncryptor(keysetJSON.String())
 	require.NoError(t, err)
 	svc := auth.NewService(nil, nil, nil, nil, auth.NoOpAPIKeyCache{}, nil, time.Now).
-		WithEncryptor(encryptor).WithSubscriptionAccounts(repo)
+		WithEncryptor(encryptor).WithSubscriptionAccounts(repo).WithCredentialSubjectLookup(enrollmentSubjectLookup{queries})
 
 	const accountA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	const accountB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -82,6 +88,10 @@ func TestClaudeLoginReconnectsThroughAPIAndPostgres(t *testing.T) {
 	var exchanges atomic.Int32
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
+	router.POST("/oauth/codex", func(c *gin.Context) {
+		payload := base64.RawURLEncoding.EncodeToString([]byte(`{"https://api.openai.com/auth":{"chatgpt_account_id":"chatgpt-fixture","chatgpt_user_id":"codex-user-fixture"}}`))
+		c.JSON(http.StatusOK, gin.H{"access_token": "eyJhbGciOiJSUzI1NiJ9." + payload + ".sig", "refresh_token": c.PostForm("refresh_token")})
+	})
 	router.POST("/oauth/token", func(c *gin.Context) {
 		attempt := exchanges.Add(1)
 		accountID := accountA
@@ -129,6 +139,7 @@ func TestClaudeLoginReconnectsThroughAPIAndPostgres(t *testing.T) {
 		router.ServeHTTP(w, r)
 	}))
 	defer server.Close()
+	svc.WithCodexEnrollmentVerifier(subscriptions.NewOAuthClient(server.Client(), server.URL+"/oauth/codex", "", nil))
 
 	root, err := filepath.Abs("../..")
 	require.NoError(t, err)
@@ -265,4 +276,14 @@ func apiRequest(t *testing.T, handler http.Handler, method, accountID string, bo
 		require.False(t, bytes.Contains(response.Body.Bytes(), []byte(forbidden)), "API response must not expose credentials")
 	}
 	return response.Body.Bytes()
+}
+
+type enrollmentSubjectLookup struct{ queries *sqlc.Queries }
+
+func (lookup enrollmentSubjectLookup) GetCredentialSubject(ctx context.Context, subjectID, installationID string) (*auth.CredentialSubject, error) {
+	projection, err := lookup.queries.GetServingSubjectForAdmission(ctx, sqlc.GetServingSubjectForAdmissionParams{SubjectID: uuid.MustParse(subjectID), InstallationID: uuid.MustParse(installationID)})
+	if err != nil {
+		return nil, err
+	}
+	return &auth.CredentialSubject{ID: projection.RouterCredentialSubject.ID.String(), ProjectionComplete: projection.RouterCredentialSubject.ProjectionComplete, AccessEnabled: projection.AccessEnabled, EnrollmentGeneration: projection.RouterCredentialSubject.EnrollmentGeneration}, nil
 }

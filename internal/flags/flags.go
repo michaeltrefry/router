@@ -156,8 +156,8 @@ const RegistryVersion = 22
 // are already per-installation columns on model_router_installations, or are
 // consumed at construction time and have no per-request read site to override.
 var Registry = []Definition{
-	{Key: KeyEscalationActiveClassifier, Kind: KindString, Description: "Active escalation classifier: none, xgb, or switchyard_llm_v1. Absent preserves legacy XGB flags.", OrgOverridable: true},
-	{Key: KeyEscalationShadowClassifier, Kind: KindString, Description: "Independent shadow escalation classifier: none, xgb, or switchyard_llm_v1.", OrgOverridable: true},
+	{Key: KeyEscalationActiveClassifier, Kind: KindString, Description: "Active escalation classifier: none, xgb, switchyard_llm_v1, or llm_escalation. Absent preserves legacy XGB flags.", OrgOverridable: true},
+	{Key: KeyEscalationShadowClassifier, Kind: KindString, Description: "Independent shadow escalation classifier: none, xgb, switchyard_llm_v1, or llm_escalation.", OrgOverridable: true},
 	{Key: KeyEscalationCadence, Kind: KindInt, Description: "Completed turns between LLM checkpoints: 3, 4, or 5. Default 3.", OrgOverridable: true},
 	{Key: KeyEscalationEpoch, Kind: KindInt, Description: "Escalation configuration generation; changes invalidate pending judgments.", OrgOverridable: true},
 	{Key: KeyEscalationXGBoostEnabled, Kind: KindBool, Description: "Route to the maximum complexity class on an XGBoost escalation checkpoint. Off by default.", OrgOverridable: true},
@@ -377,7 +377,7 @@ var Registry = []Definition{
 		Key:            KeyRescuedFailureArmDemotion,
 		EnvVar:         "ROUTER_RESCUED_FAILURE_ARM_DEMOTION",
 		Kind:           KindBool,
-		Description:    "Withdraw the primary model from a session's automatic selection after its attempt failed pre-commit and a same-cluster sibling rescue ran. Off by default.",
+		Description:    "Withdraw the primary model from a session's automatic selection after an upstream response-header timeout, whether or not a model rescue ran, or after another pre-commit failure followed by a same-cluster sibling rescue. Off by default.",
 		OrgOverridable: true,
 	},
 	{

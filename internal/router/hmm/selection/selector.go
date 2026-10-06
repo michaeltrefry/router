@@ -14,6 +14,7 @@ import (
 	"weave-os/router/internal/router/hmm"
 	"weave-os/router/internal/router/hmm/rosterdata"
 	"weave-os/router/internal/router/policy"
+	"weave-os/router/internal/router/taskdomain"
 )
 
 // ErrNoEligibleArm is returned when no ranked group holds an eligible arm.
@@ -25,6 +26,11 @@ var ErrClassifierTaxonomyMismatch = errors.New("classifier taxonomy does not mat
 
 // Selector returns the deterministic arm selector backed by roster.
 func Selector(roster *rosterdata.Roster) policy.ArmSelector {
+	return SelectorWithDomainEvidence(roster, nil, "")
+}
+
+// SelectorWithDomainEvidence binds task scoring to one validated serving roster.
+func SelectorWithDomainEvidence(roster *rosterdata.Roster, evidence *DomainEvidence, evidenceSHA256 string) policy.ArmSelector {
 	return func(ctx context.Context, input policy.SelectionInput) (policy.SelectionPick, error) {
 		log := observability.FromContext(ctx)
 		if input.RosterSHA256 != "" && input.RosterSHA256 != roster.SHA256 {
@@ -57,15 +63,18 @@ func Selector(roster *rosterdata.Roster) policy.ArmSelector {
 		for _, rosterID := range input.CandidateRosterIDs {
 			candidates[rosterID] = struct{}{}
 		}
-		pick, scoresByGroup, scoreComponentsByGroup, ordersByGroup, ok := SelectGroupsWithPreferences(
+		var profile DomainProfile
+		if input.TaskDomain != nil && input.TaskDomain.Status == taskdomain.Ready && input.TaskDomain.EvidenceSHA256 == evidenceSHA256 {
+			profile = input.TaskDomain.Profile
+		}
+		pick, scoresByGroup, scoreComponentsByGroup, ordersByGroup, ok := SelectGroupsWithDomainPreferences(
 			roster,
 			groups,
 			input.Harness,
 			candidates,
 			input.QualityBias,
 			input.PreferredModels,
-			input.SubscriptionStatePreferredModels,
-			input.SubsidizedModelCostFactor,
+			evidence, profile,
 		)
 		if !ok {
 			log.Warn("HMM selection found no eligible arm in any ranked group",
@@ -101,20 +110,19 @@ func Selector(roster *rosterdata.Roster) policy.ArmSelector {
 		return policy.SelectionPick{
 			Group: pick.Group, Arm: pick.Arm, ArmScoresByGroup: scoresByGroup, RankedFallback: fallback, RosterSHA256: roster.SHA256,
 			Trace: policy.SelectionTrace{
-				ClassifierRanking:                append([]string(nil), rankedGroups...),
-				Harness:                          input.Harness,
-				ForcedGroup:                      input.ForcedGroup,
-				CandidateRosterIDs:               append([]string(nil), input.CandidateRosterIDs...),
-				QualityBias:                      input.QualityBias,
-				PreferredModels:                  append([]string(nil), input.PreferredModels...),
-				SubscriptionStatePreferredModels: append([]string(nil), input.SubscriptionStatePreferredModels...),
-				SubsidizedModelCostFactor:        cloneModelFactors(input.SubsidizedModelCostFactor),
-				EffectiveOrders:                  ordersByGroup,
-				ScoresByGroup:                    scoresByGroup,
-				ScoreComponentsByGroup:           scoreComponentsByGroup,
-				SelectedGroup:                    pick.Group,
-				SelectedArm:                      pick.Arm,
-				FallbackDepth:                    pick.FallbackDepth,
+				TaskDomain:             input.TaskDomain,
+				ClassifierRanking:      append([]string(nil), rankedGroups...),
+				Harness:                input.Harness,
+				ForcedGroup:            input.ForcedGroup,
+				CandidateRosterIDs:     append([]string(nil), input.CandidateRosterIDs...),
+				QualityBias:            input.QualityBias,
+				PreferredModels:        append([]string(nil), input.PreferredModels...),
+				EffectiveOrders:        ordersByGroup,
+				ScoresByGroup:          scoresByGroup,
+				ScoreComponentsByGroup: scoreComponentsByGroup,
+				SelectedGroup:          pick.Group,
+				SelectedArm:            pick.Arm,
+				FallbackDepth:          pick.FallbackDepth,
 			},
 		}, nil
 	}
@@ -154,17 +162,6 @@ func unscorableGroups(roster *rosterdata.Roster, input policy.SelectionInput) ([
 		}
 	}
 	return eligible, nil
-}
-
-func cloneModelFactors(factors map[string]float64) map[string]float64 {
-	if len(factors) == 0 {
-		return nil
-	}
-	cloned := make(map[string]float64, len(factors))
-	for model, factor := range factors {
-		cloned[model] = factor
-	}
-	return cloned
 }
 
 func classifierGroups(input policy.SelectionInput) ([]string, error) {

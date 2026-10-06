@@ -12,6 +12,7 @@ const (
 	EscalationClassifierNone       EscalationClassifier = "none"
 	EscalationClassifierXGB        EscalationClassifier = "xgb"
 	EscalationClassifierSwitchyard EscalationClassifier = "switchyard_llm_v1"
+	EscalationClassifierLLM        EscalationClassifier = "llm_escalation"
 )
 
 // EscalationConfig is one request's effective, immutable classifier selection.
@@ -44,7 +45,7 @@ func EscalationFromContext(ctx context.Context) EscalationConfig {
 
 func validEscalationClassifier(classifier EscalationClassifier) bool {
 	switch classifier {
-	case EscalationClassifierNone, EscalationClassifierXGB, EscalationClassifierSwitchyard:
+	case EscalationClassifierNone, EscalationClassifierXGB, EscalationClassifierSwitchyard, EscalationClassifierLLM:
 		return true
 	default:
 		return false
@@ -71,5 +72,13 @@ func validateEscalationOverrides(overrides Overrides) error {
 	if explicit && hasShadow && active == shadow && EscalationClassifier(active) != EscalationClassifierNone {
 		return fmt.Errorf("%w: active and shadow classifiers must differ", ErrInvalidValue)
 	}
+	if explicit && hasShadow && IsLLMEscalationClassifier(EscalationClassifier(active)) && IsLLMEscalationClassifier(EscalationClassifier(shadow)) {
+		return fmt.Errorf("%w: only one LLM escalation classifier may be selected", ErrInvalidValue)
+	}
 	return nil
+}
+
+// IsLLMEscalationClassifier identifies selectors that share the asynchronous judge slot.
+func IsLLMEscalationClassifier(classifier EscalationClassifier) bool {
+	return classifier == EscalationClassifierSwitchyard || classifier == EscalationClassifierLLM
 }

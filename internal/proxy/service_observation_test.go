@@ -238,7 +238,7 @@ func TestPolicyShadowComparisonCollectsUsageBypassRoute(t *testing.T) {
 		map[string]providers.Client{providers.ProviderAnthropic: &fakeProvider{}},
 		nil, false, nil, nil, false,
 		providers.ProviderAnthropic, bypassScorerPickMdl, telem,
-	).WithSubscriptionAwareRouting(observer, 0.05, 2.0).
+	).WithUsageObserver(observer).
 		WithPolicyStrategy(policy.StrategySpec{Strategy: shadowStrategy, Router: shadowRouter})
 
 	ctx := bypassCtx(0.80)
@@ -383,7 +383,7 @@ func TestProxyMessages_RecordsPolicyObservation(t *testing.T) {
 	assert.Equal(t, "policy-sha", row.SelectionPolicySHA256)
 	require.NotNil(t, row.SelectionHeadGeneration)
 	assert.Equal(t, int64(42), *row.SelectionHeadGeneration)
-	require.JSONEq(t, `{"candidate_roster_ids":["anthropic/claude-haiku-4-5"],"classifier_ranking":["high","medium","maximum","low"],"effective_orders":{"high":["anthropic/claude-haiku-4-5"]},"fallback_depth":0,"harness":"claude-code","selected_arm":"anthropic/claude-haiku-4-5","selected_group":"high"}`, string(row.SelectionTrace))
+	require.JSONEq(t, `{"candidate_roster_ids":["anthropic/claude-haiku-4-5"],"classifier_ranking":["high","medium","maximum","low"],"effective_orders":{"high":["anthropic/claude-haiku-4-5"]},"fallback_depth":0,"harness":"claude-code","selected_arm":"anthropic/claude-haiku-4-5","selected_group":"high","served_group":"high"}`, string(row.SelectionTrace))
 	assert.Equal(t, "policy_router_v1", row.SidecarSchemaVersion)
 	assert.True(t, row.TrainingAllowed)
 	assert.Equal(t, "hashed", row.CaptureMode)

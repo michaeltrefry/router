@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"syscall"
@@ -80,6 +81,14 @@ func TestClassifyTurnError(t *testing.T) {
 			assert.Equal(t, tc.want, classifyTurnError(tc.err, tc.stopReason, tc.invalidToolArgs))
 		})
 	}
+}
+
+func TestClassifyTurnErrorDistinguishesWatchdogFrameFromUpstreamStatus(t *testing.T) {
+	err := emitAnthropicSSEErrorEvent(httptest.NewRecorder(), providers.ErrUpstreamIdleTimeout)
+
+	assert.Equal(t, TurnErrorStreamStalled, classifyTurnError(err, "", 0),
+		"a router-generated 502 frame does not mean the upstream returned 502")
+	assert.Equal(t, TurnErrorUpstream5xx, classifyTurnError(&providers.UpstreamStatusError{Status: http.StatusBadGateway}, "", 0))
 }
 
 // Retryability describes a fresh replay of the same request, not the committed
