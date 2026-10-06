@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"weave-os/router/internal/auth"
@@ -218,7 +219,7 @@ func blindExperimentUtilityTurnBodies() []struct {
 	}
 }
 
-func runBlindExperimentUtilityTurn(t *testing.T, arm auth.BlindExperimentArm, body string) turnLoopResult {
+func runBlindExperimentUtilityTurn(t *testing.T, ctx context.Context, body string) turnLoopResult {
 	t.Helper()
 	routerSpy := &blindExperimentRouterSpy{err: errors.New("scorer must not run")}
 	service := NewService(routerSpy, nil, nil, false, nil, newStubPinStore(), false,
@@ -229,7 +230,7 @@ func runBlindExperimentUtilityTurn(t *testing.T, arm auth.BlindExperimentArm, bo
 	require.NoError(t, err)
 	features := envelope.RoutingFeatures(false)
 	loopResult, err := service.runTurnLoop(
-		blindExperimentContext(arm),
+		ctx,
 		envelope,
 		features,
 		"api-key",
@@ -252,7 +253,7 @@ func runBlindExperimentUtilityTurn(t *testing.T, arm auth.BlindExperimentArm, bo
 func TestBlindExperimentPassthroughOutranksUtilityHardPins(t *testing.T) {
 	for _, testCase := range blindExperimentUtilityTurnBodies() {
 		t.Run(string(testCase.turnType), func(t *testing.T) {
-			loopResult := runBlindExperimentUtilityTurn(t, auth.BlindExperimentArmPassthrough, testCase.body)
+			loopResult := runBlindExperimentUtilityTurn(t, blindExperimentContext(auth.BlindExperimentArmPassthrough), testCase.body)
 
 			require.Equal(t, testCase.turnType, loopResult.TurnType)
 			assert.True(t, loopResult.CallerModelPassthrough)
@@ -268,7 +269,28 @@ func TestBlindExperimentPassthroughOutranksUtilityHardPins(t *testing.T) {
 func TestBlindExperimentRouterOnKeepsUtilityHardPins(t *testing.T) {
 	for _, testCase := range blindExperimentUtilityTurnBodies() {
 		t.Run(string(testCase.turnType), func(t *testing.T) {
-			loopResult := runBlindExperimentUtilityTurn(t, auth.BlindExperimentArmRouterOn, testCase.body)
+			loopResult := runBlindExperimentUtilityTurn(t, blindExperimentContext(auth.BlindExperimentArmRouterOn), testCase.body)
+
+			require.Equal(t, testCase.turnType, loopResult.TurnType)
+			assert.True(t, loopResult.HardPinned)
+			assert.False(t, loopResult.CallerModelPassthrough)
+			assert.Equal(t, string(testCase.turnType)+"_hard_pin", loopResult.Decision.Reason)
+			assert.NotEqual(t, "claude-opus-4-8", loopResult.Decision.Model)
+		})
+	}
+}
+
+func TestBlindExperimentPassthroughKeepsUtilityHardPinsUnderPolicyPin(t *testing.T) {
+	ctx := router.WithPolicyPinRequest(blindExperimentContext(auth.BlindExperimentArmPassthrough), router.PolicyPinRequest{
+		Pin: router.PolicyPin{
+			ArtifactSHA256: strings.Repeat("a", 64),
+			RosterSHA256:   strings.Repeat("b", 64),
+		},
+		Authorized: true,
+	})
+	for _, testCase := range blindExperimentUtilityTurnBodies() {
+		t.Run(string(testCase.turnType), func(t *testing.T) {
+			loopResult := runBlindExperimentUtilityTurn(t, ctx, testCase.body)
 
 			require.Equal(t, testCase.turnType, loopResult.TurnType)
 			assert.True(t, loopResult.HardPinned)
