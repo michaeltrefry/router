@@ -1,11 +1,13 @@
 package observability
 
 import (
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // serviceName is what puts the "name" tag on every line. NAME is set per
@@ -16,8 +18,10 @@ func TestServiceNamePrefersNAMEThenOTELThenDefault(t *testing.T) {
 		env     map[string]string
 		expects string
 	}{
-		{"NAME wins", map[string]string{"NAME": "router", "OTEL_SERVICE_NAME": "other"}, "router"},
+		{"NAME wins", map[string]string{"NAME": "router", "OTEL_SERVICE_NAME": "other", "OTEL_RESOURCE_ATTRIBUTES": "service.name=resource-name"}, "router"},
 		{"OTEL fallback", map[string]string{"OTEL_SERVICE_NAME": "router-hmm-sidecar"}, "router-hmm-sidecar"},
+		{"OTEL service name wins over resource attribute", map[string]string{"OTEL_SERVICE_NAME": "otel-name", "OTEL_RESOURCE_ATTRIBUTES": "service.name=resource-name"}, "otel-name"},
+		{"resource attribute fallback", map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "service.name=router-resource"}, "router-resource"},
 		{"default when unset", nil, defaultServiceName},
 		{"whitespace-only is not a name", map[string]string{"NAME": "   "}, defaultServiceName},
 	}
@@ -26,12 +30,22 @@ func TestServiceNamePrefersNAMEThenOTELThenDefault(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("NAME", "")
 			t.Setenv("OTEL_SERVICE_NAME", "")
+			t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
 			assert.Equal(t, tc.expects, serviceName())
 		})
 	}
+}
+
+func TestResourceAttributesFromEnvironmentSanitizesParseErrors(t *testing.T) {
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=router,do-not-log-this-secret")
+
+	attributes, err := ResourceAttributesFromEnvironment(context.Background())
+	require.ErrorIs(t, err, errInvalidResourceAttributes)
+	assert.NotContains(t, err.Error(), "do-not-log-this-secret")
+	assert.Equal(t, "router", attributes["service.name"])
 }
 
 // buildLogger is what initLogger installs, so this fails if the service tag

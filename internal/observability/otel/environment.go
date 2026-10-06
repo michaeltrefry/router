@@ -8,9 +8,9 @@ import (
 	"net/url"
 	"strings"
 
-	"go.opentelemetry.io/otel/attribute"
-	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	"golang.org/x/net/http/httpguts"
+
+	"weave-os/router/internal/observability"
 )
 
 var errInvalidOTLPHeaders = errors.New("OTLP header environment contains invalid entries")
@@ -18,27 +18,16 @@ var errInvalidOTLPHeaders = errors.New("OTLP header environment contains invalid
 // ResourceAttributesFromEnvironment returns string resource attributes parsed
 // by the OpenTelemetry SDK, including service.name.
 func ResourceAttributesFromEnvironment(ctx context.Context) (map[string]string, error) {
-	resource, err := sdkresource.New(ctx, sdkresource.WithFromEnv())
-	attributes := make(map[string]string)
-	if resource == nil {
-		return attributes, err
-	}
-	for _, resourceAttribute := range resource.Attributes() {
-		if resourceAttribute.Value.Type() != attribute.STRING {
-			continue
-		}
-		attributes[string(resourceAttribute.Key)] = resourceAttribute.Value.AsString()
-	}
-	return attributes, err
+	return observability.ResourceAttributesFromEnvironment(ctx)
 }
 
 // ResolveServiceName chooses the explicit service name, then the resource
 // attribute, then the caller's default.
 func ResolveServiceName(explicitName string, resourceAttributes map[string]string, fallback string) string {
-	if explicitName != "" {
-		return explicitName
+	if serviceName := strings.TrimSpace(explicitName); serviceName != "" {
+		return serviceName
 	}
-	if resourceName := resourceAttributes["service.name"]; resourceName != "" {
+	if resourceName := strings.TrimSpace(resourceAttributes["service.name"]); resourceName != "" {
 		return resourceName
 	}
 	return fallback

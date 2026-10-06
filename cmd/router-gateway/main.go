@@ -43,7 +43,11 @@ func run() error {
 		if resourceErr != nil {
 			observability.FromContext(ctx).Warn("Some OpenTelemetry resource attributes were invalid; continuing with valid attributes", "err", resourceErr)
 		}
-		serviceName := otel.ResolveServiceName(config.GetOr("OTEL_SERVICE_NAME", ""), resourceAttributes, "router-gateway")
+		explicitServiceName := strings.TrimSpace(config.GetOr("NAME", ""))
+		if explicitServiceName == "" {
+			explicitServiceName = strings.TrimSpace(config.GetOr("OTEL_SERVICE_NAME", ""))
+		}
+		serviceName := otel.ResolveServiceName(explicitServiceName, resourceAttributes, "router-gateway")
 		delete(resourceAttributes, "service.name")
 		resourceAttributes["router.deployment_mode"] = "managed"
 		exporterHeaders, headersErr := otel.ParseOTLPHeaders(config.GetOr("OTEL_EXPORTER_OTLP_HEADERS", ""))

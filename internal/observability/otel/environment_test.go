@@ -20,11 +20,12 @@ func TestResourceAttributesFromEnvironment(t *testing.T) {
 }
 
 func TestResolveServiceName(t *testing.T) {
-	resourceAttributes := map[string]string{"service.name": "resource-name"}
+	resourceAttributes := map[string]string{"service.name": " resource-name "}
 
 	assert.Equal(t, "explicit-name", ResolveServiceName("explicit-name", resourceAttributes, "default-name"))
 	assert.Equal(t, "resource-name", ResolveServiceName("", resourceAttributes, "default-name"))
 	assert.Equal(t, "default-name", ResolveServiceName("", nil, "default-name"))
+	assert.Equal(t, "default-name", ResolveServiceName("  ", nil, "default-name"))
 }
 
 func TestParseOTLPHeaders(t *testing.T) {

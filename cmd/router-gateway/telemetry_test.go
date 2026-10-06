@@ -35,6 +35,7 @@ func TestGatewayTelemetryExport(t *testing.T) {
 	defer collector.Close()
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", collector.URL)
 	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "Authorization=Bearer%20synthetic")
+	t.Setenv("NAME", "")
 	t.Setenv("OTEL_SERVICE_NAME", "")
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.region=us%2Ccentral,service.name=router-gateway-from-resource")
 	resourceAttributes, err := otel.ResourceAttributesFromEnvironment(context.Background())

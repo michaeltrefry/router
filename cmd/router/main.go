@@ -1836,7 +1836,11 @@ func buildOtelEmitter(ctx context.Context, deploymentMode string) (*otel.Emitter
 	if resourceErr != nil {
 		logger.Warn("Some OpenTelemetry resource attributes were invalid; continuing with valid attributes", "err", resourceErr)
 	}
-	serviceName := otel.ResolveServiceName(config.GetOr("OTEL_SERVICE_NAME", ""), resourceAttrs, "router")
+	explicitServiceName := strings.TrimSpace(config.GetOr("NAME", ""))
+	if explicitServiceName == "" {
+		explicitServiceName = strings.TrimSpace(config.GetOr("OTEL_SERVICE_NAME", ""))
+	}
+	serviceName := otel.ResolveServiceName(explicitServiceName, resourceAttrs, "router")
 	delete(resourceAttrs, "service.name")
 	resourceAttrs["router.deployment_mode"] = deploymentMode
 	exporterHeaders, headersErr := otel.ParseOTLPHeaders(config.GetOr("OTEL_EXPORTER_OTLP_HEADERS", ""))
