@@ -33,8 +33,11 @@ func TestUnregisterLocalModels_RemovesOnlyLocalRows(t *testing.T) {
 	require.NoError(t, catalog.RegisterLocalModels(catalog.Model{ID: "local-unreg", Providers: []catalog.ProviderBinding{{Provider: "local_x"}}}))
 	_, found := catalog.ByID("local-unreg")
 	require.True(t, found)
+	assert.True(t, catalog.IsLocal("local-unreg"))
+	assert.False(t, catalog.IsLocal("claude-sonnet-4-6"), "a static row is never local")
 
 	catalog.UnregisterLocalModels("local-unreg", "claude-sonnet-4-6")
+	assert.False(t, catalog.IsLocal("local-unreg"), "an unregistered row stops being local")
 
 	_, found = catalog.ByID("local-unreg")
 	assert.False(t, found, "the local row leaves the ID index")

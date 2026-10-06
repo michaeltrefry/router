@@ -211,6 +211,11 @@ gateway-exclusive: Claude and Codex subscriptions and other providers stay
 enrolled. Any invalid entry (missing field, unset key variable, duplicate or
 shadowed `id`, unknown field) fails boot with a named error.
 
+Local models appear under one "local" group on the dashboard models page;
+unchecking one adds its `id` to the installation's excluded models. Turns they
+serve record $0 actual cost, the routing marker reads `→ <id> (local)`, and the
+decision log carries `decision_provider=local_<id>`.
+
 #### Turn-type routing
 
 An optional top-level `turn_routing` block serves selected turn types on one

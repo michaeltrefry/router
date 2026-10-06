@@ -694,10 +694,10 @@ func routingMarkerFor(res turnLoopResult) string {
 	// A dropped force-model pin contradicts an ack the user already saw, so it
 	// prints even when the automatic fallback is a normally hidden hard pin.
 	if res.ForcedPinDropped {
-		parts := []string{"✦ **Weave Router** → " + decision.Model, markerReasonForcedPinDropped}
+		parts := []string{routingMarkerPrefix + markerModelLabel(decision), markerReasonForcedPinDropped}
 		if res.ForcedPinModel != "" {
 			parts = []string{
-				"✦ **Weave Router** → " + decision.Model,
+				routingMarkerPrefix + markerModelLabel(decision),
 				fmt.Sprintf("%s (%s)", markerReasonForcedPinDropped, res.ForcedPinModel),
 			}
 		}
@@ -712,7 +712,7 @@ func routingMarkerFor(res turnLoopResult) string {
 	}
 	// A shadow checkpoint is news even when ordinary routing keeps the same model.
 	if res.EscalationShadowMarked {
-		return routingMarkerPrefix + decision.Model + " · " + markerReasonShadowEscalation + "\n\n"
+		return routingMarkerPrefix + markerModelLabel(decision) + " · " + markerReasonShadowEscalation + "\n\n"
 	}
 	// Same model as last turn: the user already knows. Empty prior model means
 	// the first turn of this session (or role), which still shows. Effort changes
@@ -729,11 +729,21 @@ func routingMarkerFor(res turnLoopResult) string {
 			return marker + "\n\n"
 		}
 	}
-	parts := []string{"✦ **Weave Router** → " + decision.Model}
+	parts := []string{routingMarkerPrefix + markerModelLabel(decision)}
 	if reason := routingReasonShort(res); reason != "" {
 		parts = append(parts, reason)
 	}
 	return strings.Join(parts, " · ") + "\n\n"
+}
+
+// markerModelLabel names the decision's model in the routing marker, tagging a
+// self-hosted model so the user can tell a local turn from a cloud model that
+// shares its name.
+func markerModelLabel(decision router.Decision) string {
+	if providers.IsLocalProvider(decision.Provider) {
+		return decision.Model + " (local)"
+	}
+	return decision.Model
 }
 
 type modelSelectionComplexity string

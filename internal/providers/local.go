@@ -20,6 +20,12 @@ func LocalProviderName(modelID string) string {
 	return LocalProviderPrefix + modelID
 }
 
+// IsLocalProvider reports whether name is a provider minted for a self-hosted
+// model.
+func IsLocalProvider(name string) bool {
+	return strings.HasPrefix(name, LocalProviderPrefix)
+}
+
 // RegisterLocalProvider adds an OpenAI-compatible local provider to the
 // provider maps. Boot-time only: the maps are read without locking once the
 // server is serving.
