@@ -6211,21 +6211,52 @@ write_claude_settings() {
     custom_headers="$custom_headers"$'\n'"X-Weave-User-Name: $user_name"
   fi
   custom_headers="$custom_headers"$'\n'"X-App: claude-code"
+  local policy_api_url="${WEAVE_POLICY_API_URL:-}"
+  local policy_hook_file="$settings_dir/weave-router-policy.js"
+  if [ -z "$policy_api_url" ] && [ -f "$settings_file" ]; then
+    policy_api_url="$(jq -r '.env.WEAVE_POLICY_API_URL // empty' "$settings_file" 2>/dev/null || true)"
+    if [ "$base_url" != "$HOSTED_BASE_URL" ] && [ "$policy_api_url" = "https://app.workweave.ai/api/weave_router/organization-policy" ]; then
+      policy_api_url=""
+    fi
+  fi
+  if [ -z "$policy_api_url" ] && [ "$base_url" = "$HOSTED_BASE_URL" ]; then
+    policy_api_url="https://app.workweave.ai/api/weave_router/organization-policy"
+  fi
+  local policy_hook_command=""
+  local policy_node="$(command -v node || true)"
+  local policy_hook_enabled="true"
+  if [ -n "$policy_node" ]; then
+    printf -v policy_hook_command '%q %q' "$policy_node" "$policy_hook_file"
+  else
+    policy_hook_enabled="false"
+    warn "Node.js is unavailable; skipping the organization policy hook."
+  fi
+  refuse_if_symlink "$policy_hook_file"
+  if [ -e "$policy_hook_file" ] && ! grep -Fq 'weave-router managed organization policy hook' "$policy_hook_file"; then
+    warn "Leaving user-owned policy hook at $policy_hook_file untouched."
+    policy_hook_enabled="false"
+  fi
+  if [ "$policy_hook_enabled" != "true" ]; then
+    policy_api_url=""
+  fi
+  printf -v policy_hook_file_command '%q' "$policy_hook_file"
 
   # Setting ANTHROPIC_BASE_URL makes Claude Code treat us as non-first-party.
   # Force tool-search deferral to match first-party Claude Code; "auto" can inline
   # every tool schema when the custom endpoint advertises a 200K context window.
   if [ "$scope" = "project" ] && [ -z "$install_dir" ]; then
-    jq -n --arg url "$base_url" --arg sl "$statusline_path_for_settings" --arg statusline_install "$statusline_install" '{
-      env: { ANTHROPIC_BASE_URL: $url, ENABLE_TOOL_SEARCH: "true" },
+    jq -n --arg url "$base_url" --arg sl "$statusline_path_for_settings" --arg statusline_install "$statusline_install" --arg policy_api_url "$policy_api_url" --arg policy_hook_file "$policy_hook_file" --arg policy_hook_command "$policy_hook_command" --arg policy_hook_enabled "$policy_hook_enabled" '{
+      env: ({ ANTHROPIC_BASE_URL: $url, ENABLE_TOOL_SEARCH: "true" } + (if ($policy_api_url | length) > 0 then {WEAVE_POLICY_API_URL: $policy_api_url} else {} end)),
+      hooks: (if $policy_hook_enabled == "true" then {SessionStart: [{hooks: [{type: "command", command: $policy_hook_command}]}], SubagentStart: [{hooks: [{type: "command", command: $policy_hook_command}]}]} else {} end),
       attribution: {
         commit: "Co-Authored-By: Weave Router <router@weaveos.com>",
         pr: "🤖 Generated with [Weave Router](https://router.workweave.ai)"
       }
     } + (if $statusline_install == "true" then {statusLine: { type: "command", command: $sl }} else {} end)' >"$tmp_patch"
   else
-    jq -n --arg url "$base_url" --arg header "$custom_headers" --arg sl "$statusline_path_for_settings" --arg statusline_install "$statusline_install" '{
-      env: { ANTHROPIC_BASE_URL: $url, ANTHROPIC_CUSTOM_HEADERS: $header, ENABLE_TOOL_SEARCH: "true" },
+    jq -n --arg url "$base_url" --arg header "$custom_headers" --arg sl "$statusline_path_for_settings" --arg statusline_install "$statusline_install" --arg policy_api_url "$policy_api_url" --arg policy_hook_file "$policy_hook_file" --arg policy_hook_command "$policy_hook_command" --arg policy_hook_enabled "$policy_hook_enabled" '{
+      env: ({ ANTHROPIC_BASE_URL: $url, ANTHROPIC_CUSTOM_HEADERS: $header, ENABLE_TOOL_SEARCH: "true" } + (if ($policy_api_url | length) > 0 then {WEAVE_POLICY_API_URL: $policy_api_url} else {} end)),
+      hooks: (if $policy_hook_enabled == "true" then {SessionStart: [{hooks: [{type: "command", command: $policy_hook_command}]}], SubagentStart: [{hooks: [{type: "command", command: $policy_hook_command}]}]} else {} end),
       attribution: {
         commit: "Co-Authored-By: Weave Router <router@weaveos.com>",
         pr: "🤖 Generated with [Weave Router](https://router.workweave.ai)"
@@ -6242,17 +6273,61 @@ write_claude_settings() {
   # installs that used them for router auth.
   local merged
   if [ -f "$settings_file" ]; then
-    merged="$(jq -s '.[0] as $a | .[1] as $b
+    merged="$(jq -s --arg policy_hook_enabled "$policy_hook_enabled" --arg policy_hook_command "$policy_hook_command" --arg policy_hook_file "$policy_hook_file" --arg policy_hook_file_command "$policy_hook_file_command" '.[0] as $a | .[1] as $b
       | $a
-      | .env = (($a.env // {} | del(.ANTHROPIC_AUTH_TOKEN, .ANTHROPIC_CUSTOM_HEADERS)) + ($b.env // {}))
+      | .env = (($a.env // {} | del(.ANTHROPIC_AUTH_TOKEN, .ANTHROPIC_CUSTOM_HEADERS, .WEAVE_POLICY_API_URL)) + ($b.env // {}))
       | (if (.env | length) == 0 then del(.env) else . end)
       | del(.apiKeyHelper)
+      | .hooks = (.hooks // {})
+      | if $policy_hook_enabled == "true" then
+          .hooks.SessionStart = ((.hooks.SessionStart // []) | map(if (.hooks | type) == "array" then .hooks |= map(select((.command // "") != $policy_hook_command and (.command // "") != $policy_hook_file and (((.command // "") | endswith(" " + $policy_hook_file_command)) | not))) else . end) | map(select((.hooks | type) != "array" or (.hooks | length) > 0))) + $b.hooks.SessionStart
+          | .hooks.SubagentStart = ((.hooks.SubagentStart // []) | map(if (.hooks | type) == "array" then .hooks |= map(select((.command // "") != $policy_hook_command and (.command // "") != $policy_hook_file and (((.command // "") | endswith(" " + $policy_hook_file_command)) | not))) else . end) | map(select((.hooks | type) != "array" or (.hooks | length) > 0))) + $b.hooks.SubagentStart
+        else . end
       | (if $b.statusLine then .statusLine = $b.statusLine else . end)
       | (if $b.attribution then .attribution = $b.attribution else . end)
     ' "$settings_file" "$tmp_patch")"
     printf '%s\n' "$merged" >"$settings_file"
   else
     cp "$tmp_patch" "$settings_file"
+  fi
+
+  if [ "$policy_hook_enabled" = "true" ]; then
+  cat >"$policy_hook_file" <<'WEAVE_POLICY_HOOK'
+// weave-router managed organization policy hook
+const crypto = require("node:crypto");
+
+function emit() {
+  let input;
+  try { input = JSON.parse(require("node:fs").readFileSync(0, "utf8")); } catch { return; }
+  const hookEventName = input.hook_event_name;
+  if (!["SessionStart", "SubagentStart"].includes(hookEventName)) return;
+  if (hookEventName === "SessionStart" && !["startup", "clear", "compact"].includes(input.source)) return;
+  const headers = process.env.ANTHROPIC_CUSTOM_HEADERS || "";
+  const key = headers.split(/\r?\n/).map((line) => line.match(/^\s*X-Weave-Router-Key\s*:\s*(rk_[A-Za-z0-9_-]+)\s*$/i)?.[1]).find(Boolean);
+  const endpoint = process.env.WEAVE_POLICY_API_URL;
+  if (!key || !endpoint || typeof fetch !== "function") return;
+  fetch(endpoint, {headers: {"X-Weave-Router-Key": key}, signal: AbortSignal.timeout(2500)})
+    .then(async (response) => {
+      if (response.status === 204 || !response.ok) return null;
+      return response.json();
+    })
+    .then((policy) => {
+      if (!policy || typeof policy.content !== "string" || Buffer.byteLength(policy.content, "utf8") > 32768 ||
+          !Number.isSafeInteger(policy.revision) || policy.revision < 1 ||
+          !["main_thread", "main_and_subagents"].includes(policy.audience) ||
+          crypto.createHash("sha256").update(policy.content).digest("hex") !== policy.hash ||
+          (hookEventName === "SubagentStart" && policy.audience !== "main_and_subagents")) return;
+      process.stdout.write(JSON.stringify({hookSpecificOutput: {
+        hookEventName,
+        additionalContext: `<weave-organization-policy revision="${policy.revision}">\n${policy.content}\n</weave-organization-policy>`,
+      }}));
+    })
+    .catch(() => {});
+}
+
+emit();
+WEAVE_POLICY_HOOK
+  chmod 700 "$policy_hook_file"
   fi
   ok "Settings written to $settings_file"
 
@@ -6315,6 +6390,7 @@ if [ "$scope" = "project" ] && [ -z "$install_dir" ] && [ -n "${git_root:-}" ]; 
   for entry in \
     ".claude/settings.local.json" \
     ".claude/.credentials.json" \
+    ".claude/weave-router-policy.js" \
     ".claude/cc-statusline.sh" \
     ".claude/cc-statusline.sh.weave-router"
   do
