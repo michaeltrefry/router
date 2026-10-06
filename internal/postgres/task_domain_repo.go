@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -46,8 +47,10 @@ func (r *TaskDomainRepo) Resolve(ctx context.Context, key taskdomain.Key, resume
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return taskdomain.Outcome{}, err
 	}
-	if !r.transactions.TryAcquire(1) {
-		return taskdomain.Outcome{}, errors.New("task profile transaction capacity reached")
+	// Wait for a slot within the caller's budget; failing fast under a burst left
+	// first turns on baseline ranking even when capacity freed moments later.
+	if err := r.transactions.Acquire(ctx, 1); err != nil {
+		return taskdomain.Outcome{}, fmt.Errorf("task profile transaction capacity: %w", err)
 	}
 	defer r.transactions.Release(1)
 	var outcome taskdomain.Outcome
@@ -73,7 +76,7 @@ func (r *TaskDomainRepo) Resolve(ctx context.Context, key taskdomain.Key, resume
 		if _, err := decodeTaskProfile(encoded, key); err != nil {
 			return err
 		}
-		return queries.UpdateTaskDomainProfile(ctx, sqlc.UpdateTaskDomainProfileParams{Outcome: encoded, ConversationKey: key.Conversation, RootSha256: key.Root, ReleaseSha256: key.Release, EvidenceSha256: key.Evidence})
+		return queries.UpdateTaskDomainProfile(ctx, sqlc.UpdateTaskDomainProfileParams{Outcome: encoded, Failed: outcome.Status != taskdomain.Ready, ConversationKey: key.Conversation, RootSha256: key.Root, ReleaseSha256: key.Release, EvidenceSha256: key.Evidence})
 	})
 	return outcome, err
 }

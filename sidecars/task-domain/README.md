@@ -29,14 +29,15 @@ be reliably distinguished from a new task and is not a supported continuity cont
 Profiles are stored in `router.task_domain_profiles`, keyed by authenticated
 conversation, task-root hash, release digest and scoring-evidence digest. Managed
 binding generations also namespace the conversation. No prompts or generated text
-are stored in this table. Successful profiles and terminal inference failures are
-retained for 30 days, without a sliding extension. Terminal failures deliberately
-keep that task baseline instead of retrying an unhealthy classifier on every tool
-call. A new release/binding or expiry permits a fresh classification when the
-original task is still present. Two first-inference transactions per worker are
-allowed; completed profiles use a read-only fast path. A row lock deduplicates
-inference across replicas. Lock/pool limits may return baseline to a competing
-request while the first transaction completes.
+are stored in this table. Successful profiles are retained for 30 days, without a
+sliding extension. A failed classification (timeout, rejection, transport or output
+error) is retained for five minutes: turns in that window keep baseline ranking
+rather than retrying an unhealthy classifier on every tool call, and the first turn
+after it retries while the original task is still present. A new release/binding or
+expiry likewise permits a fresh classification. Two first-inference transactions
+per worker run at once; further first turns wait for a slot within their budget,
+and completed profiles use a read-only fast path. A row lock deduplicates inference
+across replicas.
 
 The existing sparse score recipe is unchanged:
 

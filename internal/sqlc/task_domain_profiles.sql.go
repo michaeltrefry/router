@@ -159,27 +159,33 @@ func (q *Queries) InsertTaskDomainProfile(ctx context.Context, arg InsertTaskDom
 }
 
 const updateTaskDomainProfile = `-- name: UpdateTaskDomainProfile :exec
-UPDATE router.task_domain_profiles SET outcome = $1::jsonb
-WHERE conversation_key = $2::text AND root_sha256 = $3::text
-AND release_sha256 = $4::text AND evidence_sha256 = $5::text
+UPDATE router.task_domain_profiles SET outcome = $1::jsonb,
+    expires_at = CASE WHEN $2::boolean THEN CURRENT_TIMESTAMP + INTERVAL '5 minutes' ELSE expires_at END
+WHERE conversation_key = $3::text AND root_sha256 = $4::text
+AND release_sha256 = $5::text AND evidence_sha256 = $6::text
 `
 
 type UpdateTaskDomainProfileParams struct {
 	Outcome         []byte
+	Failed          bool
 	ConversationKey string
 	RootSha256      string
 	ReleaseSha256   string
 	EvidenceSha256  string
 }
 
-// Persist terminal outcomes, including optional inference failures, without prompt text.
+// Persist outcomes without prompt text. A failed classification expires after five
+// minutes so a later turn can retry, at most once per window, instead of keeping the
+// whole task on baseline ranking for the 30-day profile lifetime.
 //
-//	UPDATE router.task_domain_profiles SET outcome = $1::jsonb
-//	WHERE conversation_key = $2::text AND root_sha256 = $3::text
-//	AND release_sha256 = $4::text AND evidence_sha256 = $5::text
+//	UPDATE router.task_domain_profiles SET outcome = $1::jsonb,
+//	    expires_at = CASE WHEN $2::boolean THEN CURRENT_TIMESTAMP + INTERVAL '5 minutes' ELSE expires_at END
+//	WHERE conversation_key = $3::text AND root_sha256 = $4::text
+//	AND release_sha256 = $5::text AND evidence_sha256 = $6::text
 func (q *Queries) UpdateTaskDomainProfile(ctx context.Context, arg UpdateTaskDomainProfileParams) error {
 	_, err := q.db.Exec(ctx, updateTaskDomainProfile,
 		arg.Outcome,
+		arg.Failed,
 		arg.ConversationKey,
 		arg.RootSha256,
 		arg.ReleaseSha256,

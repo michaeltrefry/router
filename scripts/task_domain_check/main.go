@@ -26,7 +26,7 @@ func main() {
 		slog.Error("Task profile database check failed", "err", err)
 		os.Exit(1)
 	}
-	slog.Info("Task profile database check passed: replica deduplication, cache capacity, ambiguity, version isolation, failures, rollback and expiry")
+	slog.Info("Task profile database check passed: replica deduplication, cache capacity, waiting for capacity, ambiguity, version isolation, failure retry, rollback and expiry")
 }
 
 func identity() string {
@@ -126,7 +126,18 @@ func check(dsn string) (checkErr error) {
 	}
 	negative, err := replica.Resolve(ctx, failed, false, classify)
 	if err != nil || !negative.Cached || negative.Status != taskdomain.TimedOut {
-		return fmt.Errorf("terminal failure not retained: %v, %v", negative, err)
+		return fmt.Errorf("failure not retained within its retry window: %v, %v", negative, err)
+	}
+	var failureWindowBounded bool
+	if err := pool.QueryRow(ctx, "SELECT expires_at <= CURRENT_TIMESTAMP + INTERVAL '5 minutes' FROM router.task_domain_profiles WHERE conversation_key = $1 AND root_sha256 = $2", key.Conversation, failed.Root).Scan(&failureWindowBounded); err != nil || !failureWindowBounded {
+		return fmt.Errorf("failure retry window exceeds five minutes: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE router.task_domain_profiles SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE conversation_key = $1 AND root_sha256 = $2", key.Conversation, failed.Root); err != nil {
+		return err
+	}
+	retried, err := replica.Resolve(ctx, failed, false, classify)
+	if err != nil || retried.Cached || retried.Status != taskdomain.Ready {
+		return fmt.Errorf("failure not retried after its window: %v, %v", retried.Status, err)
 	}
 	rollback := key
 	rollback.Root = identity()
@@ -179,8 +190,27 @@ func check(dsn string) (checkErr error) {
 	if err != nil || !stillCached.Cached {
 		return fmt.Errorf("cache blocked by inference capacity: %v", err)
 	}
+	// A third first turn waits for a slot instead of falling back to baseline.
+	waiting := key
+	waiting.Root = identity()
+	waited := make(chan error, 1)
+	go func() {
+		outcome, err := repo.Resolve(ctx, waiting, false, classify)
+		if err == nil && (outcome.Cached || outcome.Status != taskdomain.Ready) {
+			err = fmt.Errorf("waiting root outcome %v cached=%v", outcome.Status, outcome.Cached)
+		}
+		waited <- err
+	}()
+	select {
+	case err := <-waited:
+		return fmt.Errorf("third first turn did not wait for capacity: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
 	// Release each transaction before the pool closes.
 	releaseBlockers <- struct{}{}
+	if err := <-waited; err != nil {
+		return fmt.Errorf("waiting first turn: %w", err)
+	}
 	releaseBlockers <- struct{}{}
 	return blockers.Wait()
 }
