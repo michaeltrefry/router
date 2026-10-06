@@ -128,6 +128,18 @@ func WithModelListHTTPClient(client *http.Client) Option {
 	}
 }
 
+// WithResponseHeaderTimeout replaces the time-to-first-byte guard for every
+// model the client serves; a non-positive value keeps the default.
+func WithResponseHeaderTimeout(timeout time.Duration) Option {
+	return func(c *Client) {
+		if timeout <= 0 {
+			return
+		}
+		c.http = httputil.NewClient(httputil.NewTransportWithResponseHeaderTimeout(5*time.Second, 5*time.Second, timeout))
+		c.grokHTTP = c.http
+	}
+}
+
 func NewClient(apiKey, baseURL string, opts ...Option) *Client {
 	return NewClientWithModelIDMap(apiKey, baseURL, nil, opts...)
 }

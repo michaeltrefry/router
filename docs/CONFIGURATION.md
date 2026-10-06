@@ -204,6 +204,7 @@ from [`local-models.example.yaml`](local-models.example.yaml).
 | `tool_use`, `agentic` | no | `default` or `low`; `low` keeps the model off tool-bearing / agentic turns. |
 | `image_input` | no | `true` when the model accepts images; defaults to text-only. |
 | `reasoning_format` | no | `reasoning_content` (default) or `think_tags` for inline `<think>` output. |
+| `response_header_timeout` | no | Go duration (`15s`, `500ms`) the router waits for the server's response headers before treating it as down. Default `30s`, the same guard cloud providers get. |
 
 Each entry registers its own provider, `local_<id>`, priced at $0 and keyed by
 the deployment, so several local servers coexist. A local provider is never
@@ -332,6 +333,45 @@ marker reads `→ <id> (local) · local fallback after <original model> subscrip
 On a streamed `/v1/responses` turn that may fall back, the routing badge is
 sent with the first output instead of ahead of dispatch, so the client sees one
 badge naming the model that answered.
+
+#### Local failure fallback
+
+When a turn that turn-type routing or mid-tier substitution put on a local
+model fails before anything reached the client (connection refused, a 5xx, a
+response-header timeout, or any other error before the first byte), the router
+serves the same turn on the target it would have had without the local rule:
+
+- a mid-tier substituted turn goes to the router's original pick (the model
+  named in `substituted_from_model`), with no second routing pass;
+- a turn-type routed turn is routed again with local rules disabled, only
+  after the local model has failed: a title or probe turn lands on its utility
+  hard pin, a sub-agent turn on `ROUTER_SUBAGENT_*` or the scorer, a Codex
+  spawned sub-agent on normal main-loop routing. If that routing lands on a
+  local model again, the local error surfaces.
+
+The local server first gets the dispatcher's usual same-target retries (up to
+two more attempts after a connection refusal, 5xx or header timeout, with no
+new attempt once 10 seconds are spent), so a server that is down costs under a
+second when the connection is refused. One that accepts the connection but
+never answers costs one `response_header_timeout` per attempt: 30 seconds at
+the default, three timeouts when it is under about 5 seconds. Lower `response_header_timeout` to fail over
+faster from a hung server; keep it above the server's longest prefill, since a
+streaming server may withhold headers until prefill finishes.
+
+Once any output reached the client, a local failure ends the stream with an
+error event and no second upstream request is made. A model chosen with
+`/force-model` is never replaced: its error reaches the client. The
+subscription exhaustion fallback is unaffected: when its local model fails,
+the client still gets the subscription's error.
+
+A rescued turn logs `Local model failed before output; serving the turn on its
+normal route` with `local_model`, `local_source` (`local_turn_route` or
+`mid_tier_substitute`), `fallback_model` and the failure's status. Its
+completion line carries `local_failure_fallback=true` and the serving model as
+`decision_model`; the span carries `dispatch.local_failure_fallback`. Turns
+that show a routing marker read `→ <model> · local <id> failed`; title, probe,
+recap and other hard-pinned turns never carry a marker. The session pin and
+HMM history record the model that served, as for a normally routed turn.
 
 ### Key-pair auth
 

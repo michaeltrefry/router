@@ -107,7 +107,7 @@ const (
 // request never gains the sub-agent hard pin. Codex's review, compaction and
 // approval threads carry other header values and stay on normal routing.
 func (s *Service) codexLocalSubAgentTurn(ctx context.Context, h http.Header, detected turntype.TurnType, req router.Request) bool {
-	if detected != turntype.MainLoop && detected != turntype.ToolResult {
+	if (detected != turntype.MainLoop && detected != turntype.ToolResult) || localRoutingDisabled(ctx) {
 		return false
 	}
 	if h.Get(codexSubAgentHeader) != codexSpawnedSubAgent {

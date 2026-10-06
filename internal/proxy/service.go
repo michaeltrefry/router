@@ -3779,6 +3779,8 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 	}
 	var routeRes turnLoopResult
 	var routeErr error
+	// Set only when the turn loop routed; re-runs it without local rules.
+	var rerouteWithoutLocal func() (turnLoopResult, error)
 	routeCtx, routeSpan := startRoutingSpan(ctx, req)
 	if handoffFromContext(ctx) != nil {
 		routeRes, routeErr = s.resumeHandoff(routeCtx, env, req)
@@ -3786,6 +3788,10 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 		routeRes, routeErr = s.runAgentShadowEvaluationRoute(routeCtx, env, feats, installationID, req, agentShadowEval)
 	} else {
 		routeRes, routeErr = s.runTurnLoop(routeCtx, env, feats, apiKeyID, installationID, "", r.Header, req)
+		turnLoopCtx := ctx
+		rerouteWithoutLocal = func() (turnLoopResult, error) {
+			return s.runTurnLoop(withLocalRoutingDisabled(turnLoopCtx), env, feats, apiKeyID, installationID, "", r.Header, req)
+		}
 	}
 	var escalationCapture *captureWriter
 	defer func() {
@@ -4589,6 +4595,14 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 	if localFirst {
 		baselineViable, baselineEligible, subscriptionRetryEligible, siblingViable = false, false, false, false
 	}
+	// First in the rescue chain: a turn a local rule put on a local model that
+	// fails before output is served by its normal routing target.
+	var localFailure *localFailureFallback
+	if !agentShadowMode {
+		localFailure = planLocalFailureFallback(routeRes, rerouteWithoutLocal)
+	}
+	localFailureViable := localFailure != nil
+	laterRescueViable := baselineViable || subscriptionRetryEligible || siblingViable || localFallbackViable
 
 	primaryProvider := decision.Provider
 	// Captured before rescue: failover replaces decision.Model, so afterwards
@@ -4647,7 +4661,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			bindings:               bindings,
 			attempt:                attempt,
 			flushErr:               flushErrAsAnthropic,
-			deferFlushOnExhaustion: baselineViable || subscriptionRetryEligible || siblingViable || localFallbackViable,
+			deferFlushOnExhaustion: laterRescueViable || localFailureViable,
 			purpose:                routeRes.dispatchPurpose(inference.PurposeAnthropicMessages),
 			origin:                 routeRes.dispatchOrigin(decision),
 		})
@@ -4686,6 +4700,67 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			return
 		}
 		flushUpstreamErrorAsAnthropic(contentSink, proxyErr)
+	}
+
+	localFailureUsed := false
+	localFailureRan := false
+	if localFailure.rescues(ctx, proxyErr, preludeBuf) {
+		normalRes, normalErr := localFailure.normalRoute()
+		if normalErr != nil {
+			localFailure.logUnavailable(ctx, proxyErr, normalErr)
+		} else {
+			normalRes.SuggestionMode = routeRes.SuggestionMode
+			target := normalRes.Decision
+			targetOpts := opts
+			targetOpts.TargetModel = target.Model
+			targetOpts.TargetProvider = target.Provider
+			targetOpts.Capabilities = router.Lookup(target.Model)
+			targetOpts.ModelSwitched = normalRes.modelSwitched()
+			targetEffort := s.resolveEffort(ctx, target, targetOpts.Capabilities, normalRes.EscalateEffort)
+			targetEffort.apply(&targetOpts)
+			targetCtx := s.resolveCredentials(ctx, target.Provider, target.Model, r.Header)
+			targetOpts.FastMode = fastModeForAttempt(targetCtx, target.Model, target.Provider)
+			targetBindings := s.resolveBindingsForDispatch(targetCtx, target)
+			targetMarker := suppressMarkerIfRequested(ctx, r.Header, localFailure.marker(normalRes))
+			targetAttempt, targetBuildErr := buildAttempt(target, targetOpts, targetMarker)
+			switch {
+			case targetBuildErr != nil:
+				localFailure.logUnavailable(ctx, proxyErr, targetBuildErr)
+			case len(targetBindings) == 0:
+				localFailure.logUnavailable(ctx, proxyErr, fmt.Errorf("%w: %s", ErrProviderNotConfigured, target.Provider))
+			default:
+				localFailure.logServing(ctx, normalRes, proxyErr)
+				localFailureRan = true
+				crossFormat = false
+				respSummary = translate.ResponseSummary{}
+				reqStats = providers.RequestMutationStats{}
+				winnerIdx, proxyErr = s.dispatchWithFallback(targetCtx, failoverInputs{
+					w:                      contentSink,
+					buf:                    preludeBuf,
+					initialDecision:        target,
+					bindings:               targetBindings,
+					attempt:                targetAttempt,
+					flushErr:               flushErrAsAnthropic,
+					deferFlushOnExhaustion: laterRescueViable,
+					purpose:                normalRes.dispatchPurpose(inference.PurposeAnthropicMessages),
+					origin:                 normalRes.dispatchOrigin(target),
+				})
+				subscriptionPoolFailure = isSubscriptionPoolError(proxyErr)
+				decision, bindings, marker, effortServed = target, targetBindings, targetMarker, targetEffort
+				routeRes = normalRes
+				tt, stickyHit, pinTier = normalRes.TurnType, normalRes.StickyHit, normalRes.PinTier
+				localFailureUsed = proxyErr == nil
+				if target.Model == baselineModel {
+					// The baseline rescue would repeat the attempt that just failed.
+					baselineViable, baselineEligible = false, false
+				}
+			}
+		}
+	}
+	// The local model's error was held for this rescue; with nothing after it,
+	// surface it now.
+	if localFailureViable && !localFailureRan && !laterRescueViable && proxyErr != nil && !preludeBuf.Committed() {
+		flushDeferredErr()
 	}
 
 	// The routed model's bindings all failed with a fault another model could
@@ -5138,7 +5213,8 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 		Bool("dispatch.baseline_failover", baselineFailoverUsed).
 		Bool("dispatch.subscription_failover", subscriptionFailoverUsed).
 		Bool("dispatch.sibling_failover", siblingFailoverUsed).
-		Bool("dispatch.subscription_local_fallback", localFallbackUsed)
+		Bool("dispatch.subscription_local_fallback", localFallbackUsed).
+		Bool("dispatch.local_failure_fallback", localFailureUsed)
 	if s.effectiveCaptureMode(ctx) == CaptureOff {
 		upstreamBuilder.Int64("request.message_count", int64(feats.MessageCount)).
 			Bool("request.has_tools", feats.HasTools)
@@ -5410,7 +5486,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 	if preludeBuf.Committed() {
 		streamCut.noteCut(proxyErr)
 	}
-	log.Info("ProxyMessages complete", append(append([]any{"requested_model", feats.Model, "baseline_model", s.baselineFor(feats.Model), "decision_model", decision.Model, "decision_provider", decision.Provider, "primary_provider", primaryProvider, "primary_model", primaryModel, "fallback_attempts", winnerIdx, "failover_used", finalProvider != primaryProvider || subscriptionFailoverUsed || siblingFailoverUsed, "subscription_failover", subscriptionFailoverUsed, "decision_reason", decision.Reason, "requested_tier", routeRes.RequestedTier.String(), "decision_tier", catalog.TierFor(decision.Model).String(), "embedded_tokens", len(promptText) / 4, "total_input_tokens", feats.Tokens, "has_tools", feats.HasTools, "message_count", feats.MessageCount, "last_kind", feats.LastKind, "last_preview", s.zdrLogField(ctx, feats.LastPreview), "embed_input", embedInput, "cross_format", crossFormat, "sticky_hit", stickyHit, "route_ms", routeMs, "proxy_ms", proxyMs, "proxy_err", proxyErr, "upstream_err_body", s.zdrLogField(ctx, providers.UpstreamErrorBodyMessage(proxyErr)), "upstream_status", upstreamStatus(proxyErr), "upstream_finish_reason", respSummary.UpstreamFinishReason, "resp_stop_reason", respSummary.StopReason, "resp_refusal", refusalObs.refused, "resp_refusal_category", refusalObs.category, "stop_reason_promoted", respSummary.StopReasonPromoted, "tool_use_blocks", respSummary.ToolUseBlocks, "invalid_tool_args_blocks", respSummary.InvalidToolArgsBlocks, "last_tool_use_name", terminalToolUse.Name, "last_tool_use_input_bytes", terminalToolUse.InputBytes, "ended_on_tool_use", endedOnToolUse, "tool_error_counts", toolErrorTally, "text_only_turn_nudged", respSummary.TextOnlyTurnNudged, "stop_reason_demoted", respSummary.StopReasonDemoted, "suppressed_tool_calls", respSummary.SuppressedToolCalls, "tool_call_invalid_blocks", len(respSummary.ToolCallIssues), "cc_only_tools_stripped", reqStats.CCOnlyToolsStripped, "cc_task_reminders_stripped", reqStats.CCTaskRemindersStripped, "tool_references_unresolved", reqStats.ToolReferencesUnresolved, "gemini_reminder_injected", reqStats.GeminiReminderInjected, "gemini_validated_tool_mode", reqStats.GeminiValidatedToolMode, "resp_output_tokens", respSummary.OutputTokens, "resp_reasoning_tokens", extractor.ReasoningTokens(), "prelude_committed", preludeBuf.Committed(), "routing_marker", marker, "prior_served_model", routeRes.PriorServedModel, "hard_pinned", routeRes.HardPinned, "substituted_from_model", routeRes.SubstitutedFrom.Model, "substituted_from_provider", routeRes.SubstitutedFrom.Provider, "subscription_local_fallback", localFallbackUsed}, append(append(append(armStrikeLogFieldsWithPrimaryReason(armDemoted, armDemotionReasonValue, rescuedArmDemoted, rescuedArmDemotionReason), plannerLogFields(routeRes)...), streamCut.completionLogFields()...), rateLimit.completionLogFields()...)...), downgradeShadowLogFields(routeRes)...)...)
+	log.Info("ProxyMessages complete", append(append([]any{"requested_model", feats.Model, "baseline_model", s.baselineFor(feats.Model), "decision_model", decision.Model, "decision_provider", decision.Provider, "primary_provider", primaryProvider, "primary_model", primaryModel, "fallback_attempts", winnerIdx, "failover_used", finalProvider != primaryProvider || subscriptionFailoverUsed || siblingFailoverUsed, "subscription_failover", subscriptionFailoverUsed, "decision_reason", decision.Reason, "requested_tier", routeRes.RequestedTier.String(), "decision_tier", catalog.TierFor(decision.Model).String(), "embedded_tokens", len(promptText) / 4, "total_input_tokens", feats.Tokens, "has_tools", feats.HasTools, "message_count", feats.MessageCount, "last_kind", feats.LastKind, "last_preview", s.zdrLogField(ctx, feats.LastPreview), "embed_input", embedInput, "cross_format", crossFormat, "sticky_hit", stickyHit, "route_ms", routeMs, "proxy_ms", proxyMs, "proxy_err", proxyErr, "upstream_err_body", s.zdrLogField(ctx, providers.UpstreamErrorBodyMessage(proxyErr)), "upstream_status", upstreamStatus(proxyErr), "upstream_finish_reason", respSummary.UpstreamFinishReason, "resp_stop_reason", respSummary.StopReason, "resp_refusal", refusalObs.refused, "resp_refusal_category", refusalObs.category, "stop_reason_promoted", respSummary.StopReasonPromoted, "tool_use_blocks", respSummary.ToolUseBlocks, "invalid_tool_args_blocks", respSummary.InvalidToolArgsBlocks, "last_tool_use_name", terminalToolUse.Name, "last_tool_use_input_bytes", terminalToolUse.InputBytes, "ended_on_tool_use", endedOnToolUse, "tool_error_counts", toolErrorTally, "text_only_turn_nudged", respSummary.TextOnlyTurnNudged, "stop_reason_demoted", respSummary.StopReasonDemoted, "suppressed_tool_calls", respSummary.SuppressedToolCalls, "tool_call_invalid_blocks", len(respSummary.ToolCallIssues), "cc_only_tools_stripped", reqStats.CCOnlyToolsStripped, "cc_task_reminders_stripped", reqStats.CCTaskRemindersStripped, "tool_references_unresolved", reqStats.ToolReferencesUnresolved, "gemini_reminder_injected", reqStats.GeminiReminderInjected, "gemini_validated_tool_mode", reqStats.GeminiValidatedToolMode, "resp_output_tokens", respSummary.OutputTokens, "resp_reasoning_tokens", extractor.ReasoningTokens(), "prelude_committed", preludeBuf.Committed(), "routing_marker", marker, "prior_served_model", routeRes.PriorServedModel, "hard_pinned", routeRes.HardPinned, "substituted_from_model", routeRes.SubstitutedFrom.Model, "substituted_from_provider", routeRes.SubstitutedFrom.Provider, "subscription_local_fallback", localFallbackUsed, "local_failure_fallback", localFailureUsed}, append(append(append(armStrikeLogFieldsWithPrimaryReason(armDemoted, armDemotionReasonValue, rescuedArmDemoted, rescuedArmDemotionReason), plannerLogFields(routeRes)...), streamCut.completionLogFields()...), rateLimit.completionLogFields()...)...), downgradeShadowLogFields(routeRes)...)...)
 	policyRespBody, policyRespTrunc := capturedResponse(policyOutcomeCap)
 	var policyResp *policyOutcomeResponse
 	if policyOutcomeCap != nil {
@@ -6943,6 +7019,10 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 	routeStart := time.Now()
 	routeCtx, routeSpan := startRoutingSpan(ctx, routeRequest)
 	routeRes, err := s.runTurnLoop(routeCtx, env, feats, apiKeyID, installationID, subAgentHint, r.Header, routeRequest)
+	turnLoopCtx := ctx
+	rerouteWithoutLocal := func() (turnLoopResult, error) {
+		return s.runTurnLoop(withLocalRoutingDisabled(turnLoopCtx), env, feats, apiKeyID, installationID, subAgentHint, r.Header, routeRequest)
+	}
 	var escalationCapture *captureWriter
 	defer func() {
 		s.completeEscalation(ctx, routeRes, returnErr, escalationCapture, translate.EscalationResponseChat)
@@ -7177,6 +7257,10 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 	ctx, refusalNote := withSubscriptionRefusalNote(ctx)
 	localFallback := s.planSubscriptionLocalFallback(ctx, routeRes, routeRequest, decision, r.Header, refusalNote)
 	localFallbackViable := localFallback != nil
+	// A local rule's turn whose local model fails before output is re-served on
+	// its normal routing target; planned here for the same prelude reason.
+	localFailure := planLocalFailureFallback(routeRes, rerouteWithoutLocal)
+	localFailureViable := localFailure != nil
 
 	// Previously gated on policy debug; ordinary Codex turns fell through to
 	// ResponsesWriter's legacy badge that ignored suppression and never showed the routing reason.
@@ -7197,9 +7281,10 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 	if verbatimPassthrough {
 		responsesPreludeWillEmit = env.Stream() && supportsResponsesTerminalSurfaces(clientID.ClientApp) && marker != ""
 	}
-	// The eager badge names the subscription's model; a local fallback would
-	// leave it on the wire beside its own, so the badge rides the first output.
-	if localFallbackViable {
+	// The eager badge names the routed model; a subscription fallback or a
+	// failed local model's rescue would leave it on the wire beside its own, so
+	// the badge rides the first output.
+	if localFallbackViable || localFailureViable {
 		responsesPreludeWillEmit = false
 	}
 
@@ -7724,6 +7809,8 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 		cyberRetryViable, cyberRetryArmed, codexRetryViable, claudeRetryViable, siblingViable = false, false, false, false, false
 	}
 
+	laterRescueViable := cyberRetryViable || codexRetryViable || claudeRetryViable || siblingViable || localFallbackViable
+
 	primaryProvider := decision.Provider
 	primaryModel := decision.Model
 	primaryDecision := decision
@@ -7784,7 +7871,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 			bindings:               bindings,
 			attempt:                attempt,
 			flushErr:               flushErrAsOpenAI,
-			deferFlushOnExhaustion: cyberRetryViable || codexRetryViable || claudeRetryViable || siblingViable || localFallbackViable,
+			deferFlushOnExhaustion: laterRescueViable || localFailureViable,
 			purpose:                routeRes.dispatchPurpose(surfacePurpose),
 			origin:                 routeRes.dispatchOrigin(decision),
 		})
@@ -7824,6 +7911,68 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 			return
 		}
 		flushBufferedIfPresent(contentSink, proxyErr)
+	}
+
+	localFailureUsed := false
+	localFailureRan := false
+	if localFailure.rescues(ctx, proxyErr, preludeBuf) {
+		normalRes, normalErr := localFailure.normalRoute()
+		if normalErr != nil {
+			localFailure.logUnavailable(ctx, proxyErr, normalErr)
+		} else {
+			normalRes.SuggestionMode = routeRes.SuggestionMode
+			target := normalRes.Decision
+			targetOpts := opts
+			targetOpts.TargetModel = target.Model
+			targetOpts.TargetProvider = target.Provider
+			targetOpts.Capabilities = router.Lookup(target.Model)
+			targetOpts.ModelSwitched = normalRes.modelSwitched()
+			targetEffort := s.resolveEffort(ctx, target, targetOpts.Capabilities, normalRes.EscalateEffort)
+			targetEffort.apply(&targetOpts)
+			targetCtx := s.resolveCredentials(ctx, target.Provider, target.Model, r.Header)
+			targetOpts.FastMode = fastModeForAttempt(targetCtx, target.Model, target.Provider)
+			targetBindings := s.resolveBindingsForDispatch(targetCtx, target)
+			targetMarker := suppressMarkerIfRequested(ctx, r.Header, localFailure.marker(normalRes))
+			targetAttempt, targetBuildErr := buildAttempt(target, targetOpts, targetMarker)
+			switch {
+			case targetBuildErr != nil:
+				localFailure.logUnavailable(ctx, proxyErr, targetBuildErr)
+			case len(targetBindings) == 0:
+				localFailure.logUnavailable(ctx, proxyErr, fmt.Errorf("%w: %s", ErrProviderNotConfigured, target.Provider))
+			default:
+				localFailure.logServing(ctx, normalRes, proxyErr)
+				localFailureRan = true
+				// The writer was set up to translate the local model's Chat
+				// Completions and to badge it; keep translating and badge the
+				// model that serves instead.
+				if rw, ok := w.(*translate.ResponsesWriter); ok {
+					responsesPassthrough = false
+					rw.SetBadgeText(targetMarker)
+				}
+				respSummary = translate.ResponseSummary{}
+				winnerIdx, proxyErr = s.dispatchWithFallback(targetCtx, failoverInputs{
+					w:                      contentSink,
+					buf:                    preludeBuf,
+					initialDecision:        target,
+					bindings:               targetBindings,
+					attempt:                targetAttempt,
+					flushErr:               flushErrAsOpenAI,
+					deferFlushOnExhaustion: laterRescueViable,
+					purpose:                normalRes.dispatchPurpose(surfacePurpose),
+					origin:                 normalRes.dispatchOrigin(target),
+				})
+				subscriptionPoolFailure = isSubscriptionPoolError(proxyErr)
+				decision, bindings, marker, effortServed = target, targetBindings, targetMarker, targetEffort
+				routeRes = normalRes
+				tt, stickyHit, pinTier = normalRes.TurnType, normalRes.StickyHit, normalRes.PinTier
+				localFailureUsed = proxyErr == nil
+			}
+		}
+	}
+	// The local model's error was held for this rescue; with nothing after it,
+	// surface it now.
+	if localFailureViable && !localFailureRan && !laterRescueViable && proxyErr != nil && !preludeBuf.Committed() {
+		flushDeferredErr()
 	}
 
 	codexFailoverUsed := false
@@ -8254,7 +8403,8 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 		Bool("dispatch.subscription_failover", codexFailoverUsed || claudeFailoverUsed).
 		Bool("dispatch.cyber_refusal_retry", cyberRetryRan).
 		Bool("dispatch.sibling_failover", siblingFailoverUsed).
-		Bool("dispatch.subscription_local_fallback", localFallbackUsed)
+		Bool("dispatch.subscription_local_fallback", localFallbackUsed).
+		Bool("dispatch.local_failure_fallback", localFailureUsed)
 	if responsesSurface, _ := ctx.Value(responsesSurfaceContextKey{}).(bool); responsesSurface {
 		openaiUpstreamBuilder.String("request.api_surface", string(requestAPISurfaceResponses))
 	}
@@ -8465,7 +8615,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 		)
 	}
 
-	log.Info("ProxyOpenAIChatCompletion complete", append(append([]any{"requested_model", feats.Model, "baseline_model", s.baselineFor(feats.Model), "decision_model", decision.Model, "decision_provider", decision.Provider, "primary_provider", primaryProvider, "primary_model", primaryModel, "fallback_attempts", winnerIdx, "failover_used", finalProvider != primaryProvider || codexFailoverUsed || claudeFailoverUsed || siblingFailoverUsed, "subscription_failover", codexFailoverUsed || claudeFailoverUsed, "decision_reason", decision.Reason, "requested_tier", routeRes.RequestedTier.String(), "decision_tier", catalog.TierFor(decision.Model).String(), "embedded_tokens", len(promptText) / 4, "total_input_tokens", feats.Tokens, "has_tools", feats.HasTools, "embed_input", embedInput, "cross_format", crossFormat, "sticky_hit", stickyHit, "pin_tier", pinTier, "turn_type", string(tt), "route_ms", routeMs, "proxy_ms", proxyMs, "proxy_err", proxyErr, "upstream_err_body", s.zdrLogField(ctx, providers.UpstreamErrorBodyMessage(proxyErr)), "upstream_status", upstreamStatus(proxyErr), "upstream_finish_reason", respSummary.UpstreamFinishReason, "resp_stop_reason", respSummary.StopReason, "stop_reason_promoted", respSummary.StopReasonPromoted, "tool_use_blocks", respSummary.ToolUseBlocks, "invalid_tool_args_blocks", respSummary.InvalidToolArgsBlocks, "tool_call_invalid_blocks", len(respSummary.ToolCallIssues), "routing_marker", marker, "prior_served_model", routeRes.PriorServedModel, "hard_pinned", routeRes.HardPinned, "substituted_from_model", routeRes.SubstitutedFrom.Model, "substituted_from_provider", routeRes.SubstitutedFrom.Provider, "subscription_local_fallback", localFallbackUsed}, append(append(armStrikeLogFieldsWithPrimaryReason(armDemotedOAI, armDemotionReasonOAI, rescuedArmDemotedOAI, rescuedArmDemotionReasonOAI), plannerLogFields(routeRes)...), rateLimit.completionLogFields()...)...), downgradeShadowLogFields(routeRes)...)...)
+	log.Info("ProxyOpenAIChatCompletion complete", append(append([]any{"requested_model", feats.Model, "baseline_model", s.baselineFor(feats.Model), "decision_model", decision.Model, "decision_provider", decision.Provider, "primary_provider", primaryProvider, "primary_model", primaryModel, "fallback_attempts", winnerIdx, "failover_used", finalProvider != primaryProvider || codexFailoverUsed || claudeFailoverUsed || siblingFailoverUsed, "subscription_failover", codexFailoverUsed || claudeFailoverUsed, "decision_reason", decision.Reason, "requested_tier", routeRes.RequestedTier.String(), "decision_tier", catalog.TierFor(decision.Model).String(), "embedded_tokens", len(promptText) / 4, "total_input_tokens", feats.Tokens, "has_tools", feats.HasTools, "embed_input", embedInput, "cross_format", crossFormat, "sticky_hit", stickyHit, "pin_tier", pinTier, "turn_type", string(tt), "route_ms", routeMs, "proxy_ms", proxyMs, "proxy_err", proxyErr, "upstream_err_body", s.zdrLogField(ctx, providers.UpstreamErrorBodyMessage(proxyErr)), "upstream_status", upstreamStatus(proxyErr), "upstream_finish_reason", respSummary.UpstreamFinishReason, "resp_stop_reason", respSummary.StopReason, "stop_reason_promoted", respSummary.StopReasonPromoted, "tool_use_blocks", respSummary.ToolUseBlocks, "invalid_tool_args_blocks", respSummary.InvalidToolArgsBlocks, "tool_call_invalid_blocks", len(respSummary.ToolCallIssues), "routing_marker", marker, "prior_served_model", routeRes.PriorServedModel, "hard_pinned", routeRes.HardPinned, "substituted_from_model", routeRes.SubstitutedFrom.Model, "substituted_from_provider", routeRes.SubstitutedFrom.Provider, "subscription_local_fallback", localFallbackUsed, "local_failure_fallback", localFailureUsed}, append(append(armStrikeLogFieldsWithPrimaryReason(armDemotedOAI, armDemotionReasonOAI, rescuedArmDemotedOAI, rescuedArmDemotionReasonOAI), plannerLogFields(routeRes)...), rateLimit.completionLogFields()...)...), downgradeShadowLogFields(routeRes)...)...)
 	s.reportPolicyOutcome(ctx, routeRes, decision, effortServed, finalProvider, fastServed, feats.Tokens, in, out, cacheCreation, cacheRead, routeMs, proxyMs, proxyErr, nil)
 
 	// Subscription-only mode disables paid failover by pinning dispatch to the

@@ -256,6 +256,8 @@ type turnLoopResult struct {
 	// SubstitutionReason names what replaced SubstitutedFrom: the mid-tier
 	// substitute or the subscription local fallback.
 	SubstitutionReason string
+	// LocalTurnRouted marks a decision the local turn route made.
+	LocalTurnRouted bool
 	// PlannerDecision holds the planner's verdict and EV math when the planner ran.
 	PlannerDecision planner.Decision
 	// PinModel is stamped independently of PlannerDecision so log lines can
@@ -926,7 +928,7 @@ func (s *Service) runTurnLoop(
 	// continuations are classified SubAgentDispatch too, so they stay local
 	// without one.
 	localProvider, localModel, localTurn := "", "", false
-	if !forceModelFound || hardPinnedTurn {
+	if (!forceModelFound || hardPinnedTurn) && !localRoutingDisabled(ctx) {
 		localProvider, localModel, localTurn = s.localTurnTarget(res.TurnType, req)
 	}
 	if localTurn && !hardPinnedTurn {
@@ -963,6 +965,7 @@ func (s *Service) runTurnLoop(
 		switch {
 		case localTurn:
 			provider, model, reason = localProvider, localModel, string(res.TurnType)+"_local"
+			res.LocalTurnRouted = true
 			log.Info("Local turn route served turn", "turn_type", string(res.TurnType), "local_model", model, "local_provider", provider)
 		case compactionPin:
 			provider, model = compactionProvider, compactionModel

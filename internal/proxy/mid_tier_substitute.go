@@ -40,7 +40,7 @@ func (s *Service) WithMidTierSubstitute(sub MidTierSubstitute) *Service {
 // are never substituted, and a request the local model cannot take keeps the
 // original decision.
 func (s *Service) substituteMidTier(ctx context.Context, res *turnLoopResult, req router.Request) {
-	if s.midTierModel == "" || !midTierSubstitutable(*res) {
+	if s.midTierModel == "" || localRoutingDisabled(ctx) || !midTierSubstitutable(*res) {
 		return
 	}
 	original := res.Decision
