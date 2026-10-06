@@ -1,0 +1,44 @@
+package proxy
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"weave-os/router/internal/translate"
+)
+
+func TestExcludeAdvisorOutrankingModels_ExcludesModelsAboveAdvisor(t *testing.T) {
+	available := map[string]struct{}{
+		"claude-fable-5-1": {},
+		"claude-fable-5":   {},
+		"claude-opus-5-5":  {},
+		"claude-sonnet-5":  {},
+		"gpt-5.5":          {},
+	}
+	env, err := translate.ParseAnthropic([]byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}],"tools":[{"name":"Bash","input_schema":{"type":"object"}},{"type":"advisor_20260301","name":"advisor","model":"claude-opus-5-5"}]}`))
+	require.NoError(t, err)
+
+	out, added := excludeAdvisorOutrankingModels(env, map[string]struct{}{"gpt-5.5": {}}, available)
+	assert.Equal(t, []string{"claude-fable-5", "claude-fable-5-1"}, added)
+	assert.Equal(t, map[string]struct{}{"gpt-5.5": {}, "claude-fable-5": {}, "claude-fable-5-1": {}}, out)
+}
+
+func TestExcludeAdvisorOutrankingModels_NoAdvisorIsNoop(t *testing.T) {
+	available := map[string]struct{}{"claude-fable-5-1": {}, "claude-opus-5-5": {}}
+	env, err := translate.ParseAnthropic([]byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}],"tools":[{"name":"Bash","input_schema":{"type":"object"}}]}`))
+	require.NoError(t, err)
+
+	out, added := excludeAdvisorOutrankingModels(env, nil, available)
+	assert.Nil(t, added)
+	assert.Nil(t, out)
+}
+
+func TestSafetyExcludedModelsIncludesAdvisorOutranking(t *testing.T) {
+	s := &Service{availableModels: map[string]struct{}{"claude-fable-5-1": {}, "claude-opus-5-5": {}}}
+	env, err := translate.ParseAnthropic([]byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"advisor_20260301","name":"advisor","model":"claude-opus-5-5"}]}`))
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]struct{}{"claude-fable-5-1": {}}, s.safetyExcludedModels(env, 0, nil))
+}
