@@ -152,6 +152,10 @@ type Service struct {
 	// WithMidTierSubstitute.
 	midTierProvider string
 	midTierModel    string
+	// subscriptionFallback{Provider,Model} serve turns a subscription refused
+	// for its limit; see WithSubscriptionLocalFallback.
+	subscriptionFallbackProvider string
+	subscriptionFallbackModel    string
 	// telemetry is an optional repository for persisting per-request telemetry.
 	telemetry TelemetryRepository
 	// turnClock times user prompts against the previous response; nil leaves
@@ -4570,6 +4574,16 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 		(s.shouldFailover(ctx) || s.gatewaySiblingAllowed(ctx, siblingDecisions[0])) &&
 		!paidFallbackForbidden(ctx)
 
+	// Last in the rescue chain: once the subscription refused the turn and no
+	// paid retry or peer served it, the local model does.
+	var localFallback *subscriptionLocalFallback
+	if !agentShadowMode {
+		var refusalNote *subscriptionRefusalNote
+		ctx, refusalNote = withSubscriptionRefusalNote(ctx)
+		localFallback = s.planSubscriptionLocalFallback(ctx, routeRes, req, decision, r.Header, refusalNote)
+	}
+	localFallbackViable := localFallback != nil
+
 	primaryProvider := decision.Provider
 	// Captured before rescue: failover replaces decision.Model, so afterwards
 	// decision.Model names the rescuer rather than what failed.
@@ -4625,7 +4639,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			bindings:               bindings,
 			attempt:                attempt,
 			flushErr:               flushErrAsAnthropic,
-			deferFlushOnExhaustion: baselineViable || subscriptionRetryEligible || siblingViable,
+			deferFlushOnExhaustion: baselineViable || subscriptionRetryEligible || siblingViable || localFallbackViable,
 			purpose:                routeRes.dispatchPurpose(inference.PurposeAnthropicMessages),
 			origin:                 routeRes.dispatchOrigin(decision),
 		})
@@ -4639,7 +4653,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 	// Writing it forecloses any later rescue.
 	deferredErrFlushed := false
 	flushDeferredErr := func() {
-		if deferredErrFlushed {
+		if deferredErrFlushed || localFallback.holds(proxyErr, preludeBuf) {
 			return
 		}
 		deferredErrFlushed = true
@@ -4746,14 +4760,15 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			reqStats = providers.RequestMutationStats{}
 			logUpstreamBody(log, routeRes.SessionKey, baselineDecision, feats, baselinePrep.Body)
 			winnerIdx, proxyErr = s.dispatchWithFallback(baselineCtx, failoverInputs{
-				w:               contentSink,
-				buf:             preludeBuf,
-				initialDecision: baselineDecision,
-				bindings:        baselineBindings,
-				attempt:         baselineAttempt,
-				flushErr:        flushErrAsAnthropic,
-				purpose:         routeRes.dispatchPurpose(inference.PurposeAnthropicMessages),
-				origin:          routeRes.rescueOrigin(),
+				w:                      contentSink,
+				buf:                    preludeBuf,
+				initialDecision:        baselineDecision,
+				bindings:               baselineBindings,
+				attempt:                baselineAttempt,
+				flushErr:               flushErrAsAnthropic,
+				deferFlushOnExhaustion: localFallbackViable,
+				purpose:                routeRes.dispatchPurpose(inference.PurposeAnthropicMessages),
+				origin:                 routeRes.rescueOrigin(),
 			})
 			subscriptionPoolFailure = isSubscriptionPoolError(proxyErr)
 			decision = baselineDecision
@@ -4827,7 +4842,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 				flushErr:        flushErrAsAnthropic,
 				// A failed retry keeps the same dark model; hold the error so
 				// the sibling rescue below can still serve the turn.
-				deferFlushOnExhaustion: siblingViable,
+				deferFlushOnExhaustion: siblingViable || localFallbackViable,
 				purpose:                routeRes.dispatchPurpose(inference.PurposeAnthropicMessages),
 				origin:                 routeRes.dispatchOrigin(decision),
 			})
@@ -4932,6 +4947,70 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 	// the held error now so it's never dropped.
 	if siblingRescueOwed && proxyErr != nil && !preludeBuf.Committed() {
 		flushDeferredErr()
+	}
+
+	localFallbackUsed := false
+	if refusal := localFallback.refusal(proxyErr); refusal != nil && !preludeBuf.Committed() && ctx.Err() == nil {
+		target := localFallback.target
+		fallbackOpts := opts
+		fallbackOpts.TargetModel = target.Model
+		fallbackOpts.TargetProvider = target.Provider
+		fallbackOpts.Capabilities = router.Lookup(target.Model)
+		fallbackOpts.ModelSwitched = true
+		fallbackEffort := s.resolveEffort(ctx, target, fallbackOpts.Capabilities, routeRes.EscalateEffort)
+		fallbackEffort.apply(&fallbackOpts)
+		fallbackCtx := s.resolveCredentials(ctx, target.Provider, target.Model, r.Header)
+		fallbackOpts.FastMode = fastModeForAttempt(fallbackCtx, target.Model, target.Provider)
+		fallbackBindings := s.resolveBindingsForDispatch(fallbackCtx, target)
+		fallbackMarker := suppressMarkerIfRequested(ctx, r.Header, localFallback.marker(routeRes))
+		fallbackAttempt, fallbackBuildErr := buildAttempt(target, fallbackOpts, fallbackMarker)
+		switch {
+		case fallbackBuildErr != nil:
+			log.Error("Subscription local fallback: preparing the local request failed; surfacing the subscription error",
+				"err", fallbackBuildErr, "fallback_model", target.Model)
+		case len(fallbackBindings) == 0:
+			log.Warn("Subscription local fallback: local model has no usable binding; surfacing the subscription error",
+				"fallback_model", target.Model, "fallback_provider", target.Provider)
+		default:
+			localFallback.logServing(ctx, routeRes, refusal)
+			heldErr := proxyErr
+			respSummary = translate.ResponseSummary{}
+			reqStats = providers.RequestMutationStats{}
+			fallbackIdx, fallbackErr := s.dispatchWithFallback(fallbackCtx, failoverInputs{
+				w:                      contentSink,
+				buf:                    preludeBuf,
+				initialDecision:        target,
+				bindings:               fallbackBindings,
+				attempt:                fallbackAttempt,
+				flushErr:               flushErrAsAnthropic,
+				deferFlushOnExhaustion: true,
+				purpose:                routeRes.dispatchPurpose(inference.PurposeAnthropicMessages),
+				origin:                 policy.OverrideSourceDeployment,
+			})
+			if fallbackErr == nil || preludeBuf.Committed() {
+				winnerIdx, proxyErr = fallbackIdx, fallbackErr
+				subscriptionPoolFailure = isSubscriptionPoolError(proxyErr)
+				decision = target
+				bindings = fallbackBindings
+				marker = fallbackMarker
+				effortServed = fallbackEffort
+				localFallback.served(&routeRes)
+				localFallbackUsed = proxyErr == nil
+			} else {
+				// The local model failed before output: the client sees the
+				// subscription's own refusal, not the fallback's error.
+				log.Warn("Subscription local fallback: local model failed before output; surfacing the subscription error",
+					"fallback_model", target.Model, "upstream_status", upstreamStatus(fallbackErr), "err", fallbackErr)
+				preludeBuf.Discard()
+				proxyErr = heldErr
+			}
+		}
+	}
+	if localFallbackViable {
+		localFallback.done = true
+		if proxyErr != nil && !preludeBuf.Committed() {
+			flushDeferredErr()
+		}
 	}
 
 	subscriptionFailoverUsed = subscriptionFailoverUsed || subscriptionCredentialFallbackUsed(ctx)
@@ -5050,7 +5129,8 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 		Bool("dispatch.failover_used", finalProvider != primaryProvider || subscriptionFailoverUsed || siblingFailoverUsed).
 		Bool("dispatch.baseline_failover", baselineFailoverUsed).
 		Bool("dispatch.subscription_failover", subscriptionFailoverUsed).
-		Bool("dispatch.sibling_failover", siblingFailoverUsed)
+		Bool("dispatch.sibling_failover", siblingFailoverUsed).
+		Bool("dispatch.subscription_local_fallback", localFallbackUsed)
 	if s.effectiveCaptureMode(ctx) == CaptureOff {
 		upstreamBuilder.Int64("request.message_count", int64(feats.MessageCount)).
 			Bool("request.has_tools", feats.HasTools)
@@ -5322,7 +5402,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 	if preludeBuf.Committed() {
 		streamCut.noteCut(proxyErr)
 	}
-	log.Info("ProxyMessages complete", append(append([]any{"requested_model", feats.Model, "baseline_model", s.baselineFor(feats.Model), "decision_model", decision.Model, "decision_provider", decision.Provider, "primary_provider", primaryProvider, "primary_model", primaryModel, "fallback_attempts", winnerIdx, "failover_used", finalProvider != primaryProvider || subscriptionFailoverUsed || siblingFailoverUsed, "subscription_failover", subscriptionFailoverUsed, "decision_reason", decision.Reason, "requested_tier", routeRes.RequestedTier.String(), "decision_tier", catalog.TierFor(decision.Model).String(), "embedded_tokens", len(promptText) / 4, "total_input_tokens", feats.Tokens, "has_tools", feats.HasTools, "message_count", feats.MessageCount, "last_kind", feats.LastKind, "last_preview", s.zdrLogField(ctx, feats.LastPreview), "embed_input", embedInput, "cross_format", crossFormat, "sticky_hit", stickyHit, "route_ms", routeMs, "proxy_ms", proxyMs, "proxy_err", proxyErr, "upstream_err_body", s.zdrLogField(ctx, providers.UpstreamErrorBodyMessage(proxyErr)), "upstream_status", upstreamStatus(proxyErr), "upstream_finish_reason", respSummary.UpstreamFinishReason, "resp_stop_reason", respSummary.StopReason, "resp_refusal", refusalObs.refused, "resp_refusal_category", refusalObs.category, "stop_reason_promoted", respSummary.StopReasonPromoted, "tool_use_blocks", respSummary.ToolUseBlocks, "invalid_tool_args_blocks", respSummary.InvalidToolArgsBlocks, "last_tool_use_name", terminalToolUse.Name, "last_tool_use_input_bytes", terminalToolUse.InputBytes, "ended_on_tool_use", endedOnToolUse, "tool_error_counts", toolErrorTally, "text_only_turn_nudged", respSummary.TextOnlyTurnNudged, "stop_reason_demoted", respSummary.StopReasonDemoted, "suppressed_tool_calls", respSummary.SuppressedToolCalls, "tool_call_invalid_blocks", len(respSummary.ToolCallIssues), "cc_only_tools_stripped", reqStats.CCOnlyToolsStripped, "cc_task_reminders_stripped", reqStats.CCTaskRemindersStripped, "tool_references_unresolved", reqStats.ToolReferencesUnresolved, "gemini_reminder_injected", reqStats.GeminiReminderInjected, "gemini_validated_tool_mode", reqStats.GeminiValidatedToolMode, "resp_output_tokens", respSummary.OutputTokens, "resp_reasoning_tokens", extractor.ReasoningTokens(), "prelude_committed", preludeBuf.Committed(), "routing_marker", marker, "prior_served_model", routeRes.PriorServedModel, "hard_pinned", routeRes.HardPinned, "substituted_from_model", routeRes.SubstitutedFrom.Model, "substituted_from_provider", routeRes.SubstitutedFrom.Provider}, append(append(append(armStrikeLogFieldsWithPrimaryReason(armDemoted, armDemotionReasonValue, rescuedArmDemoted, rescuedArmDemotionReason), plannerLogFields(routeRes)...), streamCut.completionLogFields()...), rateLimit.completionLogFields()...)...), downgradeShadowLogFields(routeRes)...)...)
+	log.Info("ProxyMessages complete", append(append([]any{"requested_model", feats.Model, "baseline_model", s.baselineFor(feats.Model), "decision_model", decision.Model, "decision_provider", decision.Provider, "primary_provider", primaryProvider, "primary_model", primaryModel, "fallback_attempts", winnerIdx, "failover_used", finalProvider != primaryProvider || subscriptionFailoverUsed || siblingFailoverUsed, "subscription_failover", subscriptionFailoverUsed, "decision_reason", decision.Reason, "requested_tier", routeRes.RequestedTier.String(), "decision_tier", catalog.TierFor(decision.Model).String(), "embedded_tokens", len(promptText) / 4, "total_input_tokens", feats.Tokens, "has_tools", feats.HasTools, "message_count", feats.MessageCount, "last_kind", feats.LastKind, "last_preview", s.zdrLogField(ctx, feats.LastPreview), "embed_input", embedInput, "cross_format", crossFormat, "sticky_hit", stickyHit, "route_ms", routeMs, "proxy_ms", proxyMs, "proxy_err", proxyErr, "upstream_err_body", s.zdrLogField(ctx, providers.UpstreamErrorBodyMessage(proxyErr)), "upstream_status", upstreamStatus(proxyErr), "upstream_finish_reason", respSummary.UpstreamFinishReason, "resp_stop_reason", respSummary.StopReason, "resp_refusal", refusalObs.refused, "resp_refusal_category", refusalObs.category, "stop_reason_promoted", respSummary.StopReasonPromoted, "tool_use_blocks", respSummary.ToolUseBlocks, "invalid_tool_args_blocks", respSummary.InvalidToolArgsBlocks, "last_tool_use_name", terminalToolUse.Name, "last_tool_use_input_bytes", terminalToolUse.InputBytes, "ended_on_tool_use", endedOnToolUse, "tool_error_counts", toolErrorTally, "text_only_turn_nudged", respSummary.TextOnlyTurnNudged, "stop_reason_demoted", respSummary.StopReasonDemoted, "suppressed_tool_calls", respSummary.SuppressedToolCalls, "tool_call_invalid_blocks", len(respSummary.ToolCallIssues), "cc_only_tools_stripped", reqStats.CCOnlyToolsStripped, "cc_task_reminders_stripped", reqStats.CCTaskRemindersStripped, "tool_references_unresolved", reqStats.ToolReferencesUnresolved, "gemini_reminder_injected", reqStats.GeminiReminderInjected, "gemini_validated_tool_mode", reqStats.GeminiValidatedToolMode, "resp_output_tokens", respSummary.OutputTokens, "resp_reasoning_tokens", extractor.ReasoningTokens(), "prelude_committed", preludeBuf.Committed(), "routing_marker", marker, "prior_served_model", routeRes.PriorServedModel, "hard_pinned", routeRes.HardPinned, "substituted_from_model", routeRes.SubstitutedFrom.Model, "substituted_from_provider", routeRes.SubstitutedFrom.Provider, "subscription_local_fallback", localFallbackUsed}, append(append(append(armStrikeLogFieldsWithPrimaryReason(armDemoted, armDemotionReasonValue, rescuedArmDemoted, rescuedArmDemotionReason), plannerLogFields(routeRes)...), streamCut.completionLogFields()...), rateLimit.completionLogFields()...)...), downgradeShadowLogFields(routeRes)...)...)
 	policyRespBody, policyRespTrunc := capturedResponse(policyOutcomeCap)
 	var policyResp *policyOutcomeResponse
 	if policyOutcomeCap != nil {
@@ -5772,7 +5852,7 @@ func (s *Service) reportPolicyOutcome(ctx context.Context, res turnLoopResult, d
 	}
 	switch {
 	case substituted:
-		payload["training_exclusion_reason"] = reasonMidTierSubstitute
+		payload["training_exclusion_reason"] = res.SubstitutionReason
 	case authoritativeModelMismatch:
 		payload["training_exclusion_reason"] = "selected_served_model_mismatch"
 	case effortMismatch:
@@ -7617,6 +7697,12 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 		(s.shouldFailover(ctx) || s.gatewaySiblingAllowed(ctx, siblingDecisions[0])) &&
 		!paidFallbackForbidden(ctx)
 
+	// Last in the rescue chain: once the subscription refused the turn and no
+	// paid retry or peer served it, the local model does.
+	ctx, refusalNote := withSubscriptionRefusalNote(ctx)
+	localFallback := s.planSubscriptionLocalFallback(ctx, routeRes, routeRequest, decision, r.Header, refusalNote)
+	localFallbackViable := localFallback != nil
+
 	primaryProvider := decision.Provider
 	primaryModel := decision.Model
 	primaryDecision := decision
@@ -7674,7 +7760,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 		bindings:               bindings,
 		attempt:                attempt,
 		flushErr:               flushErrAsOpenAI,
-		deferFlushOnExhaustion: cyberRetryViable || codexRetryViable || claudeRetryViable || siblingViable,
+		deferFlushOnExhaustion: cyberRetryViable || codexRetryViable || claudeRetryViable || siblingViable || localFallbackViable,
 		purpose:                routeRes.dispatchPurpose(surfacePurpose),
 		origin:                 routeRes.dispatchOrigin(decision),
 	})
@@ -7689,7 +7775,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 	// proxy must not write it here as well.
 	deferredErrFlushed := false
 	flushDeferredErr := func() {
-		if deferredErrFlushed {
+		if deferredErrFlushed || localFallback.holds(proxyErr, preludeBuf) {
 			return
 		}
 		deferredErrFlushed = true
@@ -7754,7 +7840,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 				flushErr:        flushErrAsOpenAI,
 				// A failed retry keeps the same model; hold the error so the
 				// cyber-refusal rescue below can still serve the turn.
-				deferFlushOnExhaustion: cyberRetryViable || siblingViable,
+				deferFlushOnExhaustion: cyberRetryViable || siblingViable || localFallbackViable,
 				purpose:                routeRes.dispatchPurpose(surfacePurpose),
 				origin:                 routeRes.dispatchOrigin(decision),
 			})
@@ -7796,7 +7882,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 				bindings:               subBindings,
 				attempt:                subAttempt,
 				flushErr:               flushErrAsOpenAI,
-				deferFlushOnExhaustion: cyberRetryViable || siblingViable,
+				deferFlushOnExhaustion: cyberRetryViable || siblingViable || localFallbackViable,
 				purpose:                routeRes.dispatchPurpose(surfacePurpose),
 				origin:                 routeRes.dispatchOrigin(decision),
 			})
@@ -7870,7 +7956,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 				bindings:               retryBindings,
 				attempt:                retryAttempt,
 				flushErr:               flushErrAsOpenAI,
-				deferFlushOnExhaustion: siblingViable,
+				deferFlushOnExhaustion: siblingViable || localFallbackViable,
 				purpose:                routeRes.dispatchPurpose(surfacePurpose),
 				origin:                 routeRes.rescueOrigin(),
 			})
@@ -7964,6 +8050,82 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 	// the held error now so it's never dropped.
 	if siblingRescueOwed && proxyErr != nil && !preludeBuf.Committed() {
 		flushDeferredErr()
+	}
+
+	localFallbackUsed := false
+	if refusal := localFallback.refusal(proxyErr); refusal != nil && !preludeBuf.Committed() && ctx.Err() == nil {
+		target := localFallback.target
+		fallbackOpts := opts
+		fallbackOpts.TargetModel = target.Model
+		fallbackOpts.TargetProvider = target.Provider
+		fallbackOpts.Capabilities = router.Lookup(target.Model)
+		fallbackOpts.ModelSwitched = true
+		fallbackEffort := s.resolveEffort(ctx, target, fallbackOpts.Capabilities, routeRes.EscalateEffort)
+		fallbackEffort.apply(&fallbackOpts)
+		fallbackCtx := s.resolveCredentials(ctx, target.Provider, target.Model, r.Header)
+		fallbackOpts.FastMode = fastModeForAttempt(fallbackCtx, target.Model, target.Provider)
+		fallbackBindings := s.resolveBindingsForDispatch(fallbackCtx, target)
+		fallbackMarker := suppressMarkerIfRequested(ctx, r.Header, localFallback.marker(routeRes))
+		fallbackAttempt, fallbackBuildErr := buildAttempt(target, fallbackOpts, fallbackMarker)
+		rw, responsesIngress := w.(*translate.ResponsesWriter)
+		switch {
+		case fallbackBuildErr != nil:
+			log.Error("Subscription local fallback: preparing the local request failed; surfacing the subscription error",
+				"err", fallbackBuildErr, "fallback_model", target.Model)
+		case len(fallbackBindings) == 0:
+			log.Warn("Subscription local fallback: local model has no usable binding; surfacing the subscription error",
+				"fallback_model", target.Model, "fallback_provider", target.Provider)
+		// The refused attempt streamed native Responses; the local model speaks
+		// Chat Completions, so the writer has to translate for the rest of the turn.
+		case verbatimPassthrough && (!responsesIngress || !rw.ClearPassthrough()):
+			log.Warn("Subscription local fallback: Responses passthrough already committed; surfacing the subscription error",
+				"fallback_model", target.Model)
+		default:
+			localFallback.logServing(ctx, routeRes, refusal)
+			if verbatimPassthrough {
+				verbatimPassthrough = false
+				responsesPassthrough = false
+				if fallbackMarker != "" {
+					rw.SetBadgeText(fallbackMarker)
+				}
+			}
+			heldErr := proxyErr
+			respSummary = translate.ResponseSummary{}
+			fallbackIdx, fallbackErr := s.dispatchWithFallback(fallbackCtx, failoverInputs{
+				w:                      contentSink,
+				buf:                    preludeBuf,
+				initialDecision:        target,
+				bindings:               fallbackBindings,
+				attempt:                fallbackAttempt,
+				flushErr:               flushErrAsOpenAI,
+				deferFlushOnExhaustion: true,
+				purpose:                routeRes.dispatchPurpose(surfacePurpose),
+				origin:                 policy.OverrideSourceDeployment,
+			})
+			if fallbackErr == nil || preludeBuf.Committed() {
+				winnerIdx, proxyErr = fallbackIdx, fallbackErr
+				subscriptionPoolFailure = isSubscriptionPoolError(proxyErr)
+				decision = target
+				bindings = fallbackBindings
+				marker = fallbackMarker
+				effortServed = fallbackEffort
+				localFallback.served(&routeRes)
+				localFallbackUsed = proxyErr == nil
+			} else {
+				// The local model failed before output: the client sees the
+				// subscription's own refusal, not the fallback's error.
+				log.Warn("Subscription local fallback: local model failed before output; surfacing the subscription error",
+					"fallback_model", target.Model, "upstream_status", upstreamStatus(fallbackErr), "err", fallbackErr)
+				preludeBuf.Discard()
+				proxyErr = heldErr
+			}
+		}
+	}
+	if localFallbackViable {
+		localFallback.done = true
+		if proxyErr != nil && !preludeBuf.Committed() {
+			flushDeferredErr()
+		}
 	}
 
 	if subscriptionCredentialFallbackUsed(ctx) {
@@ -8066,7 +8228,8 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 		Bool("dispatch.failover_used", finalProvider != primaryProvider || codexFailoverUsed || claudeFailoverUsed || siblingFailoverUsed).
 		Bool("dispatch.subscription_failover", codexFailoverUsed || claudeFailoverUsed).
 		Bool("dispatch.cyber_refusal_retry", cyberRetryRan).
-		Bool("dispatch.sibling_failover", siblingFailoverUsed)
+		Bool("dispatch.sibling_failover", siblingFailoverUsed).
+		Bool("dispatch.subscription_local_fallback", localFallbackUsed)
 	if responsesSurface, _ := ctx.Value(responsesSurfaceContextKey{}).(bool); responsesSurface {
 		openaiUpstreamBuilder.String("request.api_surface", string(requestAPISurfaceResponses))
 	}
@@ -8277,7 +8440,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 		)
 	}
 
-	log.Info("ProxyOpenAIChatCompletion complete", append(append([]any{"requested_model", feats.Model, "baseline_model", s.baselineFor(feats.Model), "decision_model", decision.Model, "decision_provider", decision.Provider, "primary_provider", primaryProvider, "primary_model", primaryModel, "fallback_attempts", winnerIdx, "failover_used", finalProvider != primaryProvider || codexFailoverUsed || claudeFailoverUsed || siblingFailoverUsed, "subscription_failover", codexFailoverUsed || claudeFailoverUsed, "decision_reason", decision.Reason, "requested_tier", routeRes.RequestedTier.String(), "decision_tier", catalog.TierFor(decision.Model).String(), "embedded_tokens", len(promptText) / 4, "total_input_tokens", feats.Tokens, "has_tools", feats.HasTools, "embed_input", embedInput, "cross_format", crossFormat, "sticky_hit", stickyHit, "pin_tier", pinTier, "turn_type", string(tt), "route_ms", routeMs, "proxy_ms", proxyMs, "proxy_err", proxyErr, "upstream_err_body", s.zdrLogField(ctx, providers.UpstreamErrorBodyMessage(proxyErr)), "upstream_status", upstreamStatus(proxyErr), "upstream_finish_reason", respSummary.UpstreamFinishReason, "resp_stop_reason", respSummary.StopReason, "stop_reason_promoted", respSummary.StopReasonPromoted, "tool_use_blocks", respSummary.ToolUseBlocks, "invalid_tool_args_blocks", respSummary.InvalidToolArgsBlocks, "tool_call_invalid_blocks", len(respSummary.ToolCallIssues), "routing_marker", marker, "prior_served_model", routeRes.PriorServedModel, "hard_pinned", routeRes.HardPinned, "substituted_from_model", routeRes.SubstitutedFrom.Model, "substituted_from_provider", routeRes.SubstitutedFrom.Provider}, append(append(armStrikeLogFieldsWithPrimaryReason(armDemotedOAI, armDemotionReasonOAI, rescuedArmDemotedOAI, rescuedArmDemotionReasonOAI), plannerLogFields(routeRes)...), rateLimit.completionLogFields()...)...), downgradeShadowLogFields(routeRes)...)...)
+	log.Info("ProxyOpenAIChatCompletion complete", append(append([]any{"requested_model", feats.Model, "baseline_model", s.baselineFor(feats.Model), "decision_model", decision.Model, "decision_provider", decision.Provider, "primary_provider", primaryProvider, "primary_model", primaryModel, "fallback_attempts", winnerIdx, "failover_used", finalProvider != primaryProvider || codexFailoverUsed || claudeFailoverUsed || siblingFailoverUsed, "subscription_failover", codexFailoverUsed || claudeFailoverUsed, "decision_reason", decision.Reason, "requested_tier", routeRes.RequestedTier.String(), "decision_tier", catalog.TierFor(decision.Model).String(), "embedded_tokens", len(promptText) / 4, "total_input_tokens", feats.Tokens, "has_tools", feats.HasTools, "embed_input", embedInput, "cross_format", crossFormat, "sticky_hit", stickyHit, "pin_tier", pinTier, "turn_type", string(tt), "route_ms", routeMs, "proxy_ms", proxyMs, "proxy_err", proxyErr, "upstream_err_body", s.zdrLogField(ctx, providers.UpstreamErrorBodyMessage(proxyErr)), "upstream_status", upstreamStatus(proxyErr), "upstream_finish_reason", respSummary.UpstreamFinishReason, "resp_stop_reason", respSummary.StopReason, "stop_reason_promoted", respSummary.StopReasonPromoted, "tool_use_blocks", respSummary.ToolUseBlocks, "invalid_tool_args_blocks", respSummary.InvalidToolArgsBlocks, "tool_call_invalid_blocks", len(respSummary.ToolCallIssues), "routing_marker", marker, "prior_served_model", routeRes.PriorServedModel, "hard_pinned", routeRes.HardPinned, "substituted_from_model", routeRes.SubstitutedFrom.Model, "substituted_from_provider", routeRes.SubstitutedFrom.Provider, "subscription_local_fallback", localFallbackUsed}, append(append(armStrikeLogFieldsWithPrimaryReason(armDemotedOAI, armDemotionReasonOAI, rescuedArmDemotedOAI, rescuedArmDemotionReasonOAI), plannerLogFields(routeRes)...), rateLimit.completionLogFields()...)...), downgradeShadowLogFields(routeRes)...)...)
 	s.reportPolicyOutcome(ctx, routeRes, decision, effortServed, finalProvider, fastServed, feats.Tokens, in, out, cacheCreation, cacheRead, routeMs, proxyMs, proxyErr, nil)
 
 	// Subscription-only mode disables paid failover by pinning dispatch to the

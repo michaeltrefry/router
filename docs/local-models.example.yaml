@@ -38,3 +38,14 @@ turn_routing:
 mid_tier_substitute:
   model: qwen3.8-flash-next
   enabled: true
+
+# Optional: when the caller's Claude or Codex subscription refuses a turn for
+# its rate limit or plan exhaustion (a 429, a Codex usage_limit_reached /
+# insufficient_quota rejection, an exhausted subscription pool, or a plan the
+# router already read spent) before any output reached the client, serve that
+# turn on this local model instead of returning the error. Any tier is
+# accepted. A paid API key for the same provider, when one is configured, still
+# retries the turn first. Omit the block, or set enabled: false, to turn it off.
+subscription_fallback:
+  model: qwen3.8-flash-next
+  enabled: true

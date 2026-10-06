@@ -283,6 +283,51 @@ reads `→ <substitute> (local) · local substitute for <original model>`. Its p
 original model as the selection and is excluded from training
 (`training_exclusion_reason: mid_tier_substitute`).
 
+#### Subscription exhaustion fallback
+
+An optional top-level `subscription_fallback` block serves a turn on one of
+the configured local models when the caller's Claude or Codex subscription
+refuses it for its limit:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `model` | yes | `id` of an entry under `models`; any tier. |
+| `enabled` | no | `false` keeps the block but falls back to nothing. Default `true`. |
+
+The fallback answers only a limit refusal on a turn dispatched on the
+caller's subscription credential (Claude OAuth, or Codex ChatGPT OAuth with its
+account id) or a managed subscription pool: an upstream 429, a Codex
+`usage_limit_reached` / `insufficient_quota` rejection, an exhausted
+subscription pool, or a subscription the usage observer already read spent
+when no paid key for that provider exists (the suppressed subscription leaves
+that turn without a credential, so any failure of it qualifies). Authentication rejections, 400s and other
+upstream errors reach the client as before. It runs only while nothing has
+reached the client: once the stream commits, a failure is never retried.
+
+It is the last rescue for the turn. The existing recoveries keep their order
+and run first: subscription account rotation, the same model on a paid
+deployment or BYOK key for that provider (when one exists), baseline and
+same-cluster failover. Only when none of them served the turn does the local
+model take it. Subscriptions are never displaced: the session pin and HMM
+history record the original selection, so the next turn goes back to the
+subscription, and the turn's policy outcome is excluded from training
+(`training_exclusion_reason: subscription_local_fallback`).
+
+An explicit `/force-model`, a caller-model passthrough, or a request the local
+model cannot carry (the same checks as turn-type routing: excluded by the
+installation, provider not enabled, disabled for automatic routing, beyond its
+`context_window`, images it cannot read, or tools on a `tool_use: low` or
+`agentic: low` model) keeps the subscription's error. When the local model
+itself fails before output, the client receives the subscription's original
+error.
+
+A fallback turn logs `Subscription local fallback serving turn` with the
+original and fallback models and the refusal's status; its completion line
+carries `subscription_local_fallback=true`, `decision_reason=subscription_local_fallback`
+and `substituted_from_model` / `substituted_from_provider` naming the original
+selection; the span carries `dispatch.subscription_local_fallback`. Its routing
+marker reads `→ <id> (local) · local fallback after <original model> subscription limit`.
+
 ### Key-pair auth
 
 A gateway whose tenant forbids long-lived tokens can be given an RSA private
