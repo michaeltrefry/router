@@ -64,11 +64,11 @@ def request_deadline(budget_header: str | None) -> float:
     return time.monotonic() + int(budget_header) / 1000
 
 
-async def cancel_on_disconnect(request: Request, work: asyncio.Task[tuple[list[int], str]]) -> None:
-    """Cancels in-flight work once the caller hangs up, which aborts it in the engine."""
+async def cancel_on_disconnect(request: Request, classification_task: asyncio.Task[tuple[list[int], str]]) -> None:
+    """Cancels in-flight classification_task once the caller hangs up, which aborts it in the engine."""
     while (await request.receive())["type"] != "http.disconnect":
         pass
-    work.cancel()
+    classification_task.cancel()
 
 
 async def tokenize_and_classify(predictor: Predictor, text: str) -> tuple[list[int], str]:
@@ -113,11 +113,11 @@ def create_app(predictor: Predictor, release_sha256: str, bearer: str) -> FastAP
             raise HTTPException(503, "classifier busy")
         in_flight += 1
         try:
-            # The deadline and disconnect watcher cover tokenization too, so stale work frees its slot.
-            work: asyncio.Task[tuple[list[int], str]] = asyncio.create_task(tokenize_and_classify(predictor, classification.user_text))
-            disconnect_watcher: asyncio.Task[None] = asyncio.create_task(cancel_on_disconnect(request, work))
+            # The deadline and disconnect watcher cover tokenization too, so stale classification_task frees its slot.
+            classification_task: asyncio.Task[tuple[list[int], str]] = asyncio.create_task(tokenize_and_classify(predictor, classification.user_text))
+            disconnect_watcher: asyncio.Task[None] = asyncio.create_task(cancel_on_disconnect(request, classification_task))
             try:
-                tokens, output = await asyncio.wait_for(work, timeout=deadline - time.monotonic())
+                tokens, output = await asyncio.wait_for(classification_task, timeout=deadline - time.monotonic())
             except TokenLimitExceeded:
                 raise HTTPException(413, "input token limit exceeded") from None
             except TimeoutError:
