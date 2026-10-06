@@ -84,6 +84,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const content = "Use the organization's documented workflow.";
+const validKeys = new Set(["rk_policy_test", "rk_project_test"]);
 const audienceFile = process.argv[3];
 const requestFile = process.argv[4];
 const modeFile = process.argv[5];
@@ -95,7 +96,7 @@ const server = http.createServer((request, response) => {
     return;
   }
   fs.appendFileSync(requestFile, "request\n");
-  if (request.headers["x-weave-router-key"] !== "rk_policy_test") {
+  if (!validKeys.has(request.headers["x-weave-router-key"])) {
     response.writeHead(401).end();
     return;
   }
@@ -177,6 +178,7 @@ test -z "$(run_hook SessionStart startup)"
 test ! -s "$work/leaks"
 test -z "$(run_hook SessionStart startup "X-Weave-Router-Key: invalid")"
 
+printf '%s' valid >"$work/mode"
 project="$work/project with spaces"
 mkdir -p "$project"
 printf '%s\n' '{"type":"module"}' >"$project/package.json"
