@@ -1476,7 +1476,8 @@ func (s *Service) runTurnLoop(
 				// that must not be bypassed just because context happens to fit).
 				policyExcluded := s.excludedModelsForRequest(ctx)
 				_, policyExcludes := policyExcluded[pin.Model]
-				compatibilityExcludes := req.TranslationRequirements.Images && !catalog.AcceptsImages(pin.Model)
+				compatibilityExcludes := (req.TranslationRequirements.Images && !catalog.AcceptsImages(pin.Model)) ||
+					advisorRejectsModel(env, pin.Model)
 				if !policyExcludes && !compatibilityExcludes {
 					if len(req.ExcludedModels) > 0 {
 						pruned := make(map[string]struct{}, len(req.ExcludedModels)-1)

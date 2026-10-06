@@ -21,8 +21,8 @@ func TestExcludeAdvisorOutrankingModels_ExcludesModelsTheAdvisorCannotAdvise(t *
 	env, err := translate.ParseAnthropic([]byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}],"tools":[{"name":"Bash","input_schema":{"type":"object"}},{"type":"advisor_20260301","name":"advisor","model":"claude-opus-5-5-20260801"}]}`))
 	require.NoError(t, err)
 
-	out, unadvisable := excludeAdvisorOutrankingModels(env, map[string]struct{}{"claude-fable-5": {}}, available)
-	assert.Equal(t, []string{"claude-fable-5", "claude-fable-5-1", "claude-sonnet-4-5"}, unadvisable,
+	out, modelsAdvisorCannotAdvise := excludeAdvisorOutrankingModels(env, map[string]struct{}{"claude-fable-5": {}}, available)
+	assert.Equal(t, []string{"claude-fable-5", "claude-fable-5-1", "claude-sonnet-4-5"}, modelsAdvisorCannotAdvise,
 		"already-excluded and unranked Claude models are reported so later re-admission keeps them out")
 	assert.Equal(t, map[string]struct{}{"claude-fable-5": {}, "claude-fable-5-1": {}, "claude-sonnet-4-5": {}}, out)
 }
@@ -43,4 +43,13 @@ func TestSafetyExcludedModelsIncludesAdvisorOutranking(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, map[string]struct{}{"claude-fable-5-1": {}}, s.safetyExcludedModels(env, 0, nil))
+}
+
+func TestAdvisorRejectsModel(t *testing.T) {
+	env, err := translate.ParseAnthropic([]byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"advisor_20260301","name":"advisor","model":"claude-opus-5-5"}]}`))
+	require.NoError(t, err)
+	assert.True(t, advisorRejectsModel(env, "claude-fable-5-1"))
+	assert.True(t, advisorRejectsModel(env, "claude-sonnet-4-5"), "unranked Claude models take no advisor")
+	assert.False(t, advisorRejectsModel(env, "claude-opus-5"))
+	assert.False(t, advisorRejectsModel(env, "gpt-5.5"))
 }
