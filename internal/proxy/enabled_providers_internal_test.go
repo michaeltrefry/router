@@ -362,3 +362,24 @@ func TestEnabledProvidersForRequest_VendorByokKeyDoesNotDisplaceVendors(t *testi
 	assert.Contains(t, got, providers.ProviderOpenAI,
 		"a vendor BYOK key is not a gateway and must not narrow the eligible set")
 }
+
+// A deployment-keyed local model must not displace the caller's Claude
+// subscription the way a BYOK gateway displaces every vendor.
+func TestEnabledProvidersForRequest_LocalModelKeepsSubscriptionEnrollment(t *testing.T) {
+	local := providers.LocalProviderName("test-local")
+	s := &Service{
+		clients: dispatch.NewClients(map[string]providers.Client{
+			providers.ProviderAnthropic: nil,
+			local:                       nil,
+		}),
+		deploymentKeyedProviders:     map[string]struct{}{local: {}},
+		passthroughEligibleProviders: map[string]struct{}{providers.ProviderAnthropic: {}},
+	}
+	ctx := context.WithValue(context.Background(), InstallationIDContextKey{}, testInstallationID)
+	headers := http.Header{"Authorization": []string{"Bearer sk-ant-oat01-subscription-token"}}
+
+	got := s.enabledProvidersForRequest(ctx, providers.ProviderAnthropic, headers)
+
+	assert.Contains(t, got, providers.ProviderAnthropic, "the subscription bearer must still enroll Anthropic")
+	assert.Contains(t, got, local, "the local model stays available alongside it")
+}

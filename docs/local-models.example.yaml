@@ -1,0 +1,20 @@
+# Self-hosted OpenAI-compatible models. Point ROUTER_LOCAL_MODELS_FILE at a copy
+# of this file; each entry registers its own provider (local_<id>) and catalog
+# row, and becomes forceable with `x-weave-force-model: <id>`.
+models:
+  - id: qwen3.8-flash-next
+    # OpenAI-compatible base; /chat/completions is appended.
+    base_url: http://localhost:8081/v1
+    # Name of the env var holding the server's bearer key (not the key itself).
+    api_key_env: LOCAL_QWEN_API_KEY
+    # Model name the server expects in the request body.
+    upstream_model: qwen3.8-flash-next-unsloth-ud-q4_k_xl
+    context_window: 262144
+    # low | mid | high
+    tier: mid
+    # default | low — low keeps the model off tool-bearing / agentic turns.
+    tool_use: default
+    agentic: default
+    image_input: false
+    # reasoning_content (OpenAI-compatible field) | think_tags (inline <think>)
+    reasoning_format: reasoning_content
