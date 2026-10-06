@@ -272,6 +272,10 @@ func (e *RequestEnvelope) buildResponsesFromAnthropic(opts EmitOptions) ([]byte,
 	// See buildOpenAIFromAnthropic: native server tools cannot cross to a
 	// non-Anthropic upstream without becoming phantom client tools.
 	body, stats.ServerToolsStripped = websearch.StripServerTools(body)
+	body, err = applyAnthropicToolChanges(body, openAIMaxTools)
+	if err != nil {
+		return nil, stats, err
+	}
 
 	jw := newJSONWriter()
 	jw.Obj()

@@ -145,6 +145,15 @@ type localUpstream struct {
 }
 
 func newLocalUpstream(t *testing.T) *localUpstream {
+	return newScriptedLocalUpstream(t,
+		`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"x","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}`+"\n\n"+
+			`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1}}`+"\n\n"+
+			"data: [DONE]\n\n")
+}
+
+// newScriptedLocalUpstream answers the nth request with streams[n] verbatim
+// (the last stream repeats once the script runs out).
+func newScriptedLocalUpstream(t *testing.T, streams ...string) *localUpstream {
 	u := &localUpstream{}
 	u.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -152,16 +161,11 @@ func newLocalUpstream(t *testing.T) *localUpstream {
 		u.paths = append(u.paths, r.URL.Path)
 		u.bodies = append(u.bodies, body)
 		u.authz = append(u.authz, r.Header.Get("Authorization"))
+		n := min(len(u.bodies), len(streams)) - 1
 		u.mu.Unlock()
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		for _, chunk := range []string{
-			`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"x","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}`,
-			`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1}}`,
-		} {
-			_, _ = io.WriteString(w, "data: "+chunk+"\n\n")
-		}
-		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		_, _ = io.WriteString(w, streams[n])
 	}))
 	t.Cleanup(u.server.Close)
 	u.baseURL = u.server.URL + "/v1"
