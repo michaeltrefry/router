@@ -44,8 +44,6 @@ func advisorRejectsModel(env *translate.RequestEnvelope, model string) bool {
 	return ok && advisorCannotAdvise(advisorRank, model)
 }
 
-// advisorCannotAdvise is true for a Claude model ranked above the advisor or
-// with no advisor rank at all.
 func advisorCannotAdvise(advisorRank int, model string) bool {
 	if !strings.HasPrefix(model, "claude-") {
 		return false

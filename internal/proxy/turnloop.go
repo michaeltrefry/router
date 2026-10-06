@@ -1441,6 +1441,15 @@ func (s *Service) runTurnLoop(
 		}
 	}
 
+	if pinFound && advisorRejectsModel(env, pin.Model) {
+		log.Info("Session pin dropped: the request's advisor tool cannot advise the pinned model",
+			"pin_model", pin.Model,
+			"advisor_model", env.AdvisorToolModel(),
+		)
+		pinFound = false
+		pin = sessionpin.Pin{}
+	}
+
 	// If the pre-filter excluded the pinned model for context overflow,
 	// re-verify with a direct fit-check before evicting the pin. Must reuse
 	// the pre-filter's estimate (ContextOverflowTokenEstimate, ÷4) rather than
@@ -1476,8 +1485,7 @@ func (s *Service) runTurnLoop(
 				// that must not be bypassed just because context happens to fit).
 				policyExcluded := s.excludedModelsForRequest(ctx)
 				_, policyExcludes := policyExcluded[pin.Model]
-				compatibilityExcludes := (req.TranslationRequirements.Images && !catalog.AcceptsImages(pin.Model)) ||
-					advisorRejectsModel(env, pin.Model)
+				compatibilityExcludes := req.TranslationRequirements.Images && !catalog.AcceptsImages(pin.Model)
 				if !policyExcludes && !compatibilityExcludes {
 					if len(req.ExcludedModels) > 0 {
 						pruned := make(map[string]struct{}, len(req.ExcludedModels)-1)
