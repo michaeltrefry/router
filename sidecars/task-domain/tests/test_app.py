@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 
 import httpx
 import pytest
@@ -89,7 +90,7 @@ def test_bad_requests(changes, status):
     assert client.post("/classify", json=REQUEST | changes, headers=HEADERS).status_code == status
 
 
-@pytest.mark.parametrize("budget", ["0", "-5", "1.5", "abc", "10001", b"\xb2", b"\xb9\xb2"])
+@pytest.mark.parametrize("budget", ["0", "-5", "1.5", "abc", "10001", "9" * 5000, b"\xb2", b"\xb9\xb2"])
 def test_invalid_budget_header(budget):
     client = TestClient(create_app(Predictor(), RELEASE, BEARER))
     response = client.post("/classify", json=REQUEST, headers=HEADERS | {BUDGET_HEADER: budget})
@@ -166,7 +167,9 @@ def test_deadline_cancels_the_engine_request_and_frees_its_slot(monkeypatch):
 
     async def scenario():
         async with client_for(predictor) as client:
-            expired = await client.post("/classify", json=REQUEST, headers=HEADERS | {BUDGET_HEADER: "50"})
+            expired_task = asyncio.create_task(client.post("/classify", json=REQUEST, headers=HEADERS | {BUDGET_HEADER: "300"}))
+            await wait_until(lambda: predictor.active == 1)
+            expired = await expired_task
             cancelled = predictor.cancelled
             predictor.release.set()
             after = await client.post("/classify", json=REQUEST, headers=HEADERS)
@@ -176,6 +179,50 @@ def test_deadline_cancels_the_engine_request_and_frees_its_slot(monkeypatch):
     assert (expired.status_code, expired.json()["detail"]) == (503, "classification deadline exceeded")
     assert cancelled == 1
     assert after.status_code == 200
+
+
+class SlowEncoder(HeldPredictor):
+    """Tokenization blocks until released; classification is recorded if it is ever reached."""
+
+    def __init__(self):
+        super().__init__()
+        self.encode_release = threading.Event()
+        self.classified = 0
+
+    def encode(self, text):
+        assert self.encode_release.wait(5)
+        return super().encode(text)
+
+    async def classify(self, tokens):
+        self.classified += 1
+        return self.output
+
+
+def test_deadline_covers_tokenization_and_frees_the_slot(monkeypatch):
+    monkeypatch.setattr(app_module, "MAX_IN_FLIGHT", 1)
+    predictor = SlowEncoder()
+
+    async def scenario():
+        async with client_for(predictor) as client:
+            expired = await client.post("/classify", json=REQUEST, headers=HEADERS | {BUDGET_HEADER: "100"})
+            predictor.encode_release.set()
+            after = await client.post("/classify", json=REQUEST, headers=HEADERS)
+            return expired, after
+
+    expired, after = asyncio.run(scenario())
+    assert (expired.status_code, expired.json()["detail"]) == (503, "classification deadline exceeded")
+    assert after.status_code == 200
+    assert predictor.classified == 1
+
+
+def test_tokenizer_failure_is_unavailable_not_a_server_error():
+    class BrokenTokenizer(Predictor):
+        def encode(self, text):
+            raise RuntimeError("tokenizer crashed")
+
+    client = TestClient(create_app(BrokenTokenizer(), RELEASE, BEARER))
+    response = client.post("/classify", json=REQUEST, headers=HEADERS)
+    assert (response.status_code, response.json()["detail"]) == (503, "classifier unavailable")
 
 
 def test_disconnected_caller_cancels_the_engine_request():

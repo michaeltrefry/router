@@ -72,9 +72,10 @@ if __name__ == "__main__":
     bearer: str = os.environ["TASK_DOMAIN_BEARER"]
     # Engine startup takes minutes; reject a bad secret before spending them.
     require_strong_bearer(bearer)
-    # uvicorn re-raises SIGTERM after its graceful shutdown; with the default handler that
-    # kills the process before the engine shutdown below can run.
-    signal.signal(signal.SIGTERM, exit_on_sigterm)
+    # A SIGTERM while the engine core is starting is deferred until construction returns,
+    # so the shutdown below always owns the core process that holds the GPU.
+    deferred_signals: list[int] = []
+    signal.signal(signal.SIGTERM, lambda signum, frame: deferred_signals.append(signum))
     # Build the engine here in module scope, outside any function and before the event loop
     # starts. Built inside a function (or inside the running loop) the same engine served
     # concurrent requests about 2x slower on an L4 with vLLM 0.31.0, reproducibly.
@@ -85,6 +86,11 @@ if __name__ == "__main__":
         gpu_memory_utilization=0.85, seed=0,
     ))
     try:
+        # uvicorn re-raises SIGTERM after its graceful shutdown; with the default handler that
+        # kills the process before the engine shutdown below can run.
+        signal.signal(signal.SIGTERM, exit_on_sigterm)
+        if deferred_signals:
+            raise SystemExit(128 + deferred_signals[0])
         asyncio.run(serve(QwenPredictor(tokenizer, engine), release_sha256, bearer))
     finally:
         # The engine core is a child process holding the GPU; without this it outlives

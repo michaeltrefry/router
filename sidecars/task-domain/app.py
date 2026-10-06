@@ -22,6 +22,10 @@ DEFAULT_BUDGET_SECONDS: Final = 2.9
 MAX_IN_FLIGHT: Final = 256
 
 
+class TokenLimitExceeded(Exception):
+    pass
+
+
 class Predictor(Protocol):
     def encode(self, text: str) -> list[int]: ...
 
@@ -53,16 +57,26 @@ async def warm_up(predictor: Predictor, texts: Sequence[str]) -> None:
 def request_deadline(budget_header: str | None) -> float:
     if budget_header is None:
         return time.monotonic() + DEFAULT_BUDGET_SECONDS
-    if not (budget_header.isascii() and budget_header.isdecimal()) or not 1 <= int(budget_header) <= MAX_BUDGET_MILLISECONDS:
+    # The length check keeps int() from rejecting very long digit strings with a ValueError.
+    if (not (budget_header.isascii() and budget_header.isdecimal()) or len(budget_header) > len(str(MAX_BUDGET_MILLISECONDS))
+            or not 1 <= int(budget_header) <= MAX_BUDGET_MILLISECONDS):
         raise HTTPException(400, "invalid classification budget")
     return time.monotonic() + int(budget_header) / 1000
 
 
-async def cancel_on_disconnect(request: Request, classification: asyncio.Task[str]) -> None:
+async def cancel_on_disconnect(request: Request, work: asyncio.Task[tuple[list[int], str]]) -> None:
     """Cancels in-flight work once the caller hangs up, which aborts it in the engine."""
     while (await request.receive())["type"] != "http.disconnect":
         pass
-    classification.cancel()
+    work.cancel()
+
+
+async def tokenize_and_classify(predictor: Predictor, text: str) -> tuple[list[int], str]:
+    try:
+        tokens: list[int] = await run_in_threadpool(predictor.encode, text)
+    except ValueError:
+        raise TokenLimitExceeded() from None
+    return tokens, await predictor.classify(tokens)
 
 
 def require_strong_bearer(bearer: str) -> None:
@@ -99,14 +113,13 @@ def create_app(predictor: Predictor, release_sha256: str, bearer: str) -> FastAP
             raise HTTPException(503, "classifier busy")
         in_flight += 1
         try:
+            # The deadline and disconnect watcher cover tokenization too, so stale work frees its slot.
+            work: asyncio.Task[tuple[list[int], str]] = asyncio.create_task(tokenize_and_classify(predictor, classification.user_text))
+            disconnect_watcher: asyncio.Task[None] = asyncio.create_task(cancel_on_disconnect(request, work))
             try:
-                tokens: list[int] = await run_in_threadpool(predictor.encode, classification.user_text)
-            except ValueError:
+                tokens, output = await asyncio.wait_for(work, timeout=deadline - time.monotonic())
+            except TokenLimitExceeded:
                 raise HTTPException(413, "input token limit exceeded") from None
-            inference: asyncio.Task[str] = asyncio.create_task(predictor.classify(tokens))
-            disconnect_watcher: asyncio.Task[None] = asyncio.create_task(cancel_on_disconnect(request, inference))
-            try:
-                output: str = await asyncio.wait_for(inference, timeout=deadline - time.monotonic())
             except TimeoutError:
                 raise HTTPException(503, "classification deadline exceeded") from None
             except asyncio.CancelledError:

@@ -117,9 +117,10 @@ does not emit access logs and error responses omit prompts and model output.
 Up to 256 requests are admitted at once (the engine decodes 64 together and queues
 the rest); beyond that the service returns 503 `classifier busy` before tokenizing.
 The Go client sends its remaining budget in `X-Task-Domain-Budget-Ms` (1-10,000;
-callers without it get 2.9s). A request still running at its deadline, or whose
-caller disconnected, is aborted inside the engine (503 `classification deadline
-exceeded`). Input is capped at 32,768 UTF-8 bytes / 8,192 templated tokens, and at
+callers without it get 2.9s). The deadline covers tokenization and inference: a
+request still running at its deadline is aborted inside the engine and returns 503
+`classification deadline exceeded`, and a disconnected caller's work is aborted the
+same way. Input is capped at 32,768 UTF-8 bytes / 8,192 templated tokens, and at
 most 16 new tokens are generated greedily with thinking disabled. The image disables
 FlashInfer's sampler (greedy decoding never uses it and its JIT build needs the CUDA
 toolkit) and vLLM usage-stat reporting.
