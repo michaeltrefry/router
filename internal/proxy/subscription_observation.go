@@ -38,6 +38,7 @@ func codexSubscriptionCoversModel(model string) bool {
 // WithUsageObserver wires physical-account quota observation for source selection.
 func (s *Service) WithUsageObserver(obs *usage.Observer) *Service {
 	s.usageObserver = obs
+	s.observedSubscriptions = newObservedSubscriptions()
 	return s
 }
 
@@ -161,29 +162,43 @@ func (s *Service) withUsageObserver(ctx context.Context, headers http.Header) co
 		if creds == nil || !creds.OAuth {
 			return
 		}
+		var provider subscriptions.Provider
+		var snap usage.Snapshot
+		var ok bool
 		switch creds.Source {
 		case credSourceCodexSubscription:
-			if snap, ok := usage.ParseCodexHeaders(h); ok {
-				s.usageObserver.Record(s.subscriptionUsageKey(creds), snap)
-				if creds.SubscriptionAccountID != "" {
-					s.usageObserver.Record(s.usageObserver.Key(creds.APIKey), snap)
-				}
-			}
+			provider = subscriptions.ProviderCodex
+			snap, ok = usage.ParseCodexHeaders(h)
 		case credSourceSubscription:
-			if snap, ok := usage.ParseAnthropicUnifiedHeaders(h); ok {
-				s.usageObserver.Record(s.subscriptionUsageKey(creds), snap)
-				if creds.SubscriptionAccountID != "" {
-					s.usageObserver.Record(s.usageObserver.Key(creds.APIKey), snap)
-				}
-			}
+			provider = subscriptions.ProviderClaude
+			snap, ok = usage.ParseAnthropicUnifiedHeaders(h)
 		}
+		if !ok {
+			return
+		}
+		key := s.subscriptionUsageKey(creds)
+		s.usageObserver.Record(key, snap)
+		if creds.SubscriptionAccountID != "" {
+			s.usageObserver.Record(s.usageObserver.Key(creds.APIKey), snap)
+			return
+		}
+		// A pass-through token is readable later by the router key that sent
+		// it, so a poller holding only that key sees its workers' quota.
+		apiKeyID, _ := callCtx.Value(APIKeyIDContextKey{}).(string)
+		s.observedSubscriptions.add(apiKeyID, observedSubscription{provider: provider, key: key}, s.usageObserver)
 	}
 	return providers.WithUpstreamHeaderObserver(ctx, obs)
 }
 
 func (s *Service) subscriptionUsageKey(creds *Credentials) usage.CredentialKey {
 	if creds.SubscriptionAccountID != "" {
-		return s.usageObserver.Key([]byte("subscription-account:" + creds.SubscriptionAccountID))
+		return s.managedSubscriptionUsageKey(creds.SubscriptionAccountID)
 	}
 	return s.usageObserver.Key(creds.APIKey)
+}
+
+// managedSubscriptionUsageKey is the stable observer key for a managed
+// account: its physical identity, not the rotating access token.
+func (s *Service) managedSubscriptionUsageKey(accountID string) usage.CredentialKey {
+	return s.usageObserver.Key([]byte("subscription-account:" + accountID))
 }

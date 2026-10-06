@@ -422,6 +422,9 @@ type Service struct {
 	// upstream response headers, feeding account source selection and the
 	// usage-bypass gate.
 	usageObserver *usage.Observer
+	// observedSubscriptions indexes, per router API key ID, the pass-through
+	// subscription credentials usageObserver recorded for that key's turns.
+	observedSubscriptions *observedSubscriptions
 
 	// managedSubscriptions leases encrypted, owner-scoped Claude/Codex
 	// subscription credentials. Nil leaves the legacy credential path unchanged.
