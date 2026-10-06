@@ -47,7 +47,10 @@ type fakePinStore struct {
 	disabledProviders      []string
 	commandContinuations   map[string]sessionpin.Pin
 	persistUpserts         bool
-	demotions              []fakeDemotion
+	// persistHMMHistory folds HMM history upserts and usage writebacks into
+	// hmmHistory the way the Postgres store does, so a later turn reads it.
+	persistHMMHistory bool
+	demotions         []fakeDemotion
 }
 
 // fakeDemotion is one recorded ExpireAndDemoteModel call.
@@ -104,6 +107,9 @@ func (f *fakePinStore) Upsert(ctx context.Context, p sessionpin.Pin) error {
 	f.upserts = append(f.upserts, p)
 	if strings.HasSuffix(p.Role, "_cmd_next") {
 		f.commandContinuations[p.Role] = p
+	} else if f.persistHMMHistory && strings.HasSuffix(p.Role, "_hmm_history") {
+		f.hmmHistory.Provider, f.hmmHistory.Reason, f.hmmHistory.PinnedUntil = p.Provider, p.Reason, p.PinnedUntil
+		f.hasHMMHistory = true
 	} else if f.persistUpserts {
 		f.pin = p
 		f.hasPin = p.PinnedUntil.After(time.Now()) && p.Model != "" && p.Provider != ""
@@ -132,6 +138,10 @@ func (f *fakePinStore) Consume(ctx context.Context, key [sessionpin.SessionKeyLe
 func (f *fakePinStore) UpdateUsage(ctx context.Context, key [sessionpin.SessionKeyLen]byte, role string, usage sessionpin.Usage) error {
 	f.mu.Lock()
 	f.usages = append(f.usages, usage)
+	if f.persistHMMHistory && strings.HasSuffix(role, "_hmm_history") {
+		f.hmmHistory.Provider, f.hmmHistory.LastServedModel = usage.ServedProvider, usage.ServedModel
+		f.hmmHistory.LastTurnEndedAt, f.hmmHistory.LastInputTokens, f.hmmHistory.LastOutputTokens = usage.EndedAt, usage.InputTokens, usage.OutputTokens
+	}
 	f.mu.Unlock()
 	select {
 	case f.usageCh <- struct{}{}:

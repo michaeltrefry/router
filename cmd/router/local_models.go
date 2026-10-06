@@ -39,6 +39,8 @@ var (
 	errLocalModelInvalidField   = errors.New("local model: invalid field value")
 	errLocalTurnRoutingModel    = errors.New("local turn routing: model must name a configured local model")
 	errLocalTurnRoutingType     = errors.New("local turn routing: turn type cannot be served locally")
+	errMidTierSubstituteModel   = errors.New("mid-tier substitute: model must name a configured local model")
+	errMidTierSubstituteTier    = errors.New("mid-tier substitute: model must be tier mid")
 )
 
 // Lowercase because force-model input is lowercased before catalog lookup; no
@@ -47,8 +49,16 @@ var (
 var localModelIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 
 type localModelsFile struct {
-	Models      []localModelEntry      `yaml:"models"`
-	TurnRouting *localTurnRoutingEntry `yaml:"turn_routing"`
+	Models            []localModelEntry            `yaml:"models"`
+	TurnRouting       *localTurnRoutingEntry       `yaml:"turn_routing"`
+	MidTierSubstitute *localMidTierSubstituteEntry `yaml:"mid_tier_substitute"`
+}
+
+// localMidTierSubstituteEntry names the local model that replaces automatic
+// mid-tier selections. Enabled defaults to true so the block alone turns it on.
+type localMidTierSubstituteEntry struct {
+	Model   string `yaml:"model"`
+	Enabled *bool  `yaml:"enabled"`
 }
 
 type localTurnRoutingEntry struct {
@@ -57,10 +67,11 @@ type localTurnRoutingEntry struct {
 }
 
 // localModelsConfig is a validated local-models file. A zero turnRoute
-// leaves every turn type on normal routing.
+// leaves every turn type on normal routing; a zero midTier substitutes nothing.
 type localModelsConfig struct {
 	models    []localModel
 	turnRoute proxy.LocalTurnRoute
+	midTier   proxy.MidTierSubstitute
 }
 
 type localModelEntry struct {
@@ -96,6 +107,7 @@ func parseLocalModels(r io.Reader, getenv func(string) string) (localModelsConfi
 	}
 	out := make([]localModel, 0, len(file.Models))
 	seen := make(map[string]struct{}, len(file.Models))
+	tiers := make(map[string]catalog.Tier, len(file.Models))
 	for i, entry := range file.Models {
 		model, err := validateLocalModel(entry, getenv)
 		if err != nil {
@@ -105,13 +117,38 @@ func parseLocalModels(r io.Reader, getenv func(string) string) (localModelsConfi
 			return localModelsConfig{}, fmt.Errorf("local model entry %d: %w: %s", i+1, errLocalModelDuplicateID, entry.ID)
 		}
 		seen[entry.ID] = struct{}{}
+		tiers[entry.ID] = model.model.Tier
 		out = append(out, model)
 	}
 	route, err := validateLocalTurnRouting(file.TurnRouting, seen)
 	if err != nil {
 		return localModelsConfig{}, err
 	}
-	return localModelsConfig{models: out, turnRoute: route}, nil
+	midTier, err := validateMidTierSubstitute(file.MidTierSubstitute, tiers)
+	if err != nil {
+		return localModelsConfig{}, err
+	}
+	return localModelsConfig{models: out, turnRoute: route, midTier: midTier}, nil
+}
+
+// validateMidTierSubstitute resolves the mid_tier_substitute block. The model
+// must be tier mid so a mid-tier pick is never served by a weaker or stronger
+// class; enabled: false keeps the block but substitutes nothing.
+func validateMidTierSubstitute(entry *localMidTierSubstituteEntry, tiers map[string]catalog.Tier) (proxy.MidTierSubstitute, error) {
+	if entry == nil {
+		return proxy.MidTierSubstitute{}, nil
+	}
+	tier, configured := tiers[entry.Model]
+	if !configured {
+		return proxy.MidTierSubstitute{}, fmt.Errorf("%w: %q", errMidTierSubstituteModel, entry.Model)
+	}
+	if tier != catalog.TierMid {
+		return proxy.MidTierSubstitute{}, fmt.Errorf("%w: %q is tier %s", errMidTierSubstituteTier, entry.Model, tier.String())
+	}
+	if entry.Enabled != nil && !*entry.Enabled {
+		return proxy.MidTierSubstitute{}, nil
+	}
+	return proxy.MidTierSubstitute{Provider: providers.LocalProviderName(entry.Model), Model: entry.Model}, nil
 }
 
 // validateLocalTurnRouting resolves the turn_routing block against the
@@ -264,31 +301,34 @@ func registerLocalModels(
 }
 
 // loadLocalModels reads ROUTER_LOCAL_MODELS_FILE, when set, registers its
-// models and returns its turn route. An unset variable registers nothing.
+// models and returns the validated file. An unset variable registers nothing.
 func loadLocalModels(
 	getenv func(string) string,
 	providerMap map[string]providers.Client,
 	envKeyedProviders map[string]struct{},
 	logger *slog.Logger,
-) (proxy.LocalTurnRoute, error) {
+) (localModelsConfig, error) {
 	path := strings.TrimSpace(getenv(localModelsFileEnv))
 	if path == "" {
-		return proxy.LocalTurnRoute{}, nil
+		return localModelsConfig{}, nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return proxy.LocalTurnRoute{}, fmt.Errorf("%s: %w", localModelsFileEnv, err)
+		return localModelsConfig{}, fmt.Errorf("%s: %w", localModelsFileEnv, err)
 	}
 	defer f.Close()
 	cfg, err := parseLocalModels(f, getenv)
 	if err != nil {
-		return proxy.LocalTurnRoute{}, fmt.Errorf("%s: %w", localModelsFileEnv, err)
+		return localModelsConfig{}, fmt.Errorf("%s: %w", localModelsFileEnv, err)
 	}
 	if err := registerLocalModels(cfg.models, providerMap, envKeyedProviders, logger); err != nil {
-		return proxy.LocalTurnRoute{}, err
+		return localModelsConfig{}, err
 	}
 	if cfg.turnRoute.Model != "" {
 		logger.Info("Local turn routing enabled", "model", cfg.turnRoute.Model, "turn_types", cfg.turnRoute.TurnTypes)
 	}
-	return cfg.turnRoute, nil
+	if cfg.midTier.Model != "" {
+		logger.Info("Mid-tier local substitution enabled", "model", cfg.midTier.Model)
+	}
+	return cfg, nil
 }

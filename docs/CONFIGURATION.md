@@ -241,6 +241,48 @@ cannot read, or carries tools and the model is rated `tool_use: low` or
 precedence over `ROUTER_HARD_PIN_*` and `ROUTER_SUBAGENT_*` for the turns it
 serves.
 
+#### Mid-tier substitution
+
+An optional top-level `mid_tier_substitute` block serves turns the router
+itself sent to a mid-tier model (for example `claude-sonnet-5`) on one of the
+configured local models:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `model` | yes | `id` of an entry under `models`; it must be `tier: mid`. |
+| `enabled` | no | `false` keeps the block but substitutes nothing. Default `true`. |
+
+Substitution runs after every routing step (scorer, session pin, planner) and
+replaces only the dispatched model. The session pin, planner state and HMM
+history (including the last served model they record) keep the router's own
+pick, so a pinned session (including its tool-result turns) is substituted
+again on every turn and lands on the same local model, and turning
+substitution off returns the session to its pinned model on its next turn. A
+turn whose selection is high or low tier is never substituted.
+
+An explicit `/force-model` is never substituted, nor are hard-pinned or
+local-turn-routed utility turns, classifier and compaction turns, usage-bypass
+or caller-model passthrough turns, and turns under an honoured
+`x-weave-policy-pin`. The router's selection is kept when the local model fails
+the same checks as turn-type routing: excluded by the installation, provider
+not enabled, disabled for automatic routing, request beyond its
+`context_window`, images it cannot read, or tools on a `tool_use: low` or
+`agentic: low` model.
+
+Usage-bypassed turns are not substituted: with usage bypass enabled, a Claude
+subscription caller's turns go to the requested model on that subscription
+until its utilization reaches the bypass threshold, so substitution only
+starts once routing engages. A bypass attempt that fails with a retryable
+error is rerouted through the scorer, and a mid-tier pick on that reroute is
+substituted.
+
+A substituted turn logs `Mid-tier substitute served turn` with the original and
+substitute models, its completion line carries `substituted_from_model` and
+`substituted_from_provider` next to `decision_model`, and its routing marker
+reads `→ <substitute> (local) · local substitute for <original model>`. Its policy outcome reports the
+original model as the selection and is excluded from training
+(`training_exclusion_reason: mid_tier_substitute`).
+
 ### Key-pair auth
 
 A gateway whose tenant forbids long-lived tokens can be given an RSA private

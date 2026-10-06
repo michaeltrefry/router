@@ -65,16 +65,27 @@ func (s *Service) localTurnTarget(tt turntype.TurnType, req router.Request) (pro
 	if _, routed := s.localTurnTypes[tt]; !routed {
 		return "", "", false
 	}
-	provider, model = s.localTurnProvider, s.localTurnModel
-	if !automaticPinEligible(sessionpin.Pin{Provider: provider, Model: model}, req) {
+	if !localModelServes(s.localTurnProvider, s.localTurnModel, req) {
 		return "", "", false
 	}
+	return s.localTurnProvider, s.localTurnModel, true
+}
+
+// localModelServes reports whether a deployment-configured local model may take
+// req on the router's behalf: the installation has not excluded it, its
+// provider is enabled, it is not disabled for automatic routing, and the
+// request fits its context window, carries no images it cannot read, and
+// carries no tools when it is rated low for tool or agentic use.
+func localModelServes(provider, model string, req router.Request) bool {
+	if !automaticPinEligible(sessionpin.Pin{Provider: provider, Model: model}, req) {
+		return false
+	}
 	if req.EstimatedInputTokens > catalog.ContextWindowForBinding(model, provider) {
-		return "", "", false
+		return false
 	}
 	if entry, known := catalog.ByID(model); known && req.HasTools &&
 		(entry.ToolUseQuality == catalog.ToolUseLow || entry.AgenticUse == catalog.AgenticLow) {
-		return "", "", false
+		return false
 	}
-	return provider, model, true
+	return true
 }

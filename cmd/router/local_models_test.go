@@ -71,6 +71,7 @@ func TestParseLocalModels_ExampleConfig(t *testing.T) {
 		Model:     "qwen3.8-flash-next",
 		TurnTypes: proxy.DefaultLocalTurnTypes,
 	}, cfg.turnRoute)
+	assert.Equal(t, proxy.MidTierSubstitute{Provider: "local_qwen3.8-flash-next", Model: "qwen3.8-flash-next"}, cfg.midTier)
 }
 
 func TestParseLocalModels_TurnRouting(t *testing.T) {
@@ -114,6 +115,47 @@ func TestParseLocalModels_TurnRouting(t *testing.T) {
 	for _, tc := range rejected {
 		t.Run("rejects "+tc.name, func(t *testing.T) {
 			_, err := parse(t, tc.routing)
+			require.ErrorIs(t, err, tc.want)
+		})
+	}
+}
+
+func TestParseLocalModels_MidTierSubstitute(t *testing.T) {
+	env := envFrom(map[string]string{"KEY_A": "a"})
+	entries := localEntryYAML("m1", "http://localhost:1/v1", "KEY_A") +
+		strings.Replace(localEntryYAML("hi1", "http://localhost:2/v1", "KEY_A"), "tier: mid", "tier: high", 1)
+	parse := func(t *testing.T, block string) (localModelsConfig, error) {
+		t.Helper()
+		return parseLocalModels(strings.NewReader("models:\n"+entries+block), env)
+	}
+
+	t.Run("omitted block substitutes nothing", func(t *testing.T) {
+		cfg, err := parse(t, "")
+		require.NoError(t, err)
+		assert.Equal(t, proxy.MidTierSubstitute{}, cfg.midTier)
+	})
+	t.Run("block enables substitution by default", func(t *testing.T) {
+		cfg, err := parse(t, "mid_tier_substitute:\n  model: m1\n")
+		require.NoError(t, err)
+		assert.Equal(t, proxy.MidTierSubstitute{Provider: providers.LocalProviderName("m1"), Model: "m1"}, cfg.midTier)
+	})
+	t.Run("enabled false turns it off", func(t *testing.T) {
+		cfg, err := parse(t, "mid_tier_substitute:\n  model: m1\n  enabled: false\n")
+		require.NoError(t, err)
+		assert.Equal(t, proxy.MidTierSubstitute{}, cfg.midTier)
+	})
+	rejected := []struct {
+		name  string
+		block string
+		want  error
+	}{
+		{"unconfigured model", "mid_tier_substitute:\n  model: claude-sonnet-5\n", errMidTierSubstituteModel},
+		{"missing model", "mid_tier_substitute:\n  enabled: true\n", errMidTierSubstituteModel},
+		{"non-mid model", "mid_tier_substitute:\n  model: hi1\n", errMidTierSubstituteTier},
+	}
+	for _, tc := range rejected {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			_, err := parse(t, tc.block)
 			require.ErrorIs(t, err, tc.want)
 		})
 	}
@@ -179,10 +221,11 @@ func TestLoadLocalModels_RejectsCatalogIDCollision(t *testing.T) {
 
 func TestLoadLocalModels_UnsetFileRegistersNothing(t *testing.T) {
 	providerMap := map[string]providers.Client{}
-	route, err := loadLocalModels(envFrom(nil), providerMap, map[string]struct{}{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cfg, err := loadLocalModels(envFrom(nil), providerMap, map[string]struct{}{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 	assert.Empty(t, providerMap)
-	assert.Empty(t, route.Model)
+	assert.Empty(t, cfg.turnRoute.Model)
+	assert.Empty(t, cfg.midTier.Model)
 }
 
 func writeLocalModelsFile(t *testing.T, entries string) string {
@@ -372,7 +415,7 @@ func TestLocalModel_TurnRoutingDispatchesTitleGenLocally(t *testing.T) {
 	anthropicClient := &recordingAnthropic{}
 	providerMap := map[string]providers.Client{providers.ProviderAnthropic: anthropicClient}
 	keyed := map[string]struct{}{providers.ProviderAnthropic: {}}
-	route, err := loadLocalModels(
+	cfg, err := loadLocalModels(
 		envFrom(map[string]string{localModelsFileEnv: path, "LOCAL_TEST_KEY": "local-secret"}),
 		providerMap, keyed, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
@@ -384,7 +427,7 @@ func TestLocalModel_TurnRoutingDispatchesTitleGenLocally(t *testing.T) {
 	})
 	svc := proxy.NewService(&unusedRouter{}, providerMap, nil, false, nil, nil, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
 		WithDeploymentKeyedProviders(keyed).
-		WithLocalTurnRoute(route)
+		WithLocalTurnRoute(cfg.turnRoute)
 
 	titleGen := `{"model":"claude-haiku-4-5","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hello"}],` +
 		`"output_config":{"format":{"type":"json_schema","schema":{"properties":{"title":{"type":"string"}}}}}}`
@@ -474,4 +517,53 @@ func TestLocalModel_ExcludedLocalModelIsNotServed(t *testing.T) {
 	upstream.mu.Lock()
 	defer upstream.mu.Unlock()
 	assert.Empty(t, upstream.bodies, "the excluded local upstream is never called")
+}
+
+const localSubstituteBody = `{"model":"claude-sonnet-4-6","max_tokens":256,"stream":true,"system":"You are Claude Code.",` +
+	`"tools":[{"name":"Read","description":"read a file","input_schema":{"type":"object"}}],` +
+	`"messages":[{"role":"user","content":"fix the failing build in this repository"}]}`
+
+type fixedRouter struct{ decision router.Decision }
+
+func (r fixedRouter) Route(context.Context, router.Request) (router.Decision, error) {
+	return r.decision, nil
+}
+
+// The composition-root wiring serves a main-loop turn the scorer gave to
+// claude-sonnet-5 from the configured mid-tier substitute's upstream.
+func TestLocalModel_MidTierSubstituteServesSonnetSelectionLocally(t *testing.T) {
+	const id = "test-local-mid"
+	upstream := newLocalUpstream(t)
+	path := writeLocalModelsFile(t, localEntryYAML(id, upstream.baseURL, "LOCAL_TEST_KEY")+
+		"mid_tier_substitute:\n  model: "+id+"\n")
+	anthropicClient := &recordingAnthropic{}
+	providerMap := map[string]providers.Client{providers.ProviderAnthropic: anthropicClient}
+	keyed := map[string]struct{}{providers.ProviderAnthropic: {}}
+	cfg, err := loadLocalModels(
+		envFrom(map[string]string{localModelsFileEnv: path, "LOCAL_TEST_KEY": "local-secret"}),
+		providerMap, keyed, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		catalog.UnregisterLocalModels(id)
+		provider := providers.LocalProviderName(id)
+		delete(providers.ProviderFamilies, provider)
+		delete(providers.APIKeyEnvVars, provider)
+	})
+	scorer := fixedRouter{decision: router.Decision{Provider: providers.ProviderAnthropic, Model: "claude-sonnet-5", Reason: "cluster"}}
+	svc := proxy.NewService(scorer, providerMap, nil, false, nil, nil, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+		WithDeploymentKeyedProviders(keyed).
+		WithMidTierSubstitute(cfg.midTier)
+
+	rec := httptest.NewRecorder()
+	require.NoError(t, svc.ProxyMessages(routerKeyedCtx(), []byte(localSubstituteBody), rec, claudeCodeRequest("")))
+
+	upstream.mu.Lock()
+	defer upstream.mu.Unlock()
+	require.Len(t, upstream.bodies, 1, "the main-loop turn reaches the local upstream")
+	assert.Equal(t, "upstream-"+id, gjson.GetBytes(upstream.bodies[0], "model").String())
+	assert.Equal(t, "Bearer local-secret", upstream.authz[0])
+	assert.Equal(t, id, rec.Header().Get(proxy.HeaderRouterModel))
+	anthropicClient.mu.Lock()
+	defer anthropicClient.mu.Unlock()
+	assert.Empty(t, anthropicClient.creds)
 }
