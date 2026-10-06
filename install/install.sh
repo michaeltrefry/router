@@ -6223,7 +6223,8 @@ write_claude_settings() {
     policy_api_url="https://app.workweave.ai/api/weave_router/organization-policy"
   fi
   local policy_hook_command=""
-  local policy_node="$(command -v node || true)"
+  local policy_node
+  policy_node="$(command -v node || true)"
   local policy_hook_enabled="true"
   if [ -n "$policy_node" ]; then
     printf -v policy_hook_command '%q %q' "$policy_node" "$policy_hook_file"
