@@ -299,8 +299,9 @@ pin, planner state and HMM history keep the router's own pick, and the turn's
 policy outcome reports that pick and is excluded from training
 (`training_exclusion_reason: model_mapping`).
 
-Mapping runs first, then the substitution rules and mid-tier substitution, which still judges the tier of
-the router's own pick: a `claude-sonnet-5` selection is mapped to
+Mapping runs first, then the substitution rules (matched on the mapped model),
+then mid-tier substitution, which still judges the tier of the router's own
+pick: a `claude-sonnet-5` selection is mapped to
 `claude-sonnet-5-5` and, with `mid_tier_substitute` on, served on the local
 model; if that local model fails before output, the turn falls back to
 `claude-sonnet-5-5`.
