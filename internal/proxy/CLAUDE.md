@@ -71,7 +71,7 @@ collapse them.
 | `global_automatic_routing_exclusions` | deployment | fail-open (soft) | `AutomaticExcludedModels`: scorer, policy resolver, and every automatic-pin gate |
 | `cluster_model_lists` | API key (org default) | fail-open | `policy.ApplyClusterArmOverrides` |
 | `model_router_user_cluster_model_lists` | router user | fail-open | same, after `mergeClusterOverrides` |
-| subscription capacity | verified account owner + installation membership | fail-closed | primary candidate admission; personal then sharing; included-only transport enforcement |
+| subscription capacity | verified account owner + installation membership | fail-closed | primary candidate admission; personal then sharing; native OAuth support and quota/overage checks |
 
 **The allowlist is desugared, not separately filtered.** `excludedModelsForRequest`
 adds every routable model absent from a non-empty allowlist to the exclusion
@@ -233,8 +233,12 @@ observed-exhausted → strict pass-through via `bypassToAnthropic` with
 by-product of the conversation's own turns, so conserving quota by re-routing
 it buys nothing. Everything else is the usage-bypass lane's behaviour: an
 exhausted subscription falls to the scorer (deployment-key fallback /
-subscription-only 402 as usual), a retryable upstream error reroutes without
-loading the conversation's pin, and the row stays cost-neutral downstream
+subscription-only refusal as usual). With depleted credits, a retryable bypass
+error suppresses the failed direct token and tries enrolled linked Claude accounts
+on the requested model through the normal subscription dispatch loop. It does not
+run the scorer or permit paid fallback; an exhausted pool refuses. Credit-funded
+retries still reroute, without loading a classifier conversation pin, and the row
+stays cost-neutral downstream
 (`subscription_served`), not a "saving".
 
 ## Translation
@@ -374,4 +378,4 @@ Proxy attaches a `providers.UpstreamHeaderObserver` to the request context. Prov
 - **Don't add a handover path that doesn't time out.** `Summarizer` contract says implementations MUST respect the context deadline. On timeout/error the proxy keeps the full prior history unchanged — do NOT reintroduce a silent trim-to-last-N fallback (it lobotomized switched-to models; see the handover-fallback fix).
 - **Don't cache streaming responses.** Streaming bypasses cache on purpose — captured bytes would be post-translation SSE frames, and lookup latency budget is hostile to first-token-time. If you think this should change, write a doc first.
 
-Subscription ownership and included-only limitations are documented in [`docs/SUBSCRIPTION_ROUTING.md`](../../docs/SUBSCRIPTION_ROUTING.md). Source selection owns account availability; quota snapshots never change model quality or authorize paid subscription extra usage.
+Subscription ownership and quota-observation limitations are documented in [`docs/SUBSCRIPTION_ROUTING.md`](../../docs/SUBSCRIPTION_ROUTING.md). Source selection owns account availability; quota snapshots never change model quality, and known paid overage is excluded.

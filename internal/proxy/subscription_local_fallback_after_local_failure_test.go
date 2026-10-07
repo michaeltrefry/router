@@ -38,7 +38,7 @@ func (c orderedClient) Proxy(ctx context.Context, d router.Decision, prep provid
 	return c.Client.Proxy(ctx, d, prep, w, r)
 }
 
-func (orderedClient) IncludedOnlySubscriptions() bool { return true }
+func (orderedClient) SupportsSubscriptions() bool { return true }
 
 type afterLocalFailureFixture struct {
 	svc      *proxy.Service

@@ -323,7 +323,7 @@ type recordingAnthropic struct {
 	creds []*proxy.Credentials
 }
 
-func (*recordingAnthropic) IncludedOnlySubscriptions() bool { return true }
+func (*recordingAnthropic) SupportsSubscriptions() bool { return true }
 
 func (a *recordingAnthropic) Proxy(ctx context.Context, _ router.Decision, _ providers.PreparedRequest, w http.ResponseWriter, _ *http.Request) error {
 	a.mu.Lock()

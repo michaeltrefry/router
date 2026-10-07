@@ -252,6 +252,7 @@ func RegisterWithFeatures(engine *gin.Engine, authSvc *auth.Service, proxySvc *p
 		internalGroup.GET("/inference-policies", admin.InternalInferencePoliciesHandler(proxySvc))
 		internalGroup.GET("/inference-policies/deployment", admin.InternalInferenceDeploymentHandler(proxySvc))
 		internalGroup.POST("/inference-policies/resolve", admin.InternalInferenceResolveHandler(proxySvc))
+		internalGroup.POST("/task-domain/preview", admin.InternalTaskDomainPreviewHandler())
 		internalGroup.GET("/escalation/sessions", admin.InternalLLMEscalationSessionsHandler(proxySvc))
 		internalGroup.GET("/escalation/dashboard", admin.InternalEscalationDashboardHandler(proxySvc))
 		internalGroup.GET("/escalation/sessions/:scope", admin.InternalLLMEscalationSessionHandler(proxySvc))
@@ -266,6 +267,9 @@ func RegisterWithFeatures(engine *gin.Engine, authSvc *auth.Service, proxySvc *p
 	adminAuthed.Use(servingAdmissionMiddleware...)
 	adminAuthed.GET("/validate", admin.ValidateHandler)
 	adminAuthed.POST("/v1/client-events", admin.ClientEventHandler(authSvc))
+	// Read-only, in-memory quota windows for the caller's own subscriptions;
+	// mounted regardless of managed accounts so presented tokens are readable.
+	subscriptionsapi.RegisterUsage(adminAuthed, authSvc, proxySvc)
 	if authSvc.SubscriptionAccountsEnabled() {
 		subscriptionGroup := engine.Group("/v1", middleware.WithTimeout(subscriptionAccountTimeout), middleware.WithAuth(authSvc, byokRequiresOptIn, features.ServingAdmission))
 		subscriptionGroup.Use(servingAdmissionMiddleware...)

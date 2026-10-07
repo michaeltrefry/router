@@ -23,6 +23,9 @@ const (
 	ctxKeyAPIKey            = "router_api_key"
 	ctxKeyAdminPrincipal    = "router_admin_principal"
 	ctxKeySubscriptionOwner = "router_subscription_owner"
+	// ctxKeySubscriptionCandidates holds the SubscriptionCandidates the
+	// serving-admission listing resolved for this request.
+	ctxKeySubscriptionCandidates = "router_subscription_candidates"
 )
 
 // RouterKeyHeader carries the Weave Router key when clients need to preserve Authorization / x-api-key for the upstream provider.
@@ -148,6 +151,7 @@ func withAPIKey(svc *auth.Service, byokRequiresOptIn bool, serving ...*ServingAd
 			ctx = proxy.WithSubscriptionOwner(ctx, owner)
 			if testPlan == nil && svc.SubscriptionAccountsEnabled() {
 				accounts, listErr := svc.ListSubscriptionCandidates(ctx, owner)
+				c.Set(ctxKeySubscriptionCandidates, SubscriptionCandidates{Accounts: accounts, Err: listErr})
 				if listErr != nil {
 					observability.FromContext(ctx).Error("Failed to load subscription account enrollment", "err", listErr)
 					ctx = context.WithValue(ctx, proxy.ManagedSubscriptionEnrollmentUnavailableContextKey{}, true)
@@ -351,6 +355,24 @@ func SubscriptionOwnerFrom(c *gin.Context) auth.SubscriptionOwner {
 		}
 	}
 	return auth.SubscriptionOwnerForKey(APIKeyFrom(c))
+}
+
+// SubscriptionCandidates is the managed-account serving admission WithAuth
+// resolved for this request: the same live listing inference dispatches from.
+type SubscriptionCandidates struct {
+	Accounts []*auth.SubscriptionAccount
+	Err      error
+}
+
+// SubscriptionCandidatesFrom returns the request's serving-admission listing;
+// false when WithAuth did not list (managed accounts off, or a test plan).
+func SubscriptionCandidatesFrom(c *gin.Context) (SubscriptionCandidates, bool) {
+	value, ok := c.Get(ctxKeySubscriptionCandidates)
+	if !ok {
+		return SubscriptionCandidates{}, false
+	}
+	candidates, ok := value.(SubscriptionCandidates)
+	return candidates, ok
 }
 
 // SubscriptionOwnerLive re-resolves the caller against the live projection,

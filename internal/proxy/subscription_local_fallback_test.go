@@ -60,7 +60,7 @@ type subscriptionUpstream struct {
 	paidDispatches int
 }
 
-func (*subscriptionUpstream) IncludedOnlySubscriptions() bool { return true }
+func (*subscriptionUpstream) SupportsSubscriptions() bool { return true }
 
 func (u *subscriptionUpstream) Proxy(ctx context.Context, _ router.Decision, _ providers.PreparedRequest, w http.ResponseWriter, _ *http.Request) error {
 	if creds := proxy.CredentialsFromContext(ctx); creds != nil && creds.OAuth {

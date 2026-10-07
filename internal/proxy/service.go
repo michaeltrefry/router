@@ -435,6 +435,9 @@ type Service struct {
 	// upstream response headers, feeding account source selection and the
 	// usage-bypass gate.
 	usageObserver *usage.Observer
+	// observedSubscriptions indexes, per router API key ID, the pass-through
+	// subscription credentials usageObserver recorded for that key's turns.
+	observedSubscriptions *observedSubscriptions
 
 	// managedSubscriptions leases encrypted, owner-scoped Claude/Codex
 	// subscription credentials. Nil leaves the legacy credential path unchanged.
@@ -1073,7 +1076,7 @@ func routingKnobsForRequest(ctx context.Context) *router.Overrides {
 }
 
 // safetyExcludedModels returns the hard request-time safety exclusion set
-// (context-overflow + gemini-unsigned-history). It re-runs both filters
+// (context-overflow + gemini-unsigned-history + advisor pairing). It re-runs the filters
 // against an EMPTY base — the routing-path filters skip models already in
 // excluded_models, so a policy-excluded overflow model would be absent from
 // those lists yet must still block bypass (it would 400 on the subscription).
@@ -1081,15 +1084,15 @@ func routingKnobsForRequest(ctx context.Context) *router.Overrides {
 func (s *Service) safetyExcludedModels(env *translate.RequestEnvelope, outputReserve int, enabledProviders map[string]struct{}) map[string]struct{} {
 	_, overflowed := excludeContextOverflowModels(env.ContextOverflowTokenEstimate(), env.SignatureTokenSavings(), outputReserve, enabledProviders, nil, s.availableModels)
 	_, geminiUnsigned := excludeGemini3xOnUnsignedHistory(env, nil, s.availableModels)
-	if len(overflowed) == 0 && len(geminiUnsigned) == 0 {
+	_, advisorOutranking := excludeAdvisorOutrankingModels(env, nil, s.routableUniverse())
+	if len(overflowed) == 0 && len(geminiUnsigned) == 0 && len(advisorOutranking) == 0 {
 		return nil
 	}
-	out := make(map[string]struct{}, len(overflowed)+len(geminiUnsigned))
-	for _, m := range overflowed {
-		out[m] = struct{}{}
-	}
-	for _, m := range geminiUnsigned {
-		out[m] = struct{}{}
+	out := make(map[string]struct{}, len(overflowed)+len(geminiUnsigned)+len(advisorOutranking))
+	for _, models := range [][]string{overflowed, geminiUnsigned, advisorOutranking} {
+		for _, m := range models {
+			out[m] = struct{}{}
+		}
 	}
 	return out
 }
@@ -3737,6 +3740,14 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			"excluded_models", strings.Join(geminiUnsigned, ","),
 		)
 	}
+	excluded, advisorOutranking := excludeAdvisorOutrankingModels(env, excluded, s.routableUniverse())
+	if len(advisorOutranking) > 0 {
+		log.Info("advisor pre-filter: excluded models the advisor tool cannot advise",
+			"advisor_model", env.AdvisorToolModel(),
+			"excluded_models", strings.Join(advisorOutranking, ","),
+		)
+	}
+	hardExcluded := append(append([]string(nil), geminiUnsigned...), advisorOutranking...)
 
 	routeStart := time.Now()
 	req := router.Request{
@@ -3765,8 +3776,8 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 		GatewayProviders:              s.gatewayProvidersForRequest(ctx),
 		ExcludedModels:                excluded,
 		AllowedModels:                 allowedModelsForRequest(ctx),
-		SafetyExcludedModels:          withoutModelsKeep(s.safetyExcludedModels(env, outputReserve, enabledProviders), overflowAdmitted, geminiUnsigned),
-		ContextWindowExcludedModels:   contextWindowOnlyExclusions(ctxOverflowed, overflowAdmitted, geminiUnsigned),
+		SafetyExcludedModels:          withoutModelsKeep(s.safetyExcludedModels(env, outputReserve, enabledProviders), overflowAdmitted, hardExcluded),
+		ContextWindowExcludedModels:   contextWindowOnlyExclusions(ctxOverflowed, overflowAdmitted, hardExcluded),
 		UnsignedHistoryExcludedModels: modelSet(geminiUnsigned),
 		OverflowAdmittedModels:        modelSet(overflowAdmitted),
 		PreferredModels:               s.preferredModelsForRequest(ctx),
@@ -3824,8 +3835,9 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 		}
 	}
 
-	// On a retryable 429 the bypass falls through to re-routing; rate-limit
-	// headers prime the observer so the retry skips exhausted capacity.
+	// A retryable bypass error falls through to normal dispatch. Rate-limit
+	// headers prime the observer so the retry skips exhausted capacity; a
+	// depleted-credit retry preserves the model and tries only subscriptions.
 	if routeRes.UsageBypass && routeRes.Decision.Provider == providers.ProviderAnthropic {
 		err := s.bypassToAnthropic(ctx, env, feats, routeRes.modelSwitched(), requestStart, requestID, externalID, routeRes.TurnType, routeRes.Decision.Reason, r, w)
 		if !errors.Is(err, errBypassRetryable) {
@@ -3835,19 +3847,24 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			return err
 		}
 
-		// Subscription-only mode: the subscription just failed (e.g. 429
-		// weekly-limit). Paid failover is disabled, so refuse rather than
-		// reroute onto a paid model against an already-negative balance. A
-		// linked-first turn's credits are intact: release the mark so the
-		// reroute below runs as an ordinary credit-funded turn.
+		// A depleted-credit retry may rotate linked subscriptions, but must keep
+		// the requested model and never consult the paid-model scorer. Suppress
+		// the failed direct token even when its response had no quota headers.
+		linkedSubscriptionRetry := false
 		if billing.SubscriptionOnlyFromContext(ctx) {
 			released, ok := releaseThrottledLinkedFirst(ctx)
-			if !ok {
+			if ok {
+				ctx = released
+			} else if s.managedSubscriptions != nil && managedSubscriptionCanServe(ctx, routeRes.Decision.Provider, routeRes.Decision.Model) {
+				ctx = withSuppressedClaudeSubscription(ctx)
+				linkedSubscriptionRetry = true
+				log.Info("Subscription-only bypass hit retryable error; trying linked Claude accounts",
+					"request_id", requestID, "external_id", externalID, "model", routeRes.Decision.Model)
+			} else {
 				log.Info("Subscription-only bypass hit retryable error; refusing instead of paid reroute",
 					"request_id", requestID, "external_id", externalID)
 				return ErrCreditsExhaustedSubscriptionUnavailable
 			}
-			ctx = released
 		}
 
 		// bypassToAnthropic returns before session pin/HMM history are loaded,
@@ -3865,16 +3882,18 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 		}
 
 		routeRes.UsageBypass = false
-		rerouteCtx, rerouteSpan := startRoutingSpan(ctx, req)
-		decision, rerouteErr := s.routeFor(rerouteCtx, req)
-		finishRoutingSpan(rerouteSpan, decision, rerouteErr)
-		if rerouteErr != nil {
-			log.Error("Reroute after usage-bypass failure failed", "err", rerouteErr)
-			return rerouteErr
+		if !linkedSubscriptionRetry {
+			rerouteCtx, rerouteSpan := startRoutingSpan(ctx, req)
+			decision, rerouteErr := s.routeFor(rerouteCtx, req)
+			finishRoutingSpan(rerouteSpan, decision, rerouteErr)
+			if rerouteErr != nil {
+				log.Error("Reroute after usage-bypass failure failed", "err", rerouteErr)
+				return rerouteErr
+			}
+			routeRes.Decision = decision
+			routeRes.Fresh = decision
+			s.substituteMidTier(ctx, &routeRes, req)
 		}
-		routeRes.Decision = decision
-		routeRes.Fresh = decision
-		s.substituteMidTier(ctx, &routeRes, req)
 	}
 
 	routeRes.SuggestionMode = r.Header.Get("x-weave-suggestion-mode") == "true"
@@ -4128,7 +4147,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 				return ErrCreditsExhaustedSubscriptionUnavailable
 			}
 			ctx = released
-		case s.anthropicSubscriptionObservedExhausted(ctx, r.Header):
+		case s.anthropicSubscriptionObservedExhausted(ctx, r.Header) && !claudeSubscriptionSuppressed(ctx):
 			log.Info("Subscription-only request cannot be served on the subscription; refusing",
 				"requested_model", feats.Model, "external_id", externalID, "decision_provider", decision.Provider)
 			return ErrCreditsExhaustedSubscriptionUnavailable
