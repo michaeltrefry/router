@@ -162,7 +162,7 @@ func TestSubstitutionRule_SessionStateKeepsScorerPick(t *testing.T) {
 		mapping proxy.ModelMapping
 		pattern string
 	}{
-		"unmapped":           {pattern: "claude-opus-5"},
+		"unmapped":            {pattern: "claude-opus-5"},
 		"mapped then matched": {mapping: defaultTestMapping, pattern: "claude-opus-5-5"},
 	}
 	for name, tc := range cases {
