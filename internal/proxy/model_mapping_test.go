@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,7 +19,9 @@ import (
 	"weave-os/router/internal/proxy"
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
+	"weave-os/router/internal/router/handover"
 	"weave-os/router/internal/router/sessionpin"
+	"weave-os/router/internal/translate"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -539,4 +543,116 @@ func TestModelMapping_UsageBypassRerouteNeverDispatchesUnservedAdmission(t *test
 	assert.Contains(t, scorer.requests[1].ExcludedModels, "gpt-5.4-mini")
 	assert.Empty(t, openai.proxyBodies, "the uncovered pick is never dispatched")
 	require.Len(t, f.local.proxyBodies, 1, "the second pick, claude-sonnet-5, is served by the substitute")
+}
+
+// usageSummarizer counts handover summaries and reports usage for each.
+type usageSummarizer struct {
+	calls atomic.Int32
+}
+
+func (s *usageSummarizer) Summarize(context.Context, *translate.RequestEnvelope, router.Request) (string, handover.Usage, error) {
+	s.calls.Add(1)
+	return "Prior conversation summary.", handover.Usage{InputTokens: 900, OutputTokens: 120}, nil
+}
+
+func (*usageSummarizer) Provider() string { return providers.ProviderAnthropic }
+
+type admittedSwitchFixture struct {
+	svc        *proxy.Service
+	scorer     *sequenceRouter
+	anthropic  *fakeProvider
+	openai     *fakeProvider
+	summarizer *usageSummarizer
+	store      *fakePinStore
+	ctx        context.Context
+	logs       *bytes.Buffer
+}
+
+// newAdmittedSwitchFixture pins a warm claude-opus-4-7 session on a Codex
+// subscription-only request whose scorer first picks gpt-5.4-mini, admitted
+// for its gpt-6-luna mapping, then claude-haiku-4-5. excluded is the
+// installation's model exclusion list.
+func newAdmittedSwitchFixture(t *testing.T, excluded ...string) admittedSwitchFixture {
+	t.Helper()
+	store := newFakePinStore()
+	store.hasPin = true
+	store.pin = sessionpin.Pin{
+		Provider:        providers.ProviderAnthropic,
+		Model:           "claude-opus-4-7",
+		Reason:          "cluster:v0.2",
+		PinnedUntil:     time.Now().Add(time.Hour),
+		LastInputTokens: 5000,
+		LastTurnEndedAt: time.Now().Add(-30 * time.Second),
+	}
+	scorer := &sequenceRouter{decisions: []router.Decision{
+		{Provider: providers.ProviderOpenAI, Model: "gpt-5.4-mini", Reason: "cluster:v0.2"},
+		{Provider: providers.ProviderAnthropic, Model: "claude-haiku-4-5", Reason: "cluster:v0.2"},
+	}}
+	anthropic, openai := &fakeProvider{}, &fakeProvider{}
+	summarizer := &usageSummarizer{}
+	svc := proxy.NewService(scorer,
+		map[string]providers.Client{providers.ProviderAnthropic: anthropic, providers.ProviderOpenAI: openai},
+		nil, false, nil, store, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+		WithDeploymentKeyedProviders(map[string]struct{}{providers.ProviderAnthropic: {}}).
+		WithModelMapping(proxy.ModelMapping{"gpt-5.4-mini": "gpt-6-luna"}).
+		WithSummarizer(summarizer)
+	ctx := context.WithValue(authedCtx(uuid.New().String()), proxy.OpenAISubscriptionContextKey{}, "eyJhbGciOiJSUzI1NiJ9.codex.sig")
+	ctx = context.WithValue(ctx, proxy.OpenAIAccountIDContextKey{}, "acct-123")
+	if len(excluded) > 0 {
+		ctx = context.WithValue(ctx, proxy.InstallationExcludedModelsContextKey{}, excluded)
+	}
+	logs := &bytes.Buffer{}
+	ctx = observability.WithLogger(ctx, slog.New(slog.NewJSONHandler(logs, nil)))
+	return admittedSwitchFixture{svc: svc, scorer: scorer, anthropic: anthropic, openai: openai, summarizer: summarizer, store: store, ctx: ctx, logs: logs}
+}
+
+// pinnedModels returns the model of every pin upsert so far.
+func (f admittedSwitchFixture) pinnedModels() []string {
+	f.store.mu.Lock()
+	defer f.store.mu.Unlock()
+	models := make([]string, 0, len(f.store.upserts))
+	for _, p := range f.store.upserts {
+		models = append(models, p.Model)
+	}
+	return models
+}
+
+// A planner switch off a warm pin whose fresh pick was admitted only for its
+// Codex mapping, where the mapping cannot apply, is decided against the pick
+// scored without the admitted models: the handover is summarized once, for
+// the model that serves, and the turn records it.
+func TestModelMapping_SwitchHandoverRunsOnceForUnservedAdmission(t *testing.T) {
+	f := newAdmittedSwitchFixture(t, "gpt-6-luna")
+	rec := httptest.NewRecorder()
+
+	require.NoError(t, f.svc.ProxyMessages(f.ctx, largeMultiTurnBody(t), rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil)))
+
+	require.Len(t, f.scorer.requests, 2)
+	assert.Contains(t, f.scorer.requests[1].ExcludedModels, "gpt-5.4-mini")
+	assert.Equal(t, int32(1), f.summarizer.calls.Load(), "one switch, one summary")
+	assert.Empty(t, f.openai.proxyBodies, "the uncovered pick is never dispatched")
+	assert.Equal(t, "claude-haiku-4-5", rec.Header().Get(proxy.HeaderRouterModel))
+	switched := logLine(t, f.logs, "router switched models")
+	assert.Equal(t, "claude-haiku-4-5", switched["to"])
+	assert.Equal(t, true, switched["handover_invoked"], "the summary that rewrote the forwarded history is recorded")
+	assert.Equal(t, false, switched["handover_fallback_to_full_history"])
+	require.Len(t, f.anthropic.proxyBodies, 1)
+	assert.True(t, strings.Contains(string(f.anthropic.proxyBodies[0]), "Prior conversation summary."), "the forwarded history carries the summary")
+	require.Eventually(t, func() bool { return slices.Contains(f.pinnedModels(), "claude-haiku-4-5") }, 2*time.Second, 5*time.Millisecond)
+	assert.NotContains(t, f.pinnedModels(), "gpt-5.4-mini", "the uncovered pick is never pinned")
+}
+
+// When the mapping can serve the admitted pick, the switch keeps it: one
+// scorer call, and the turn is dispatched on the mapped target.
+func TestModelMapping_SwitchKeepsServableAdmission(t *testing.T) {
+	f := newAdmittedSwitchFixture(t)
+	rec := httptest.NewRecorder()
+
+	require.NoError(t, f.svc.ProxyMessages(f.ctx, largeMultiTurnBody(t), rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil)))
+
+	assert.Len(t, f.scorer.requests, 1)
+	assert.Equal(t, int32(1), f.summarizer.calls.Load())
+	assert.Empty(t, f.anthropic.proxyBodies)
+	require.Len(t, f.openai.proxyBodies, 1)
+	assert.Equal(t, "gpt-6-luna", rec.Header().Get(proxy.HeaderRouterModel))
 }

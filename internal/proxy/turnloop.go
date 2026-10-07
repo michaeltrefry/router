@@ -757,6 +757,8 @@ func (s *Service) runTurnLoop(
 		}
 		// A mapping-admitted model the mapping did not retarget has no
 		// credential on this request: route again as if it were never admitted.
+		// routeServable already rescored the planner's fresh pick; this catches
+		// decisions from other branches, e.g. a session pin.
 		if admitted := unservedMappingAdmission(entryCtx, res); admitted != nil {
 			observability.FromContext(ctx).Info("Model mapping could not serve a subscription-admitted selection; routing without mapping-admitted models",
 				"selected_model", res.Decision.Model,
@@ -1750,13 +1752,34 @@ func (s *Service) runTurnLoop(
 		// we pick the next-best model instead of silently downgrading the user's
 		// directive. Fall back to the unconstrained scorer if no in-tier model
 		// survives the request's other filters.
+		// A pick admitted only for its mapping that the mapping cannot retarget
+		// has no credential on this request. Score again without the admitted
+		// models before the planner, a handover or a pin write builds on it.
+		routeServable := func(r router.Request) (router.Decision, error) {
+			dec, err := s.routeFor(ctx, r)
+			if err != nil {
+				return dec, err
+			}
+			probe := res
+			probe.Decision = dec
+			admitted := s.unmappableAdmission(ctx, probe, r)
+			if admitted == nil {
+				return dec, nil
+			}
+			log.Info("Model mapping cannot serve a subscription-admitted pick; routing without mapping-admitted models",
+				"selected_model", dec.Model,
+				"excluded_models", strings.Join(slices.Sorted(maps.Keys(admitted)), ","),
+			)
+			r.ExcludedModels = mergeExcludedModels(r.ExcludedModels, admitted)
+			return s.routeFor(ctx, r)
+		}
 		var fresh router.Decision
 		routed := false
 		if forcedTierFloor != catalog.TierUnknown {
 			if constrained, ok := s.restrictToTier(req.ExcludedModels, forcedTierFloor); ok {
 				tierReq := req
 				tierReq.ExcludedModels = constrained
-				if dec, derr := s.routeFor(ctx, tierReq); derr == nil {
+				if dec, derr := routeServable(tierReq); derr == nil {
 					fresh, routed = dec, true
 					log.Info("user-forced model evicted; rerouted to next-best in same tier",
 						"forced_tier", forcedTierFloor.String(),
@@ -1772,7 +1795,7 @@ func (s *Service) runTurnLoop(
 			}
 		}
 		if !routed {
-			dec, err := s.routeFor(ctx, req)
+			dec, err := routeServable(req)
 			if err != nil {
 				// Deadline != correctness failure: all candidates were dispatchable; only
 				// ranking is lost. Contract violations still fail closed via isPolicyDeadlineErr.
