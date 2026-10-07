@@ -154,6 +154,7 @@ func (s *Service) ProxyGeminiGenerateContent(ctx context.Context, body []byte, w
 		RequestedModel:                feats.Model,
 		ForceCluster:                  forceCluster,
 		EstimatedInputTokens:          feats.Tokens,
+		ContextFit:                    router.ContextFit{OverflowTokens: overflowEstimate, SignatureSavings: env.SignatureTokenSavings(), OutputReserve: outputReserve},
 		HasTools:                      feats.HasTools,
 		HasImages:                     feats.HasImages,
 		TranslationRequirements:       env.TranslationRequirements(router.EndpointGeminiGenerate),

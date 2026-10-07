@@ -29,9 +29,10 @@ func (s *Service) WithModelMapping(mapping ModelMapping) *Service {
 // mapModel retargets the router's automatic selection onto its mapped model.
 // It runs before the mid-tier substitute and shares its eligibility: forced,
 // hard-pinned, utility, bypassed, classifier, compaction and policy-pinned
-// turns are dispatched unmapped. Session pins, HMM history and the policy
-// outcome keep the router's own pick through SubstitutedFrom.
-func (s *Service) mapModel(ctx context.Context, res *turnLoopResult) {
+// turns are dispatched unmapped, as is a turn whose target cannot serve req.
+// Session pins, HMM history and the policy outcome keep the router's own pick
+// through SubstitutedFrom.
+func (s *Service) mapModel(ctx context.Context, res *turnLoopResult, req router.Request) {
 	if len(s.modelMapping) == 0 || !midTierSubstitutable(*res) {
 		return
 	}
@@ -51,8 +52,10 @@ func (s *Service) mapModel(ctx context.Context, res *turnLoopResult) {
 	mappedDecision.Model = target
 	mappedDecision.Provider = mappedProvider(target, original.Provider)
 	mappedDecision.Metadata = withoutArmSelection(original.Metadata)
-	if !s.mappingTargetEligible(ctx, mappedDecision) {
-		observability.FromContext(ctx).Debug("Model mapping skipped for an ineligible target",
+	if reason := s.mappingTargetIneligibility(ctx, mappedDecision, req); reason != "" {
+		observability.FromContext(ctx).Info("Model mapping skipped; serving the trained model",
+			"reason", reason,
+			"turn_type", string(res.TurnType),
 			"original_model", original.Model,
 			"mapped_model", target,
 			"mapped_provider", mappedDecision.Provider,
@@ -73,25 +76,31 @@ func (s *Service) mapModel(ctx context.Context, res *turnLoopResult) {
 	)
 }
 
-// mappingTargetEligible reports whether this request may be served on the
-// mapped target: neither the model nor its provider is excluded, the model
-// clears every positive allowlist, and the provider has a registered dispatch
-// client. An ineligible target serves the router's own pick instead.
-func (s *Service) mappingTargetEligible(ctx context.Context, target router.Decision) bool {
+// mappingTargetIneligibility names why req may not be served on the mapped
+// target, or returns "" when it may: neither the model nor its provider is
+// excluded, the model clears every positive allowlist, the provider has a
+// registered dispatch client, and the target passes the request checks every
+// model the router serves on its own behalf passes (provider enrolled for this
+// request, images, context window, tool ratings, automatic disable). An
+// ineligible target serves the router's own pick instead.
+func (s *Service) mappingTargetIneligibility(ctx context.Context, target router.Decision, req router.Request) string {
 	if _, excluded := s.excludedModelsForRequest(ctx)[target.Model]; excluded {
-		return false
+		return "excluded"
 	}
 	// The desugared exclusion set covers only the routable universe, which
 	// need not contain a mapping target.
 	if allowed := allowedModelsForRequest(ctx); allowed != nil {
 		if _, ok := allowed[target.Model]; !ok {
-			return false
+			return "not_allowed"
 		}
 	}
 	if _, excluded := s.excludedProvidersForRequest(ctx)[target.Provider]; excluded {
-		return false
+		return "provider_excluded"
 	}
-	return s.clients.Has(target.Provider)
+	if !s.clients.Has(target.Provider) {
+		return "no_dispatch_client"
+	}
+	return automaticServingIneligibility(target.Provider, target.Model, req)
 }
 
 // mappedProvider keeps the selection's provider when the target is bound to
@@ -108,6 +117,6 @@ func mappedProvider(target, provider string) string {
 
 // applyServingRules maps then substitutes the turn's automatic selection.
 func (s *Service) applyServingRules(ctx context.Context, res *turnLoopResult, req router.Request) {
-	s.mapModel(ctx, res)
+	s.mapModel(ctx, res, req)
 	s.substituteMidTier(ctx, res, req)
 }

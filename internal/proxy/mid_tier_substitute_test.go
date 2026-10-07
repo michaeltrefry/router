@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -325,6 +327,49 @@ func TestMidTierSubstitute_HMMHistoryKeepsOriginalPick(t *testing.T) {
 			assert.Equal(t, tc.wantSubstFrom, line["substituted_from_model"])
 			assert.Empty(t, line["routing_marker"], "a second turn on the substitute is not a model switch")
 			assert.Len(t, f.local.proxyBodies, 2)
+		})
+	}
+}
+
+type midTierIngress func(t *testing.T, f localTurnFixture, maxTokens int)
+
+// midTierIngresses serve one mid-tier turn whose input fits the 32K test
+// model and whose requested output cap is maxTokens.
+var midTierIngresses = map[string]midTierIngress{
+	"messages": func(t *testing.T, f localTurnFixture, maxTokens int) {
+		body := fmt.Sprintf(`{"model":"claude-sonnet-5","max_tokens":%d,"system":"sys","messages":[{"role":"user","content":"original prompt"}]}`, maxTokens)
+		require.NoError(t, f.svc.ProxyMessages(authedCtx(uuid.New().String()), []byte(body), httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/messages", nil)))
+	},
+	"chat completions": func(t *testing.T, f localTurnFixture, maxTokens int) {
+		body := fmt.Sprintf(`{"model":"claude-sonnet-5","max_tokens":%d,"messages":[{"role":"user","content":"original prompt"}]}`, maxTokens)
+		require.NoError(t, f.svc.ProxyOpenAIChatCompletion(authedCtx(uuid.New().String()), []byte(body), httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)))
+	},
+	"usage-bypass reroute": func(t *testing.T, f localTurnFixture, maxTokens int) {
+		f.anthropic.proxyErr = &providers.UpstreamErrorResponse{
+			Status: http.StatusTooManyRequests,
+			Body:   []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"weekly limit exceeded"}}`),
+		}
+		body := fmt.Sprintf(`{"model":"claude-sonnet-5","max_tokens":%d,"system":"sys","messages":[{"role":"user","content":"original prompt"}]}`, maxTokens)
+		// The kept selection fails on the same refusing upstream; only the
+		// substitution decision is under test.
+		_ = f.svc.ProxyMessages(midTierBypassCtx(f), []byte(body), httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
+		require.Equal(t, 1, f.scorer.routeCalls, "the bypass failure reroutes through the scorer")
+	},
+}
+
+// The local model must hold the request's output reserve as well as its
+// input, on every ingress: an input that fits with no room for the requested
+// output keeps the router's own pick.
+func TestMidTierSubstitute_OutputReserveBeyondLocalWindowKeepsSelection(t *testing.T) {
+	for ingress, serve := range midTierIngresses {
+		t.Run(ingress, func(t *testing.T) {
+			fits := newMidTierFixture(t, "test-mid-reserve-fits", sonnet5Decision, true, nil)
+			serve(t, fits, 1000)
+			require.Len(t, fits.local.proxyBodies, 1, "a request the local model holds is substituted")
+
+			over := newMidTierFixture(t, "test-mid-reserve-over", sonnet5Decision, true, nil)
+			serve(t, over, 40_000)
+			assert.Empty(t, over.local.proxyBodies, "a request the local model cannot hold keeps the router's pick")
 		})
 	}
 }
