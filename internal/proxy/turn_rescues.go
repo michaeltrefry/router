@@ -70,7 +70,7 @@ func (s *Service) resolveOpenAITurnSurface(ctx context.Context, env *translate.R
 			ChatOnlyParams: chatOnly,
 			Broad:          s.ResolveOpenAIResponsesBroad(ctx),
 		}) && !gatewayLacks
-		if !chatOnly && !gatewayLacks && s.includedOnlySubscriptionTransport(decision.Provider) &&
+		if !chatOnly && !gatewayLacks && s.supportsSubscriptionTransport(decision.Provider) &&
 			(servedOnCodexSubscription(resolvedCtx) || managedSubscriptionCanServe(ctx, decision.Provider, decision.Model)) {
 			surface.responses = true
 		}

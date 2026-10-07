@@ -269,6 +269,9 @@ func acceptsControlCommands(r *http.Request) bool {
 }
 
 func subscriptionSurface(r *http.Request) bool {
+	if r.URL.Path == "/v1/subscriptions/usage" {
+		return r.Method == http.MethodGet
+	}
 	if r.URL.Path == "/v1/subscriptions/accounts" {
 		return r.Method == http.MethodGet || r.Method == http.MethodPost
 	}

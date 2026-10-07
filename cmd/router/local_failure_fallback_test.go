@@ -115,7 +115,7 @@ func (a *streamingAnthropic) calls() ([]bool, []string) {
 	return append([]bool(nil), a.oauth...), append([]string(nil), a.bodyModels...)
 }
 
-func (*streamingAnthropic) IncludedOnlySubscriptions() bool { return true }
+func (*streamingAnthropic) SupportsSubscriptions() bool { return true }
 
 func (a *streamingAnthropic) served() []string {
 	a.mu.Lock()

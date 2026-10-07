@@ -42,7 +42,7 @@ func (o *streamingOpenAI) calls() ([]bool, []providers.Endpoint) {
 	return append([]bool(nil), o.oauth...), append([]providers.Endpoint(nil), o.endpoints...)
 }
 
-func (*streamingOpenAI) IncludedOnlySubscriptions() bool { return true }
+func (*streamingOpenAI) SupportsSubscriptions() bool { return true }
 
 func (o *streamingOpenAI) served() []string {
 	o.mu.Lock()

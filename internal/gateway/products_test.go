@@ -244,6 +244,7 @@ func TestSubscriptionsPreserveMethodsAndBindAssertions(t *testing.T) {
 	forwarder, _, signer := gatewayFixture(t, worker, nil, nil)
 	for _, request := range []struct{ method, path, body string }{
 		{http.MethodGet, "/v1/subscriptions/accounts", ""},
+		{http.MethodGet, "/v1/subscriptions/usage", ""},
 		{http.MethodPost, "/v1/subscriptions/accounts", `{"provider":"` + string(auth.SubscriptionProviderCodex) + `","refresh_token":"secret"}`},
 		{http.MethodPatch, "/v1/subscriptions/accounts/account", `{"enabled":false}`},
 		{http.MethodDelete, "/v1/subscriptions/accounts/account", ""},
@@ -266,7 +267,7 @@ func TestGatewayProductWhitelistRejectsNestedAndUnknownPaths(t *testing.T) {
 	worker := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("unexpected dispatch") }))
 	defer worker.Close()
 	forwarder, _, _ := gatewayFixture(t, worker, nil, nil, gateway.ProductSurfaces{Environment: policyregistry.EnvironmentProd, Analytics: &analyticsVerifier{}, Reads: &readVerifier{}})
-	for _, path := range []string{"/v1/models/", "/v1/models/a/b", "/v1/sessions/a/b/cost", "/v1/subscriptions/accounts/account/extra", "/v1/analytics/unknown", "/v1/feedback/link/token/nested", "/v1/feedback/assets/unknown", "/admin/v1/config"} {
+	for _, path := range []string{"/v1/models/", "/v1/models/a/b", "/v1/sessions/a/b/cost", "/v1/subscriptions/accounts/account/extra", "/v1/subscriptions/usage/extra", "/v1/analytics/unknown", "/v1/feedback/link/token/nested", "/v1/feedback/assets/unknown", "/admin/v1/config"} {
 		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodDelete} {
 			w := httptest.NewRecorder()
 			forwarder.ServeHTTP(w, httptest.NewRequest(method, path, strings.NewReader(`{}`)))
