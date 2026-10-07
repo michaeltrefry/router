@@ -55,8 +55,10 @@ subscription_fallback:
 
 # Optional: serve the router's automatic selection of one catalog model on
 # another catalog model, e.g. a trained scorer's roster model on the current
-# release of the same family. Both sides must be catalog models, and a target
-# must not itself be mapped. A forced model, a hard-pinned utility turn
+# release of the same family. Both sides must be catalog models, a target must
+# not itself be mapped, and each source must be a candidate of the active
+# cluster scorer (a retired source such as claude-fable-5 or gpt-5.5 takes its
+# target's tier so the scorer can select it again). A forced model, a hard-pinned utility turn
 # (compaction, title generation, probe, sub-agent override), a classifier turn
 # and a usage-bypassed turn are dispatched unmapped. Session pins, HMM history
 # and policy outcomes keep the original selection; the outcome is withheld from

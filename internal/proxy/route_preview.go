@@ -84,7 +84,7 @@ func (s *Service) anthropicRoutingRequest(
 	if features.MaxTokens > outputReserve {
 		outputReserve = features.MaxTokens
 	}
-	excluded := s.excludeCodexOAuthOnlyModels(ctx, headers, enabledProviders, s.excludedModelsForRequest(ctx))
+	excluded, _ := s.excludeCodexOAuthOnlyModels(ctx, headers, enabledProviders, s.excludedModelsForRequest(ctx))
 	contextFit := router.ContextFit{OverflowTokens: env.ContextOverflowTokenEstimate(), SignatureSavings: env.SignatureTokenSavings(), OutputReserve: outputReserve}
 	excluded, _ = excludeContextOverflowModels(
 		contextFit.OverflowTokens,

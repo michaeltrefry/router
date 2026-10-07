@@ -246,11 +246,26 @@ func TestExcludeCodexOAuthOnlyModels(t *testing.T) {
 			deploymentKeyedProviders:     map[string]struct{}{},
 			passthroughEligibleProviders: map[string]struct{}{},
 		}
-		got := s.excludeCodexOAuthOnlyModels(ctx, http.Header{}, enabled, nil)
+		got, _ := s.excludeCodexOAuthOnlyModels(ctx, http.Header{}, enabled, nil)
 		assert.Contains(t, got, "gpt-5.4-nano")
 		assert.NotContains(t, got, "gpt-5.6-sol")
 		assert.NotContains(t, got, "gpt-5.6-terra")
 		assert.NotContains(t, got, "gpt-5.6-luna")
+	})
+
+	t.Run("OAuth-only admits a mapping source whose target the subscription serves", func(t *testing.T) {
+		s := &Service{
+			byokOnly:                     true,
+			clients:                      dispatch.NewClients(map[string]providers.Client{providers.ProviderOpenAI: nil}),
+			deploymentKeyedProviders:     map[string]struct{}{},
+			passthroughEligibleProviders: map[string]struct{}{},
+			modelMapping:                 ModelMapping{"gpt-5.4-mini": "gpt-6-luna", "gpt-5.5": "gpt-6.1-sol", "gpt-5.4-nano": "gpt-5.4"},
+		}
+		got, admitted := s.excludeCodexOAuthOnlyModels(ctx, http.Header{}, enabled, nil)
+		assert.NotContains(t, got, "gpt-5.4-mini")
+		assert.NotContains(t, got, "gpt-5.5")
+		assert.Contains(t, got, "gpt-5.4-nano", "a target the subscription cannot serve admits nothing")
+		assert.Equal(t, map[string]struct{}{"gpt-5.4-mini": {}, "gpt-5.5": {}}, admitted)
 	})
 
 	t.Run("OpenAI BYOK keeps infrastructure models eligible", func(t *testing.T) {
@@ -263,7 +278,7 @@ func TestExcludeCodexOAuthOnlyModels(t *testing.T) {
 		byokCtx := context.WithValue(ctx, ExternalAPIKeysContextKey{}, []*auth.ExternalAPIKey{
 			{Provider: providers.ProviderOpenAI, Plaintext: []byte("sk-oai-byok")},
 		})
-		got := s.excludeCodexOAuthOnlyModels(byokCtx, http.Header{}, enabled, nil)
+		got, _ := s.excludeCodexOAuthOnlyModels(byokCtx, http.Header{}, enabled, nil)
 		assert.NotContains(t, got, "gpt-5.4-nano")
 	})
 
@@ -275,7 +290,7 @@ func TestExcludeCodexOAuthOnlyModels(t *testing.T) {
 			},
 			passthroughEligibleProviders: map[string]struct{}{},
 		}
-		got := s.excludeCodexOAuthOnlyModels(billing.WithSubscriptionOnly(ctx, billing.SubscriptionOnlyCreditsDepleted), http.Header{}, enabled, nil)
+		got, _ := s.excludeCodexOAuthOnlyModels(billing.WithSubscriptionOnly(ctx, billing.SubscriptionOnlyCreditsDepleted), http.Header{}, enabled, nil)
 		assert.Contains(t, got, "gpt-5.4-nano")
 		assert.NotContains(t, got, "gpt-5.6-sol")
 	})
@@ -290,7 +305,7 @@ func TestExcludeCodexOAuthOnlyModels(t *testing.T) {
 		}
 		managed := managedSubscriptionContext(auth.SubscriptionProviderCodex)
 		managed = billing.WithSubscriptionOnly(managed, billing.SubscriptionOnlyCreditsDepleted)
-		got := s.excludeCodexOAuthOnlyModels(managed, http.Header{}, enabled, nil)
+		got, _ := s.excludeCodexOAuthOnlyModels(managed, http.Header{}, enabled, nil)
 		assert.Contains(t, got, "gpt-5.4-nano")
 		assert.NotContains(t, got, "gpt-5.6-sol")
 	})

@@ -270,7 +270,13 @@ Both sides must be built-in catalog models (a local model is not a valid
 target), and a target must not itself be mapped; the router fails to boot with
 `model mapping: source must be a catalog model`, `model mapping: target must be
 a catalog model` or `model mapping: target must not itself be mapped`
-otherwise. The target keeps the selection's provider when it is bound there,
+otherwise. A source retired from automatic routing (an untiered catalog row such
+as `claude-fable-5` or `gpt-5.5`) takes its target's tier, so the scorer and the
+HMM and RL policies can select it again; a source with its own tier keeps it.
+Every source must then be a candidate of the active cluster scorer
+(`ROUTER_CLUSTER_VERSION`, after its roster is filtered to the deployment's
+providers), or the router fails to boot with `model mapping: source is never
+selected by the active cluster scorer`. The target keeps the selection's provider when it is bound there,
 else uses the target's primary provider, and is authorized as a deployment
 override. A turn whose target the request may not use is served on the
 router's own pick instead: the installation excluded the target or its
@@ -279,9 +285,7 @@ has no registered client in this deployment (boot does not require one), or the
 target fails the same request checks as a local model serving on the router's
 behalf. Those checks reject a target whose provider is not enrolled for the
 request (for example an OpenAI target on a Claude Code request with no OpenAI
-key or Codex subscription), a target the request's own exclusions remove (such
-as a model a Codex subscription that is the only OpenAI credential cannot
-serve), a request whose full body (tool definitions included) plus output
+key or Codex subscription), a target the request's own exclusions remove, a request whose full body (tool definitions included) plus output
 reserve exceeds the target's context window, images the target cannot read,
 tools on a target rated low for tool or agentic use, and a target disabled for
 automatic routing. Each skip logs `Model mapping skipped; serving the trained
@@ -290,6 +294,17 @@ model` with `reason` (`excluded` for the installation's exclusions,
 for the request's own exclusions, `provider_not_enabled`, `not_image_capable`,
 `context_window_exceeded`, `low_tool_rating` or `automatic_routing_disabled`),
 `original_model` and `mapped_model`.
+
+When a Codex subscription is the only OpenAI credential, an OpenAI source the
+subscription cannot serve (such as `gpt-5.4-mini` or `gpt-5.5`) stays
+selectable when its target can be served on the subscription (such as
+`gpt-6-luna` or `gpt-6.1-sol`). If such a turn would still be dispatched on the
+source itself (its mapping was skipped as above, or the turn is not mapped), it
+is never sent: the router logs `Model mapping could not serve a
+subscription-admitted selection; routing without mapping-admitted models` and
+routes the turn again with those sources excluded, exactly as without the
+mapping. With nothing else eligible the turn fails with the usual
+no-eligible-provider error.
 
 Mapping has the same scope as mid-tier substitution: an explicit
 `/force-model`, hard-pinned or local-turn-routed utility turns, classifier and

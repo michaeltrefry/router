@@ -20,6 +20,7 @@ import (
 	openaiCompatProvider "weave-os/router/internal/providers/openaicompat"
 	"weave-os/router/internal/proxy"
 	"weave-os/router/internal/router/catalog"
+	"weave-os/router/internal/router/cluster"
 	"weave-os/router/internal/router/turntype"
 )
 
@@ -48,6 +49,7 @@ var (
 	errModelMappingSource        = errors.New("model mapping: source must be a catalog model")
 	errModelMappingTarget        = errors.New("model mapping: target must be a catalog model")
 	errModelMappingChain         = errors.New("model mapping: target must not itself be mapped")
+	errModelMappingUnselectable  = errors.New("model mapping: source is never selected by the active cluster scorer")
 	errSubstitutionRuleModel     = errors.New("substitution rule: model must name a configured local model")
 	errSubstitutionRuleGlob      = errors.New("substitution rule: match is not a valid glob pattern")
 	errSubstitutionRuleNoMatch   = errors.New("substitution rule: match names no catalog model")
@@ -240,6 +242,23 @@ func validateModelMapping(entries map[string]string) (proxy.ModelMapping, error)
 		}
 	}
 	return proxy.ModelMapping(entries), nil
+}
+
+// validateModelMappingSelectable rejects a mapping whose source the active
+// cluster scorer can never select, since such a mapping would never apply.
+// candidates is that scorer's provider-filtered roster, built after
+// TierMappingSources tiered the mapping's retired sources.
+func validateModelMappingSelectable(mapping proxy.ModelMapping, version string, candidates []cluster.DeployedEntry) error {
+	selectable := make(map[string]struct{}, len(candidates))
+	for _, c := range candidates {
+		selectable[c.Model] = struct{}{}
+	}
+	for _, source := range slices.Sorted(maps.Keys(mapping)) {
+		if _, ok := selectable[source]; !ok {
+			return fmt.Errorf("%w: %q is not a candidate of cluster version %s", errModelMappingUnselectable, source, version)
+		}
+	}
+	return nil
 }
 
 // validateSubscriptionFallback resolves the subscription_fallback block. Any
@@ -458,6 +477,9 @@ func loadLocalModels(
 		return localModelsConfig{}, fmt.Errorf("%s: %w", localModelsFileEnv, err)
 	}
 	if err := registerLocalModels(cfg.models, providerMap, envKeyedProviders, logger); err != nil {
+		return localModelsConfig{}, err
+	}
+	if err := catalog.TierMappingSources(cfg.modelMapping); err != nil {
 		return localModelsConfig{}, err
 	}
 	if cfg.turnRoute.Model != "" {
