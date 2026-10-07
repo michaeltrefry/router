@@ -370,3 +370,33 @@ func TestProxyGeminiGenerateContent_PersistsExperimentUpstreamError(t *testing.T
 	assert.Zero(t, row.OutputTokens)
 	assert.Len(t, googleProvider.proxyBodies, 1, "a non-retryable upstream error must not be retried")
 }
+
+// The Gemini ingress hands routing the full-body context requirement its
+// pre-filter applied, so a model outside the scored roster is held to it.
+func TestProxyGeminiGenerateContent_CarriesContextFit(t *testing.T) {
+	fr := &fakeRouter{decision: router.Decision{Provider: providers.ProviderGoogle, Model: "gemini-2.5-pro", Reason: "cluster"}}
+	svc := proxy.NewService(
+		fr,
+		map[string]providers.Client{providers.ProviderGoogle: &fakeProvider{}},
+		nil, false, nil,
+		newFakePinStore(),
+		false, providers.ProviderGoogle, "gemini-2.5-flash",
+		nil,
+	)
+	body := `{
+	"model":"gemini-1.5-pro",
+	"stream":false,
+	"generationConfig":{"maxOutputTokens":40000},
+	"tools":[{"functionDeclarations":[{"name":"R","description":"` + strings.Repeat("read a file ", 400) + `"}]}],
+	"contents":[{"role":"user","parts":[{"text":"hello"}]}]
+}`
+	ctx := context.WithValue(authedCtx("00000000-0000-0000-0000-000000000001"), proxy.ManagedSubscriptionEnrollmentUnavailableContextKey{}, true)
+	httpReq := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-1.5-pro:generateContent", strings.NewReader(""))
+
+	require.NoError(t, svc.ProxyGeminiGenerateContent(ctx, []byte(body), httptest.NewRecorder(), httpReq))
+
+	require.NotNil(t, fr.capturedReq)
+	assert.Equal(t, 40_000, fr.capturedReq.ContextFit.OutputReserve)
+	assert.Greater(t, fr.capturedReq.ContextFit.OverflowTokens, 1000, "the estimate counts tool declarations, not only message text")
+	assert.Less(t, fr.capturedReq.EstimatedInputTokens, 1000)
+}

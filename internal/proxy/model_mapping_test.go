@@ -352,6 +352,24 @@ const mappingImageBody = `{
 	]}]
 }`
 
+// mappingLargeToolsBody's message text fits the 32K test target, while its
+// tool definitions alone exceed it.
+var mappingLargeToolsBody = `{
+	"model":"claude-opus-4-7",
+	"system":"sys",
+	"tools":[{"name":"R","description":"` + strings.Repeat("read a file ", 12_000) + `","input_schema":{"type":"object"}}],
+	"messages":[{"role":"user","content":"original prompt"}]
+}`
+
+// mappingLargeMaxTokensBody's input fits the 32K test target but leaves no
+// room for the requested output.
+const mappingLargeMaxTokensBody = `{
+	"model":"claude-opus-4-7",
+	"max_tokens":40000,
+	"system":"sys",
+	"messages":[{"role":"user","content":"original prompt"}]
+}`
+
 // A target this request cannot be served on dispatches the trained model
 // unchanged, and the skip names its reason.
 func TestModelMapping_RequestIneligibleTargetServesTrainedModel(t *testing.T) {
@@ -376,6 +394,14 @@ func TestModelMapping_RequestIneligibleTargetServesTrainedModel(t *testing.T) {
 		"images the target cannot read": {
 			body:   mappingImageBody,
 			reason: "not_image_capable",
+		},
+		"tool definitions beyond the target's context window": {
+			body:   mappingLargeToolsBody,
+			reason: "context_window_exceeded",
+		},
+		"output reserve beyond the target's context window": {
+			body:   mappingLargeMaxTokensBody,
+			reason: "context_window_exceeded",
 		},
 		"tools on a low tool-use target": {
 			body:   midTierToolResultBody,
@@ -440,10 +466,13 @@ func TestModelMapping_CodexSubscriptionOnlyServesCoveredTargets(t *testing.T) {
 	svc.WithDeploymentKeyedProviders(map[string]struct{}{providers.ProviderAnthropic: {}})
 	ctx := context.WithValue(authedCtx(uuid.New().String()), proxy.OpenAISubscriptionContextKey{}, "eyJhbGciOiJSUzI1NiJ9.codex.sig")
 	ctx = context.WithValue(ctx, proxy.OpenAIAccountIDContextKey{}, "acct-123")
+	var logs bytes.Buffer
+	ctx = observability.WithLogger(ctx, slog.New(slog.NewJSONHandler(&logs, nil)))
 	rec := httptest.NewRecorder()
 
 	require.NoError(t, svc.ProxyMessages(ctx, []byte(pinTestBody), rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil)))
 
+	assert.Equal(t, "request_excluded", logLine(t, &logs, "Model mapping skipped; serving the trained model")["reason"])
 	assert.Empty(t, openai.proxyBodies)
 	require.Len(t, anthropic.proxyBodies, 1)
 	assert.Equal(t, "claude-opus-5", upstreamModel(t, anthropic.proxyBodies[0]))

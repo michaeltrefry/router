@@ -92,16 +92,30 @@ func localModelServes(provider, model string, req router.Request) bool {
 }
 
 // automaticServingIneligibility names why a model the router serves on its
-// own behalf may not take req, or returns "" when it may.
+// own behalf may not take req, or returns "" when it may. The context check
+// uses the full-body estimate and output reserve the ingress pre-filter
+// applied to the scored roster, since text alone omits tool definitions.
 func automaticServingIneligibility(provider, model string, req router.Request) string {
-	pin := sessionpin.Pin{Provider: provider, Model: model}
-	if !pinEligible(pin, req) {
-		return forcedPinIneligibilityReason(pin, req)
+	if provider == "" || model == "" {
+		return "unconfigured"
+	}
+	if _, excluded := req.ExcludedModels[model]; excluded {
+		return "request_excluded"
+	}
+	if req.EnabledProviders != nil {
+		if _, enabled := req.EnabledProviders[provider]; !enabled {
+			return "provider_not_enabled"
+		}
+	}
+	if !pinServesImages(sessionpin.Pin{Provider: provider, Model: model}, req) {
+		return "not_image_capable"
 	}
 	if automaticallyDisabled(req, model) {
 		return "automatic_routing_disabled"
 	}
-	if req.EstimatedInputTokens > catalog.ContextWindowForBinding(model, provider) {
+	fit := req.ContextFit
+	if req.EstimatedInputTokens > catalog.ContextWindowForBinding(model, provider) ||
+		!siblingFitsContext(model, provider, fit.OverflowTokens, fit.SignatureSavings, fit.OutputReserve) {
 		return "context_window_exceeded"
 	}
 	if entry, known := catalog.ByID(model); known && req.HasTools &&

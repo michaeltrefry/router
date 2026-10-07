@@ -281,13 +281,15 @@ behalf. Those checks reject a target whose provider is not enrolled for the
 request (for example an OpenAI target on a Claude Code request with no OpenAI
 key or Codex subscription), a target the request's own exclusions remove (such
 as a model a Codex subscription that is the only OpenAI credential cannot
-serve), a request larger than the target's context window, images the target
-cannot read, tools on a target rated low for tool or agentic use, and a target
-disabled for automatic routing. Each skip logs `Model mapping skipped; serving
-the trained model` with `reason` (`excluded`, `not_allowed`,
-`provider_excluded`, `no_dispatch_client`, `provider_not_enabled`,
-`not_image_capable`, `context_window_exceeded`, `low_tool_rating` or
-`automatic_routing_disabled`), `original_model` and `mapped_model`.
+serve), a request whose full body (tool definitions included) plus output
+reserve exceeds the target's context window, images the target cannot read,
+tools on a target rated low for tool or agentic use, and a target disabled for
+automatic routing. Each skip logs `Model mapping skipped; serving the trained
+model` with `reason` (`excluded` for the installation's exclusions,
+`not_allowed`, `provider_excluded`, `no_dispatch_client`, `request_excluded`
+for the request's own exclusions, `provider_not_enabled`, `not_image_capable`,
+`context_window_exceeded`, `low_tool_rating` or `automatic_routing_disabled`),
+`original_model` and `mapped_model`.
 
 Mapping has the same scope as mid-tier substitution: an explicit
 `/force-model`, hard-pinned or local-turn-routed utility turns, classifier and
