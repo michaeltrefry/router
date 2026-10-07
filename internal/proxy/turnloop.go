@@ -253,9 +253,12 @@ type turnLoopResult struct {
 	// SubstitutedFrom is the router's own pick when a local model replaced it
 	// in Decision; zero otherwise.
 	SubstitutedFrom router.Decision
-	// SubstitutionReason names what replaced SubstitutedFrom: the mid-tier
-	// substitute or the subscription local fallback.
+	// SubstitutionReason names what replaced SubstitutedFrom: the model
+	// mapping, the mid-tier substitute or the subscription local fallback.
 	SubstitutionReason string
+	// MappedDecision is the model mapping's target for this turn, kept when
+	// a later rule replaces it in Decision; zero when no mapping applied.
+	MappedDecision router.Decision
 	// LocalTurnRouted marks a decision the local turn route made.
 	LocalTurnRouted bool
 	// PlannerDecision holds the planner's verdict and EV math when the planner ran.
@@ -398,8 +401,30 @@ func (a authorityCacheShadow) EVRan() bool {
 func (r turnLoopResult) modelSwitched() bool {
 	// Compare serving identities: a same-model effort change reshapes the
 	// prompt-cache prefix and invalidates thinking-block signatures.
-	transition := r.PriorServedModel != "" && r.PriorServedModel != r.Decision.ServedIdentity()
+	transition := r.PriorServedModel != "" && r.PriorServedModel != r.recordedSelection().ServedIdentity()
 	return transition || r.SessionEverSwitched || r.StripThinkingBlocks
+}
+
+// recordedSelection is the decision session state records for this turn and
+// so the one PriorServedModel is compared against: the router's own pick when
+// the model mapping or mid-tier substitute serves another model in its place
+// every turn, else Decision. A subscription fallback or local-failure rescue
+// is not included, since its next turn returns to the original.
+func (r turnLoopResult) recordedSelection() router.Decision {
+	switch r.SubstitutionReason {
+	case reasonModelMapping, reasonMidTierSubstitute:
+		return r.SubstitutedFrom
+	}
+	return r.Decision
+}
+
+// priorServed reports whether model continues the session's last served
+// model; the turn's own Decision is judged by its recordedSelection.
+func (r turnLoopResult) priorServed(model string) bool {
+	if model == r.Decision.Model {
+		model = r.recordedSelection().Model
+	}
+	return baseModelOf(r.PriorServedModel) == model
 }
 
 func isHMMDecision(dec router.Decision) bool {
@@ -719,7 +744,7 @@ func (s *Service) runTurnLoop(
 		if routeErr == nil {
 			routeErr = policyPinServed(ctx, res)
 			if routeErr == nil {
-				s.substituteMidTier(ctx, &res, req)
+				s.applyServingRules(ctx, &res, req)
 				logAuthoritativeUpgrade(ctx, res)
 			}
 		}

@@ -253,6 +253,56 @@ cannot read, or carries tools and the model is rated `tool_use: low` or
 precedence over `ROUTER_HARD_PIN_*` and `ROUTER_SUBAGENT_*` for the turns it
 serves.
 
+#### Model mapping
+
+An optional top-level `model_mapping` block serves the router's automatic
+selection of one catalog model on another, for example a trained scorer's
+roster model on the current release of the same family. It needs no `models`
+entries:
+
+```yaml
+model_mapping:
+  claude-opus-5: claude-opus-5-5
+  claude-sonnet-5: claude-sonnet-5-5
+```
+
+Both sides must be built-in catalog models (a local model is not a valid
+target), and a target must not itself be mapped; the router fails to boot with
+`model mapping: source must be a catalog model`, `model mapping: target must be
+a catalog model` or `model mapping: target must not itself be mapped`
+otherwise. The target keeps the selection's provider when it is bound there,
+else uses the target's primary provider, and is authorized as a deployment
+override. A turn whose target the request may not use is served on the
+router's own pick instead: the installation excluded the target or its
+provider, the target is outside an allowed-models list, or the target's
+provider has no registered client in this deployment (boot does not require
+one).
+
+Mapping has the same scope as mid-tier substitution: an explicit
+`/force-model`, hard-pinned or local-turn-routed utility turns, classifier and
+compaction turns, usage-bypass or caller-model passthrough turns, and turns
+under an honoured `x-weave-policy-pin` are dispatched unmapped. The session
+pin, planner state and HMM history keep the router's own pick, and the turn's
+policy outcome reports that pick and is excluded from training
+(`training_exclusion_reason: model_mapping`).
+
+Mapping runs first, then mid-tier substitution, which still judges the tier of
+the router's own pick: a `claude-sonnet-5` selection is mapped to
+`claude-sonnet-5-5` and, with `mid_tier_substitute` on, served on the local
+model; if that local model fails before output, the turn falls back to
+`claude-sonnet-5-5`.
+
+A mapped turn's completion line carries `decision_model` (the served model),
+`substituted_from_model` / `substituted_from_provider` (the router's pick),
+`substitution_reason: model_mapping` and `mapped_model`; a mapped then
+substituted turn carries `substitution_reason: mid_tier_substitute` and the
+mapped model in `mapped_model`. The routing marker reads
+`→ <mapped model> · mapped from <original model>`, or
+`→ <local model> (local) · substitute for <mapped model> (mapped from <original model>)`
+when the mapped turn was then substituted. Because the session records the
+router's pick, a later turn with the same pick is not a model switch: it shows
+no marker and keeps the transcript's signed thinking blocks.
+
 #### Mid-tier substitution
 
 An optional top-level `mid_tier_substitute` block serves turns the router
@@ -357,7 +407,8 @@ response-header timeout, or any other error before the first byte), the router
 serves the same turn on the target it would have had without the local rule:
 
 - a mid-tier substituted turn goes to the router's original pick (the model
-  named in `substituted_from_model`), with no second routing pass;
+  named in `substituted_from_model`), or to its mapped model when
+  `model_mapping` applied, with no second routing pass;
 - a turn-type routed turn is routed again with local rules disabled, only
   after the local model has failed: a title or probe turn lands on its utility
   hard pin, a sub-agent turn on `ROUTER_SUBAGENT_*` or the scorer, a Codex

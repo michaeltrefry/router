@@ -1319,6 +1319,7 @@ func main() {
 		WithLocalTurnRoute(localModels.turnRoute).
 		WithMidTierSubstitute(localModels.midTier).
 		WithSubscriptionLocalFallback(localModels.subscriptionFallback).
+		WithModelMapping(localModels.modelMapping).
 		WithPlannerEnabled(plannerEnabled).
 		WithScoreToolResultTurns(scoreToolResultTurns).
 		WithCyberRefusalRepin(cyberRefusalRepin).

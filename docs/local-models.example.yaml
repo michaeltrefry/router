@@ -52,3 +52,20 @@ mid_tier_substitute:
 subscription_fallback:
   model: qwen3.8-flash-next
   enabled: true
+
+# Optional: serve the router's automatic selection of one catalog model on
+# another catalog model, e.g. a trained scorer's roster model on the current
+# release of the same family. Both sides must be catalog models, and a target
+# must not itself be mapped. A forced model, a hard-pinned utility turn
+# (compaction, title generation, probe, sub-agent override), a classifier turn
+# and a usage-bypassed turn are dispatched unmapped. Session pins, HMM history
+# and policy outcomes keep the original selection; the outcome is withheld from
+# training. Mapping runs before mid_tier_substitute, which still judges the
+# tier of the original selection, so a claude-sonnet-5 pick is mapped to
+# claude-sonnet-5-5 and then served on the mid-tier substitute when it is on.
+model_mapping:
+  claude-opus-5: claude-opus-5-5
+  claude-fable-5: claude-fable-5-1
+  claude-sonnet-5: claude-sonnet-5-5
+  gpt-5.5: gpt-6.1-sol
+  gpt-5.4-mini: gpt-6-luna
