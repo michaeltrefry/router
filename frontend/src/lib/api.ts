@@ -164,6 +164,8 @@ export interface MeResponse {
 export interface DeployedModel {
   model: string;
   provider: string;
+  // Self-hosted model registered from the deployment's local-models file.
+  local?: boolean;
 }
 
 export interface ExcludedModelsResponse {

@@ -8,11 +8,13 @@ const ScopeCatalog = "catalog"
 
 // ModelListing is one wire row of GET /v1/router/models: the ID clients send,
 // the primary provider the settings UI groups by, and whether the dashboard
-// may offer a fast-mode toggle for the model.
+// may offer a fast-mode toggle for the model. Local marks a self-hosted model
+// registered from deployment configuration.
 type ModelListing struct {
 	Model    string `json:"model"`
 	Provider string `json:"provider"`
 	FastMode bool   `json:"fast_mode"`
+	Local    bool   `json:"local,omitempty"`
 }
 
 // ModelListingResponse is the body of GET /v1/router/models. Kept stable so
@@ -31,7 +33,7 @@ func Listing() []ModelListing {
 		if m.ID == "" {
 			continue
 		}
-		rows = append(rows, ModelListing{Model: m.ID, Provider: m.PrimaryProvider(), FastMode: SupportsFastMode(m.ID)})
+		rows = append(rows, ModelListing{Model: m.ID, Provider: m.PrimaryProvider(), FastMode: SupportsFastMode(m.ID), Local: IsLocal(m.ID)})
 	}
 	SortListing(rows)
 	return rows

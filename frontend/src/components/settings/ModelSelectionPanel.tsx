@@ -7,6 +7,8 @@ import { Appearance, Intent } from "@/components/types";
 import { api, type DeployedModel } from "@/lib/api";
 import { useEffect, useState } from "react";
 
+const LOCAL_GROUP = "local (self-hosted)";
+
 export function ModelSelectionPanel() {
   const [available, setAvailable] = useState<DeployedModel[] | null>(null);
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
@@ -71,11 +73,13 @@ export function ModelSelectionPanel() {
     );
   }
 
+  // Each local model has its own local_<id> provider; list them together.
   const grouped = new Map<string, DeployedModel[]>();
   for (const m of available) {
-    const arr = grouped.get(m.provider) ?? [];
+    const group = m.local === true ? LOCAL_GROUP : m.provider;
+    const arr = grouped.get(group) ?? [];
     arr.push(m);
-    grouped.set(m.provider, arr);
+    grouped.set(group, arr);
   }
 
   return (

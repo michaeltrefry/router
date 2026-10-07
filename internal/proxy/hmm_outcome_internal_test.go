@@ -1,13 +1,16 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"weave-os/router/internal/observability"
 	"weave-os/router/internal/providers"
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
@@ -215,4 +218,45 @@ func TestReportPolicyOutcome_EffortMismatchExcludedFromTraining(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for policy outcome payload")
 	}
+}
+
+// A mid-tier substitute keeps the policy's routing metadata on the served
+// decision; the outcome must still name the policy's pick and stay out of
+// training.
+func TestReportPolicyOutcome_MidTierSubstituteReportsOriginalAndExcludesTraining(t *testing.T) {
+	reporter := &captureHMMOutcomeReporter{ch: make(chan map[string]interface{}, 1)}
+	s := (&Service{}).WithPolicyStrategy(policy.StrategySpec{Strategy: router.StrategyHMM, Router: reporter})
+	original := router.Decision{
+		Model:    "claude-sonnet-5",
+		Provider: providers.ProviderAnthropic,
+		Metadata: &router.RoutingMetadata{
+			RouteID:                       "route-substituted",
+			Strategy:                      string(router.StrategyHMM),
+			AuthoritativePerTurnSelection: true,
+		},
+	}
+	served := original
+	served.Model, served.Provider, served.Reason = "local-mid", "local_mid", reasonMidTierSubstitute
+	routeRes := turnLoopResult{Decision: served, Fresh: served, SubstitutedFrom: original, SubstitutionReason: reasonMidTierSubstitute}
+	var logs bytes.Buffer
+	ctx := observability.WithLogger(context.Background(), slog.New(slog.NewJSONHandler(&logs, nil)))
+	ctx = context.WithValue(ctx, PolicyTrainingAllowedContextKey{}, true)
+
+	s.reportPolicyOutcome(ctx, routeRes, served, effortResolution{}, served.Provider, false, 100, 90, 10, 0, 0, 12, 34, nil,
+		&policyOutcomeResponse{Body: []byte(`{"content":[{"type":"text","text":"must not train"}]}`)})
+
+	select {
+	case payload := <-reporter.ch:
+		assert.Equal(t, "route-substituted", payload["route_id"])
+		assert.Equal(t, "claude-sonnet-5", payload["selected_model"])
+		assert.Equal(t, providers.ProviderAnthropic, payload["selected_provider"])
+		assert.Equal(t, "local-mid", payload["served_model"])
+		assert.Equal(t, false, payload["selected_served_model_match"])
+		assert.Equal(t, false, payload["training_allowed"])
+		assert.Equal(t, reasonMidTierSubstitute, payload["training_exclusion_reason"])
+		assert.NotContains(t, payload, "response_text")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for policy outcome payload")
+	}
+	assert.NotContains(t, logs.String(), "did not match served model", "a substitution is not an authoritative-policy mismatch")
 }

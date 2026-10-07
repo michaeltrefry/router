@@ -205,6 +205,7 @@ func (s *Service) dispatchPlanned(ctx context.Context, in failoverInputs, plan i
 			bookkeepingCtx := context.WithoutCancel(credentialCtx)
 			if !committed(in.buf) {
 				s.recordSubscriptionModelRejection(bookkeepingCtx, decision.Provider, decision.Model, attemptErr)
+				noteSubscriptionRefusal(ctx, credentialCtx, attemptErr)
 			}
 			lease.Release()
 			if attemptErr == nil {

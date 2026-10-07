@@ -1,0 +1,10 @@
+# Smoke fixture: one self-hosted OpenAI-compatible model. The host is never
+# resolved: the router reaches it through the smoke MITM proxy, which replays
+# the authored cassettes for smoke/local_model_test.go.
+models:
+  - id: smoke-local
+    base_url: https://local-model.smoke.test/v1
+    api_key_env: SMOKE_LOCAL_MODEL_KEY
+    upstream_model: smoke-local-upstream
+    context_window: 131072
+    tier: mid

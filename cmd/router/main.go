@@ -499,6 +499,12 @@ func main() {
 			})
 	}
 
+	localModels, err := loadLocalModels(os.Getenv, providerMap, envKeyedProviders, logger)
+	if err != nil {
+		logger.Error("Invalid local models configuration; refusing to boot", "err", err)
+		panic(err)
+	}
+
 	availableProviders := make(map[string]struct{}, len(providerMap))
 	for name := range providerMap {
 		availableProviders[name] = struct{}{}
@@ -1310,6 +1316,9 @@ func main() {
 		WithPassthroughEligibleProviders(passthroughEligible).
 		WithHardPinResolver(hardPinResolver).
 		WithSubAgentOverride(subAgentProvider, subAgentModel).
+		WithLocalTurnRoute(localModels.turnRoute).
+		WithMidTierSubstitute(localModels.midTier).
+		WithSubscriptionLocalFallback(localModels.subscriptionFallback).
 		WithPlannerEnabled(plannerEnabled).
 		WithScoreToolResultTurns(scoreToolResultTurns).
 		WithCyberRefusalRepin(cyberRefusalRepin).

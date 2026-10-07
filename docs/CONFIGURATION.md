@@ -8,6 +8,7 @@ This page is the exhaustive reference; the [README](../README.md) has the
 ## Table of contents
 
 - [Provider API keys](#provider-api-keys)
+  - [Local models](#local-models)
   - [Key-pair auth](#key-pair-auth)
   - [Workload identity federation](#workload-identity-federation)
 - [Postgres](#postgres)
@@ -185,6 +186,220 @@ curl -sS -b jar -X PUT https://<router>/admin/v1/provider-keys/<key id>/model-al
   -H 'content-type: application/json' \
   -d '{"model_aliases":{"claude-fable-5":"internal.claude-fable-5"}}'
 ```
+
+### Local models
+
+Self-hosted OpenAI-compatible servers (llama.cpp, vLLM, …) are added by
+configuration, not code. Point `ROUTER_LOCAL_MODELS_FILE` at a YAML file; start
+from [`local-models.example.yaml`](local-models.example.yaml).
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `id` | yes | Catalog model ID and `x-weave-force-model` name. Lowercase `[a-z0-9._-]`, must not collide with a catalog ID or force-model alias. |
+| `base_url` | yes | Absolute `http(s)` base; `/chat/completions` is appended. |
+| `api_key_env` | yes | Name of the env var holding the bearer key; boot fails when it is unset. |
+| `upstream_model` | yes | Model name sent in the request body. |
+| `context_window` | yes | Total token budget. |
+| `tier` | yes | `low`, `mid` or `high`. |
+| `tool_use`, `agentic` | no | `default` or `low`; `low` keeps the model off tool-bearing / agentic turns. |
+| `image_input` | no | `true` when the model accepts images; defaults to text-only. |
+| `reasoning_format` | no | `reasoning_content` (default) or `think_tags` for inline `<think>` output. |
+| `response_header_timeout` | no | Go duration (`15s`, `500ms`) the router waits for the server's response headers before treating it as down. Default `30s`, the same guard cloud providers get. |
+
+Each entry registers its own provider, `local_<id>`, priced at $0 and keyed by
+the deployment, so several local servers coexist. A local provider is never
+gateway-exclusive: Claude and Codex subscriptions and other providers stay
+enrolled. Any invalid entry (missing field, unset key variable, duplicate or
+shadowed `id`, unknown field) fails boot with a named error.
+
+A local model's `base_url` may name a private-network or loopback host even
+with `ROUTER_RESTRICT_UPSTREAM_EGRESS=true`: each local client may dial exactly
+its own configured origin (scheme, host and port) on any address. Every other
+provider keeps the public-destinations-only policy, a local client still cannot
+reach any other private origin, and redirects are refused, so a local server
+cannot steer a request elsewhere.
+
+Local models appear under one "local" group on the dashboard models page;
+unchecking one adds its `id` to the installation's excluded models. Turns they
+serve record $0 actual cost and the decision log carries
+`decision_provider=local_<id>`. When a turn shows a routing marker, a local
+model is labelled `→ <id> (local)`; turns that show none keep none when served
+locally. Turn-type routed title, probe, recap and sub-agent turns are hard pins
+and never show a marker, and a turn served by the same model as the previous
+turn shows none either, so `decision_provider` is the only record of those.
+
+#### Turn-type routing
+
+An optional top-level `turn_routing` block serves selected turn types on one
+of the configured local models:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `model` | yes | `id` of an entry under `models`. |
+| `turn_types` | no | Any of `sub_agent_dispatch` (every turn of a Claude Code sub-agent, Explore included), `title_gen`, `probe`, `recap`. Omitted: all four. |
+
+Main-loop and tool-result turns keep normal routing, and `classifier` or
+`compaction` in the list fails boot: those turns are never served locally. A
+locally served turn neither reads nor writes a session pin, so a title or probe
+turn cannot pin the conversation that follows it; a sub-agent stays on the
+local model because each of its turns is classified as a sub-agent turn.
+
+A listed turn falls back to exactly the routing it would have without this
+block when the installation excluded the local model (the dashboard toggle or
+an allowlist), the request cannot reach its provider, the model is disabled for
+automatic routing, the request exceeds its `context_window`, carries images it
+cannot read, or carries tools and the model is rated `tool_use: low` or
+`agentic: low`. An explicit `/force-model` always wins. The route takes
+precedence over `ROUTER_HARD_PIN_*` and `ROUTER_SUBAGENT_*` for the turns it
+serves.
+
+#### Mid-tier substitution
+
+An optional top-level `mid_tier_substitute` block serves turns the router
+itself sent to a mid-tier model (for example `claude-sonnet-5`) on one of the
+configured local models:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `model` | yes | `id` of an entry under `models`; it must be `tier: mid`. |
+| `enabled` | no | `false` keeps the block but substitutes nothing. Default `true`. |
+
+Substitution runs after every routing step (scorer, session pin, planner) and
+replaces only the dispatched model. The session pin, planner state and HMM
+history (including the last served model they record) keep the router's own
+pick, so a pinned session (including its tool-result turns) is substituted
+again on every turn and lands on the same local model, and turning
+substitution off returns the session to its pinned model on its next turn. A
+turn whose selection is high or low tier is never substituted.
+
+An explicit `/force-model` is never substituted, nor are hard-pinned or
+local-turn-routed utility turns, classifier and compaction turns, usage-bypass
+or caller-model passthrough turns, and turns under an honoured
+`x-weave-policy-pin`. The router's selection is kept when the local model fails
+the same checks as turn-type routing: excluded by the installation, provider
+not enabled, disabled for automatic routing, request beyond its
+`context_window`, images it cannot read, or tools on a `tool_use: low` or
+`agentic: low` model.
+
+Usage-bypassed turns are not substituted: with usage bypass enabled, a Claude
+subscription caller's turns go to the requested model on that subscription
+until its utilization reaches the bypass threshold, so substitution only
+starts once routing engages. A bypass attempt that fails with a retryable
+error is rerouted through the scorer, and a mid-tier pick on that reroute is
+substituted.
+
+A substituted turn logs `Mid-tier substitute served turn` with the original and
+substitute models, its completion line carries `substituted_from_model` and
+`substituted_from_provider` next to `decision_model`, and its routing marker
+reads `→ <substitute> (local) · substitute for <original model>`. Its policy outcome reports the
+original model as the selection and is excluded from training
+(`training_exclusion_reason: mid_tier_substitute`).
+
+#### Subscription exhaustion fallback
+
+An optional top-level `subscription_fallback` block serves a turn on one of
+the configured local models when the caller's Claude or Codex subscription
+refuses it for its limit:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `model` | yes | `id` of an entry under `models`; any tier. |
+| `enabled` | no | `false` keeps the block but falls back to nothing. Default `true`. |
+
+The fallback answers only a limit refusal on a turn dispatched on the
+caller's subscription credential (Claude OAuth, or Codex ChatGPT OAuth with its
+account id) or a managed subscription pool: an upstream 429, a Codex
+`usage_limit_reached` / `insufficient_quota` rejection, an exhausted
+subscription pool, or a subscription the usage observer already read spent
+when no paid key for that provider exists. That last turn goes to the local
+model without contacting the vendor, unless a managed subscription seat can
+still serve it. Authentication rejections, 400s and other upstream errors reach
+the client as before, including those from the paid retry that follows a
+subscription 429. It runs only while nothing has reached the client: once the
+stream commits, a failure is never retried.
+
+It is the last rescue for the turn. The existing recoveries keep their order
+and run first: subscription account rotation, the same model on a paid
+deployment or BYOK key for that provider (when one exists), baseline and
+same-cluster failover. Only when none of them served the turn does the local
+model take it. Subscriptions are never displaced: the session pin and HMM
+history record the original selection, so the next turn goes back to the
+subscription, and the turn's policy outcome is excluded from training
+(`training_exclusion_reason: subscription_local_fallback`).
+
+Classifier and compaction turns are never served locally: their verdict or
+summary governs the session that follows, so a subscription refusal on one of
+those turns reaches the client as the subscription's error.
+
+An explicit `/force-model`, a caller-model passthrough, or a request the local
+model cannot carry (the same checks as turn-type routing: excluded by the
+installation, provider not enabled, disabled for automatic routing, beyond its
+`context_window`, images it cannot read, or tools on a `tool_use: low` or
+`agentic: low` model) keeps the subscription's error. When the local model
+itself fails before output, the client receives the subscription's original
+error, or a 429 limit error for a turn that never reached the vendor.
+
+A fallback turn logs `Subscription local fallback serving turn` with the
+original and fallback models and the refusal's status; its completion line
+carries `subscription_local_fallback=true`, `decision_reason=subscription_local_fallback`
+and `substituted_from_model` / `substituted_from_provider` naming the original
+selection; the span carries `dispatch.subscription_local_fallback`. Its routing
+marker reads `→ <id> (local) · fallback after <original model> subscription limit`.
+On a streamed `/v1/responses` turn that may fall back, the routing badge is
+sent with the first output instead of ahead of dispatch, so the client sees one
+badge naming the model that answered.
+
+#### Local failure fallback
+
+When a turn that turn-type routing or mid-tier substitution put on a local
+model fails before anything reached the client (connection refused, a 5xx, a
+response-header timeout, or any other error before the first byte), the router
+serves the same turn on the target it would have had without the local rule:
+
+- a mid-tier substituted turn goes to the router's original pick (the model
+  named in `substituted_from_model`), with no second routing pass;
+- a turn-type routed turn is routed again with local rules disabled, only
+  after the local model has failed: a title or probe turn lands on its utility
+  hard pin, a sub-agent turn on `ROUTER_SUBAGENT_*` or the scorer, a Codex
+  spawned sub-agent on normal main-loop routing. If that routing lands on a
+  local model again, the local error surfaces.
+
+The local server first gets the dispatcher's usual same-target retries (up to
+two more attempts after a connection refusal, 5xx or header timeout, with no
+new attempt once 10 seconds are spent), so a server that is down costs under a
+second when the connection is refused. One that accepts the connection but
+never answers costs one `response_header_timeout` per attempt: 30 seconds at
+the default, three timeouts when it is under about 5 seconds. Lower `response_header_timeout` to fail over
+faster from a hung server; keep it above the server's longest prefill, since a
+streaming server may withhold headers until prefill finishes.
+
+Once any output reached the client, a local failure ends the stream with an
+error event and no second upstream request is made. A model chosen with
+`/force-model` is never replaced: its error reaches the client. The
+subscription exhaustion fallback is unaffected: when its local model fails,
+the client still gets the subscription's error.
+
+The two fallbacks compose in one order: local failure first, subscription
+exhaustion last. When the normal target that takes over a failed local turn is
+dispatched on a subscription that refuses it, `subscription_fallback.model`
+serves the turn, provided it is a different local model from the one that just
+failed. When it is the same model, the failed model is not dispatched again and
+the subscription's error reaches the client. A normal target whose
+subscription is already read spent with no paid key goes to the subscription
+fallback model without contacting the vendor, as on any other turn.
+
+A rescued turn logs `Local model failed before output; serving the turn on its
+normal route` with `local_model`, `local_source` (`local_turn_route` or
+`mid_tier_substitute`), `fallback_model` and the failure's status. Its
+completion line carries `local_failure_fallback=true` and the serving model as
+`decision_model`; the span carries `dispatch.local_failure_fallback`. The
+marker is the one the normal route would show, followed by
+`· <id> (local) failed`; a turn whose normal marker is hidden (title, probe,
+recap and other hard-pinned turns, or the model the session was served last
+turn) carries none. If the normal target then fails too, it gets the rescues it
+would have had without local rules: the paid-key retry of a subscription
+refusal, same-cluster peers and the baseline model. The session pin and
+HMM history record the model that served, as for a normally routed turn.
 
 ### Key-pair auth
 

@@ -32,14 +32,14 @@ The cluster scorer resolves each routable model's binding at boot via `ResolveBi
 ## Invariants
 
 - **No I/O.** Pure data + accessors. Adding HTTP, DB, or FS calls = layering violation.
-- **`Models` is the only writer.** `ByID` / `PrimaryPriceFor` / `TierFor` are read-only views over it.
-- **Every binding's `Provider` is one of the `providers.Provider*` constants.** Tested in `catalog_test.go`.
-- **Every binding has positive input + output prices.** Tested.
+- **`Models` is the only writer.** `ByID` / `PrimaryPriceFor` / `TierFor` are read-only views over it. The one exception is `RegisterLocalModels`, called once by the composition root at boot (before serving) to append rows parsed from `ROUTER_LOCAL_MODELS_FILE`; it rejects duplicate IDs and mutates nothing on error.
+- **Every static binding's `Provider` is one of the `providers.Provider*` constants.** Tested in `catalog_test.go`. Locally registered rows bind a `providers.LocalProviderName(id)` provider instead.
+- **Every static binding has positive input + output prices.** Tested. Local rows are $0.
 - **No duplicate `Model.ID`s.** Tested.
 - **`Providers` is never empty.** Tested.
 
 ## What to NOT do
 
 - **Don't read pricing from a parallel table.** The OTel emitter, planner, billing hook, and install-script generator all funnel through this package. A second price table guarantees drift.
-- **Don't add a runtime mutation API.** The catalog is compile-time data; per-deploy filtering happens through `ResolveBinding(id, available)`, not by mutating `Models`.
+- **Don't add a runtime mutation API.** The catalog is compile-time data plus boot-time `RegisterLocalModels`; per-deploy filtering happens through `ResolveBinding(id, available)`, not by mutating `Models` while serving.
 - **Don't fold non-routable model metadata (e.g. `ModelSpec` wire-format capabilities) here yet.** Those live in `internal/router/model.go`. If that file grows past its current scope, surface a separate `Capabilities` field on `Model` rather than entangling them.

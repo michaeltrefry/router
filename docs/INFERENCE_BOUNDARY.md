@@ -19,10 +19,10 @@ Router PRs [#884](https://github.com/weave-os/router/pull/884) and [#792](https:
 | Switch handover summary | `handover_summary` | auxiliary inference | `proxy.ProviderSummarizer` | Phase 6 |
 | Proactive compaction summary | `precompaction_summary` | auxiliary inference | not invoked (router compaction removed); its reviewed catalog set gates the Claude Code compaction-turn pin | Phase 7 |
 | Post-trim compaction handover | `compaction_handover_summary` | auxiliary inference | `proxy.Service.runCompactionHandover` | Phase 7 |
-| Title generation | `title_generation` | auxiliary inference | turn-type hard pin | Phase 7 |
+| Title generation | `title_generation` | auxiliary inference | turn-type hard pin or local turn route | Phase 7 |
 | Classifier turn | `classifier` | main inference (scored, no session pin) | ingress surface purpose; `aux-classifier` policy retained but no longer dispatched | Phase 7 |
-| Probe turn | `probe` | auxiliary inference | turn-type hard pin | Phase 7 |
-| Sub-agent dispatch | `sub_agent_dispatch` | auxiliary inference | turn-type/operator hard pin | Phase 7 |
+| Probe turn | `probe` | auxiliary inference | turn-type hard pin or local turn route | Phase 7 |
+| Sub-agent dispatch | `sub_agent_dispatch` | auxiliary inference | turn-type/operator hard pin or local turn route | Phase 7 |
 | Client compaction turn | `client_compaction` | client authoritative | client body plus current compaction hard-pin path | Phase 7 |
 | Agent shadow evaluation | `agent_shadow_evaluation` | auxiliary inference | request-scoped explicit catalog target | Phase 8 |
 | Anthropic `count_tokens` | `count_tokens` | metadata passthrough | named-provider passthrough with local estimate rescue | Phase 5 metadata method |
@@ -31,6 +31,14 @@ Router PRs [#884](https://github.com/weave-os/router/pull/884) and [#792](https:
 | Initial-task domain classification | `task_domain_classification` | control plane | `internal/policyclient.TaskDomainClassifier` with bounded `proxy.TaskDomainResolver` orchestration | remains non-inference |
 | Cluster/cache embeddings | `cluster_embedding`, `semantic_cache_embedding` | local support | local embedder/cache packages | remains local-only |
 | Native/Cortex web search | `native_web_search` | web-search tool | explicit `websearch.Executor` | remains separate from generic inference |
+
+The local turn route (`proxy.Service.WithLocalTurnRoute`, configured by `turn_routing` in the local-models file) is a deployment target, not a new purpose: title, probe and sub-agent turns keep their utility purpose, and a recap keeps its ingress surface purpose; each is authorized with the `deployment` override source both policies already declare.
+
+The mid-tier substitute (`proxy.Service.WithMidTierSubstitute`, configured by `mid_tier_substitute` in the local-models file) is likewise a deployment target, not a new purpose: a main-loop or tool-result turn keeps its ingress surface purpose, and the substituted decision is authorized with the `deployment` override source (`turnLoopResult.Origin`) instead of the session or router source the replaced selection carried. It retargets a copy of the routed compatibility decision in place (as the baseline failover does) rather than constructing a new one, so it adds no `target_construction` exception; the plan resolver remains the only authorization for the local target. Session-pin and HMM-history usage, including `last_served_model`, are recorded under the replaced selection, and its policy outcome names that selection and is withheld from training.
+
+The subscription exhaustion fallback (`proxy.Service.WithSubscriptionLocalFallback`, configured by `subscription_fallback` in the local-models file) is a rescue in the existing dispatch chain, not a new purpose: after a subscription's pre-commit limit refusal outlives every other rescue, `ProxyMessages` and `ProxyOpenAIChatCompletion` retarget a copy of the refused decision onto the local model and run it through `dispatchWithFallback` under the turn's surface or utility purpose with the `deployment` override source. Like the mid-tier substitute it adds no `target_construction` exception; the plan resolver remains the only authorization for the local target, and usage and policy outcome are recorded under the refused selection.
+
+The local failure fallback (`proxy.Service` with `local_failure_fallback.go`) adds no purpose and no target construction either: when a local-turn-routed or mid-tier substituted turn fails before commit, `ProxyMessages` and `ProxyOpenAIChatCompletion` dispatch the turn's normal routing result (the substituted decision, or the turn loop re-run with local rules disabled) through `dispatchWithFallback` under that result's own purpose and origin. It is a second walk rather than a plan alternative because a plan's alternatives are bindings of one catalog model, while the normal target is another model with its own prepared request, purpose and origin.
 
 The generated static registry in [`POLICY_INFERENCE.md`](POLICY_INFERENCE.md) is the authoritative review projection for policy IDs, rationale, constraints, budgets, fallback, owner, and migration status.
 

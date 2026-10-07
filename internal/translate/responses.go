@@ -702,6 +702,10 @@ type ResponsesWriter struct {
 	finalized                   bool
 	nativeEmptyRejected         bool
 	textItem                    *responsesTextItem
+	retiredTextItems            []*responsesTextItem
+	reasoningItems              []*chatReasoningItem
+	thinkTags                   bool
+	splitter                    thinkTagSplitter
 	toolItems                   map[int]*responsesToolItem
 	finishReason                string
 	usage                       *responsesUsage
@@ -800,6 +804,11 @@ func (t *ResponsesWriter) SetBadgeText(text string) {
 	t.badgeText = text + "\n\n"
 }
 
+// ClearBadgeText drops the routing badge so the turn renders none.
+func (t *ResponsesWriter) ClearBadgeText() {
+	t.badgeText = ""
+}
+
 // SetRoutedModel updates the model reported by terminal response envelopes.
 func (t *ResponsesWriter) SetRoutedModel(model string) {
 	t.model = model
@@ -877,6 +886,7 @@ func (t *ResponsesWriter) ResetAttempt() {
 	t.toolItems = map[int]*responsesToolItem{}
 	t.usage = nil
 	t.toolLedger = NewToolCallLedger()
+	t.splitter = thinkTagSplitter{}
 	// Keep headersEmitted, textItem, and prelude lifecycle so a retried
 	// translated stream does not emit a second response.created.
 }
@@ -1162,14 +1172,14 @@ func (t *ResponsesWriter) Finalize() error {
 		return err
 	}
 
-	translated, err := chatCompletionToResponse(body, t.responseID, t.model, t.createdAt, t.toolMappings, t.computeBadgeText(), t.footerText)
+	translated, err := chatCompletionToResponse(body, t.responseID, t.model, t.createdAt, t.toolMappings, t.computeBadgeText(), t.footerText, t.thinkTags)
 	if err != nil {
 		t.inner.Header().Set("Content-Type", "application/json")
 		t.inner.WriteHeader(http.StatusBadGateway)
 		_, _ = t.inner.Write([]byte(`{"error":{"message":"translation failed","type":"api_error"}}`))
 		return err
 	}
-	if !chatCompletionHasUsableOutput(body) {
+	if !chatCompletionHasUsableOutput(body) || (t.thinkTags && !thinkTagCompletionHasUsableOutput(body)) {
 		return emptyCompletionOpenAIError()
 	}
 	t.inner.Header().Set("Content-Type", "application/json")
@@ -2020,7 +2030,12 @@ func (t *ResponsesWriter) translateChunk(raw []byte) error {
 		return nil
 	}
 	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
-		if !t.lifecycle.OutputStarted() {
+		if err := t.flushThinkTags(); err != nil {
+			return err
+		}
+		// Reasoning alone is no answer; Finalize reports the turn as empty
+		// or incomplete rather than completed.
+		if !t.lifecycle.OutputStarted() || (!t.hasUpstreamOutput && len(t.reasoningItems) > 0) {
 			return nil
 		}
 		if err := t.closeOpenItems(); err != nil {
@@ -2057,9 +2072,11 @@ func (t *ResponsesWriter) translateChunk(raw []byte) error {
 	}
 	delta := choice.Get("delta")
 
+	if err := t.appendReasoning(chatDeltaReasoning(delta)); err != nil {
+		return err
+	}
 	if content := delta.Get("content"); content.Type == gjson.String && content.Str != "" {
-		t.hasUpstreamOutput = true
-		if err := t.appendText(content.Str); err != nil {
+		if err := t.appendContent(content.Str); err != nil {
 			return err
 		}
 	} else if content := delta.Get("content"); content.IsArray() {
@@ -2067,8 +2084,7 @@ func (t *ResponsesWriter) translateChunk(raw []byte) error {
 			if part.Get("text").Type != gjson.String || part.Get("text").Str == "" {
 				continue
 			}
-			t.hasUpstreamOutput = true
-			if err := t.appendText(part.Get("text").Str); err != nil {
+			if err := t.appendContent(part.Get("text").Str); err != nil {
 				return err
 			}
 		}
@@ -2088,6 +2104,9 @@ func (t *ResponsesWriter) translateChunk(raw []byte) error {
 
 	if fr := choice.Get("finish_reason"); fr.Type == gjson.String && fr.Str != "" {
 		t.finishReason = fr.Str
+		if err := t.flushThinkTags(); err != nil {
+			return err
+		}
 		// Reasoning-only turns emit no delta this writer translates, so the
 		// badge would never be reached through appendText/appendToolCall.
 		if !t.hasUpstreamOutput {
@@ -2118,6 +2137,9 @@ func (t *ResponsesWriter) translateChunk(raw []byte) error {
 }
 
 func (t *ResponsesWriter) appendText(s string) error {
+	if err := t.closeReasoningItem(); err != nil {
+		return err
+	}
 	if err := t.ensureBadgeItem(); err != nil {
 		return err
 	}
@@ -2133,10 +2155,15 @@ func (t *ResponsesWriter) appendText(s string) error {
 }
 
 // openTextItem lazily opens the assistant text item the badge and every text
-// delta share. Idempotent.
+// delta share. Idempotent while that item is open; a closed one is retired
+// and a new item opened after it.
 func (t *ResponsesWriter) openTextItem() error {
-	if t.textItem != nil {
+	if t.textItem != nil && !t.textItem.closed {
 		return nil
+	}
+	if t.textItem != nil {
+		t.retiredTextItems = append(t.retiredTextItems, t.textItem)
+		t.textItem = nil
 	}
 	t.textItem = &responsesTextItem{
 		itemID: newResponsesID("msg"),
@@ -2177,6 +2204,9 @@ func (t *ResponsesWriter) ensureBadgeItem() error {
 }
 
 func (t *ResponsesWriter) appendToolCall(idx int, tc gjson.Result) error {
+	if err := t.closeReasoningItem(); err != nil {
+		return err
+	}
 	if err := t.ensureBadgeItem(); err != nil {
 		return err
 	}
@@ -2251,7 +2281,7 @@ func (t *ResponsesWriter) appendToolCall(idx int, tc gjson.Result) error {
 }
 
 func (t *ResponsesWriter) nextOutputIndex() int {
-	count := 0
+	count := len(t.retiredTextItems) + len(t.reasoningItems)
 	if t.textItem != nil {
 		count++
 	}
@@ -2273,7 +2303,32 @@ func (t *ResponsesWriter) computeBadgeText() string {
 	return badge
 }
 
+// closeTextItem ends the open assistant text item so later output opens a new
+// one after it.
+func (t *ResponsesWriter) closeTextItem() error {
+	item := t.textItem
+	if item == nil {
+		return nil
+	}
+	t.textItem = nil
+	t.retiredTextItems = append(t.retiredTextItems, item)
+	if item.closed {
+		return nil
+	}
+	item.closed = true
+	if err := t.emitTextDone(item); err != nil {
+		return err
+	}
+	if err := t.emitContentPartDone(item); err != nil {
+		return err
+	}
+	return t.emitMessageItemDone(item)
+}
+
 func (t *ResponsesWriter) closeOpenItems() error {
+	if err := t.closeReasoningItem(); err != nil {
+		return err
+	}
 	if t.textItem != nil && !t.textItem.closed {
 		if t.footerText != "" && !t.sawToolCall && t.finishReason == "stop" && !feedbackFooterPattern.MatchString(t.textItem.text.String()) {
 			t.textItem.text.WriteString(t.footerText)
@@ -2588,30 +2643,32 @@ func (t *ResponsesWriter) emitFailed() error {
 }
 
 func (t *ResponsesWriter) assembleOutput() []any {
-	out := make([]any, 0, len(t.toolItems))
+	type indexedOutput struct {
+		index int
+		item  any
+	}
+	entries := make([]indexedOutput, 0, len(t.retiredTextItems)+len(t.reasoningItems)+len(t.toolItems)+1)
+	textItems := t.retiredTextItems
 	if t.textItem != nil {
-		out = append(out, map[string]any{
-			"id":     t.textItem.itemID,
+		textItems = append(textItems[:len(textItems):len(textItems)], t.textItem)
+	}
+	for _, item := range textItems {
+		entries = append(entries, indexedOutput{item.outputIndex, map[string]any{
+			"id":     item.itemID,
 			"type":   "message",
 			"status": "completed",
 			"role":   "assistant",
 			"content": []any{map[string]any{
 				"type":        "output_text",
-				"text":        t.textItem.text.String(),
+				"text":        item.text.String(),
 				"annotations": []any{},
 			}},
-		})
+		}})
 	}
-	// Tool items in upstream index order. Upstream indices may be
-	// non-contiguous (e.g. {0, 2}), so iterate the sorted keys rather than
-	// counting up to len.
-	indices := make([]int, 0, len(t.toolItems))
-	for idx := range t.toolItems {
-		indices = append(indices, idx)
+	for _, item := range t.reasoningItems {
+		entries = append(entries, indexedOutput{item.outputIndex, item.output()})
 	}
-	sort.Ints(indices)
-	for _, idx := range indices {
-		item := t.toolItems[idx]
+	for _, item := range t.toolItems {
 		if len(t.toolMappings) > 0 && !item.opened {
 			continue
 		}
@@ -2631,7 +2688,7 @@ func (t *ResponsesWriter) assembleOutput() []any {
 			if item.mapping.Namespace != "" {
 				call["namespace"] = item.mapping.Namespace
 			}
-			out = append(out, call)
+			entries = append(entries, indexedOutput{item.outputIndex, call})
 			continue
 		}
 		call := map[string]any{
@@ -2645,7 +2702,14 @@ func (t *ResponsesWriter) assembleOutput() []any {
 		if item.mapping.Namespace != "" {
 			call["namespace"] = item.mapping.Namespace
 		}
-		out = append(out, call)
+		entries = append(entries, indexedOutput{item.outputIndex, call})
+	}
+	// Every item carries the output_index it streamed at, so the assembled
+	// output matches the order the client already saw.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].index < entries[j].index })
+	out := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, entry.item)
 	}
 	return out
 }
@@ -2654,8 +2718,9 @@ func (t *ResponsesWriter) assembleOutput() []any {
 // a Responses-shaped JSON body. Only used when the client requested
 // stream:false; Codex always streams, but other clients may not. A non-empty
 // badge leads the assistant text, synthesizing the message item when the turn
-// produced only tool calls.
-func chatCompletionToResponse(body []byte, responseID, model string, createdAt int64, mappings map[string]ResponsesToolMapping, badge, footer string) ([]byte, error) {
+// produced only tool calls. Upstream reasoning leads the output as a
+// reasoning item.
+func chatCompletionToResponse(body []byte, responseID, model string, createdAt int64, mappings map[string]ResponsesToolMapping, badge, footer string, thinkTags bool) ([]byte, error) {
 	if !gjson.ValidBytes(body) {
 		return nil, fmt.Errorf("invalid JSON")
 	}
@@ -2673,9 +2738,18 @@ func chatCompletionToResponse(body []byte, responseID, model string, createdAt i
 	}
 
 	choice := root.Get("choices.0.message")
-	output := make([]any, 0, 2)
-	text := badge
-	text += chatContentText(choice.Get("content"))
+	output := make([]any, 0, 3)
+	reasoning := chatDeltaReasoning(choice)
+	content := chatContentText(choice.Get("content"))
+	if thinkTags {
+		var thinking string
+		content, thinking = splitThinkTagText(content)
+		reasoning += thinking
+	}
+	if reasoning != "" {
+		output = append(output, reasoningOutputItem(newResponsesID("rs"), reasoning))
+	}
+	text := badge + content
 	if footer != "" && choice.Get("tool_calls.#").Int() == 0 && !feedbackFooterPattern.MatchString(text) {
 		text += footer
 	}

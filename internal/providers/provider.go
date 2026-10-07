@@ -786,6 +786,10 @@ type RequestMutationStats struct {
 	// ServerToolsStripped counts native server tools (web_search_*, web_fetch_*)
 	// removed before emitting to a non-Anthropic upstream. See websearch.StripServerTools.
 	ServerToolsStripped int
+	// ToolReferencesUnresolved counts Anthropic tool_addition references to a
+	// tool with neither a request-level entry nor an inline definition; they
+	// are dropped when folding tool changes for a non-Anthropic upstream.
+	ToolReferencesUnresolved int
 	// GeminiReminderInjected is true when the Gemini 3.x tool-use reminder was
 	// appended to systemInstruction. See translate/system_reminder.go.
 	GeminiReminderInjected bool

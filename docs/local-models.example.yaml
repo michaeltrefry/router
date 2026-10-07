@@ -1,0 +1,54 @@
+# Self-hosted OpenAI-compatible models. Point ROUTER_LOCAL_MODELS_FILE at a copy
+# of this file; each entry registers its own provider (local_<id>) and catalog
+# row, and becomes forceable with `x-weave-force-model: <id>`.
+models:
+  - id: qwen3.8-flash-next
+    # OpenAI-compatible base; /chat/completions is appended.
+    base_url: http://localhost:8081/v1
+    # Name of the env var holding the server's bearer key (not the key itself).
+    api_key_env: LOCAL_QWEN_API_KEY
+    # Model name the server expects in the request body.
+    upstream_model: qwen3.8-flash-next-unsloth-ud-q4_k_xl
+    context_window: 262144
+    # low | mid | high
+    tier: mid
+    # default | low — low keeps the model off tool-bearing / agentic turns.
+    tool_use: default
+    agentic: default
+    image_input: false
+    # reasoning_content (OpenAI-compatible field) | think_tags (inline <think>)
+    reasoning_format: reasoning_content
+    # How long to wait for response headers before treating the server as
+    # down and serving the turn on its normal route. Default 30s.
+    response_header_timeout: 30s
+
+# Optional: serve these turn types on one of the models above. Omit the block to
+# keep every turn on normal routing. A turn falls back to normal routing when the
+# installation excluded the model, it cannot carry the request (context window,
+# images, tool_use/agentic: low on a tool-bearing turn), or a user forced a model.
+turn_routing:
+  model: qwen3.8-flash-next
+  # Default when omitted: sub_agent_dispatch, title_gen, probe, recap.
+  # Only these four are accepted; main-loop, tool-result, classifier and
+  # compaction turns are never served by this route.
+  turn_types: [sub_agent_dispatch, title_gen, probe, recap]
+
+# Optional: when the router's own selection for a turn is a mid-tier model
+# (e.g. claude-sonnet-5), serve it on this local model instead. The model must
+# be tier: mid. Omit the block, or set enabled: false, to turn it off. A forced
+# model is never substituted, and a turn the local model cannot carry keeps the
+# router's selection.
+mid_tier_substitute:
+  model: qwen3.8-flash-next
+  enabled: true
+
+# Optional: when the caller's Claude or Codex subscription refuses a turn for
+# its rate limit or plan exhaustion (a 429, a Codex usage_limit_reached /
+# insufficient_quota rejection, an exhausted subscription pool, or a plan the
+# router already read spent) before any output reached the client, serve that
+# turn on this local model instead of returning the error. Any tier is
+# accepted. A paid API key for the same provider, when one is configured, still
+# retries the turn first. Omit the block, or set enabled: false, to turn it off.
+subscription_fallback:
+  model: qwen3.8-flash-next
+  enabled: true

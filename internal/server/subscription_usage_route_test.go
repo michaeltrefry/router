@@ -35,7 +35,7 @@ func (usageRouteRouter) Route(context.Context, router.Request) (router.Decision,
 // replaying unified rate-limit headers through the adapter observer hook.
 type usageRouteUpstream struct{ subscriptionDispatches int }
 
-func (*usageRouteUpstream) IncludedOnlySubscriptions() bool { return true }
+func (*usageRouteUpstream) SupportsSubscriptions() bool { return true }
 
 func (u *usageRouteUpstream) Proxy(ctx context.Context, _ router.Decision, _ providers.PreparedRequest, w http.ResponseWriter, _ *http.Request) error {
 	if creds := proxy.CredentialsFromContext(ctx); creds != nil && creds.OAuth {

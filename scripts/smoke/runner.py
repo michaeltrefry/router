@@ -30,6 +30,10 @@ from agent_checks import (  # noqa: E402 - standalone script needs scripts/ on s
 
 OWNER_LABEL = "ai.weave.smoke-owner"
 PLACEHOLDER_KEY = "smoke-fixture-key-unused-outside-replay"
+# The local model fixture is replayed in every mode; its server never exists.
+LOCAL_MODELS_FIXTURE = "./smoke/fixtures/local-models.yaml"
+LOCAL_MODELS_PATH = "/smoke/local-models.yaml"
+LOCAL_MODEL_KEY = "smoke-local-model-fixture-key"
 COMMAND_TIMEOUT_SECONDS = 120
 BUILD_TIMEOUT_SECONDS = 1200
 BOOT_TIMEOUT_SECONDS = 180
@@ -253,6 +257,8 @@ class SmokeRun:
             "OPENAI_API_KEY": (
                 PLACEHOLDER_KEY if replay else "${SMOKE_RECORD_OPENAI_KEY:-}"
             ),
+            "ROUTER_LOCAL_MODELS_FILE": LOCAL_MODELS_PATH,
+            "SMOKE_LOCAL_MODEL_KEY": LOCAL_MODEL_KEY,
         }
         lines = ["services:"]
         for service in ComposeService:
@@ -293,6 +299,8 @@ class SmokeRun:
                 lines += [
                     "    env_file: !reset []",
                     f"    environment: !override {json.dumps(server_environment)}",
+                    "    volumes:",
+                    f"      - {LOCAL_MODELS_FIXTURE}:{LOCAL_MODELS_PATH}:ro",
                 ]
             if service == ComposeService.MITMPROXY:
                 cassette_mode: Literal["ro", "rw"] = "ro" if replay else "rw"

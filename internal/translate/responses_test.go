@@ -1071,8 +1071,8 @@ func TestResponsesWriter_EmitsBadgeOnToolCallOnlyTurn(t *testing.T) {
 	assert.Equal(t, `{"cmd":"ls"}`, output[1].(map[string]any)["arguments"])
 }
 
-// Reasoning deltas are not translated into output items, so a reasoning-only
-// turn must not be reported as a badge-only successful answer.
+// A reasoning-only turn carries no answer, so it must not be reported as a
+// successful one.
 func TestResponsesWriter_RejectsReasoningOnlyTurn(t *testing.T) {
 	for _, field := range []string{"reasoning", "reasoning_content"} {
 		t.Run(field, func(t *testing.T) {

@@ -250,6 +250,14 @@ type turnLoopResult struct {
 	StickyRole string
 	// Fresh is the scorer's recommendation for this turn when the scorer ran.
 	Fresh router.Decision
+	// SubstitutedFrom is the router's own pick when a local model replaced it
+	// in Decision; zero otherwise.
+	SubstitutedFrom router.Decision
+	// SubstitutionReason names what replaced SubstitutedFrom: the mid-tier
+	// substitute or the subscription local fallback.
+	SubstitutionReason string
+	// LocalTurnRouted marks a decision the local turn route made.
+	LocalTurnRouted bool
 	// PlannerDecision holds the planner's verdict and EV math when the planner ran.
 	PlannerDecision planner.Decision
 	// PinModel is stamped independently of PlannerDecision so log lines can
@@ -711,6 +719,7 @@ func (s *Service) runTurnLoop(
 		if routeErr == nil {
 			routeErr = policyPinServed(ctx, res)
 			if routeErr == nil {
+				s.substituteMidTier(ctx, &res, req)
 				logAuthoritativeUpgrade(ctx, res)
 			}
 		}
@@ -738,7 +747,9 @@ func (s *Service) runTurnLoop(
 	// branch; routeFor receives a copy and cannot populate the caller's request.
 	req.AutomaticExcludedModels = s.globalAutomaticExcludedModels(ctx)
 	req.ClientApp = ClientIdentityFrom(ctx).ClientApp
-	if transforms, ok := ctx.Value(responsesTransformsContextKey{}).([]translate.ResponseTransform); ok {
+	// A reroute after a failed local model re-runs this loop for a request
+	// whose transforms were already recorded.
+	if transforms, ok := ctx.Value(responsesTransformsContextKey{}).([]translate.ResponseTransform); ok && !localRoutingDisabled(ctx) {
 		for _, transform := range transforms {
 			apm.RecordTranslationTransform(
 				ctx,
@@ -764,10 +775,14 @@ func (s *Service) runTurnLoop(
 	if installationID != uuid.Nil {
 		req.InstallationID = installationID.String()
 	}
+	turnType := turntype.Detect(env, feats, subAgentHint, openCodeCaller(ClientIdentityFrom(ctx)))
+	if subAgentHint == "" && s.codexLocalSubAgentTurn(ctx, reqHeaders, turnType, req) {
+		turnType, subAgentHint = turntype.SubAgentDispatch, codexSpawnedSubAgent
+	}
 	res = turnLoopResult{
 		InstallationID:      installationID,
 		Strategy:            router.StrategyFromContext(ctx),
-		TurnType:            turntype.Detect(env, feats, subAgentHint, openCodeCaller(ClientIdentityFrom(ctx))),
+		TurnType:            turnType,
 		PinTier:             "miss",
 		RequestedTier:       catalog.TierFor(feats.Model),
 		StripThinkingBlocks: betaArtifactHistoryFromContext(ctx),
@@ -923,13 +938,28 @@ func (s *Service) runTurnLoop(
 		)
 	}
 
+	// The local turn route outranks the automatic hard pin and the scorer but
+	// never a user force: an eligible force on a hard-pinned turn returned
+	// above, and on any other turn the routing below honors it. It is served
+	// as a hard pin, so it never reads or writes a session pin; sub-agent
+	// continuations are classified SubAgentDispatch too, so they stay local
+	// without one.
+	localProvider, localModel, localTurn := "", "", false
+	if (!forceModelFound || hardPinnedTurn) && !localRoutingDisabled(ctx) {
+		localProvider, localModel, localTurn = s.localTurnTarget(res.TurnType, req)
+	}
+	if localTurn && !hardPinnedTurn {
+		res.Purpose = utilityPurposes[res.TurnType]
+	}
+
 	// Automatic hard pins bypass pin lookup/write, planner, and scorer entirely.
 	// Probes and title-gen must never create a session pin: the Anthropic SDK fires
 	// probes before the first real turn, and Claude Code fires title-gen
 	// ~25ms before the real-conv call — an anchored pin would leak the
 	// cheap-model decision into the conversation that follows.
-	if hardPinnedTurn {
+	if hardPinnedTurn || localTurn {
 		provider, model := s.hardPinProvider, s.hardPinModel
+		reason := string(res.TurnType) + "_hard_pin"
 		// Sub-agent override is explicit operator config (mirrors ROUTER_HARD_PIN_MODEL
 		// semantics), so it skips hardPinResolver rather than being resolved dynamically.
 		useSubAgentOverride := res.TurnType == turntype.SubAgentDispatch && s.hasSubAgentOverride()
@@ -950,6 +980,10 @@ func (s *Service) runTurnLoop(
 			compactionProvider, compactionModel, origin, compactionPin = s.compactionHardPin(ctx, threadSessionKey, res.PinRole, req)
 		}
 		switch {
+		case localTurn:
+			provider, model, reason = localProvider, localModel, string(res.TurnType)+"_local"
+			res.LocalTurnRouted = true
+			log.Info("Local turn route served turn", "turn_type", string(res.TurnType), "local_model", model, "local_provider", provider)
 		case compactionPin:
 			provider, model = compactionProvider, compactionModel
 			log.Info("Hard-pin: compaction turn on compaction model", "hard_pin_model", model, "hard_pin_provider", provider)
@@ -1013,13 +1047,13 @@ func (s *Service) runTurnLoop(
 		hardDecision := router.Decision{
 			Provider: provider,
 			Model:    model,
-			Reason:   string(res.TurnType) + "_hard_pin",
+			Reason:   reason,
 		}
 		res.Decision = hardDecision
 		res.StickyHit = true
 		res.HardPinned = true
 		res.Origin = origin
-		res.PinTier = string(res.TurnType) + "_hard_pin"
+		res.PinTier = reason
 		return res, nil
 	}
 

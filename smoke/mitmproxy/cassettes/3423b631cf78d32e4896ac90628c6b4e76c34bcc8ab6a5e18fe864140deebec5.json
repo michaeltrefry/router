@@ -1,0 +1,9 @@
+{
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "status_code": 200,
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": "{\"id\":\"chatcmpl-smoke-local-basic\",\"object\":\"chat.completion\",\"created\":1767225600,\"model\":\"smoke-local-upstream\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\",\"reasoning_content\":\"The user asked for one word.\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2590,\"completion_tokens\":9,\"total_tokens\":2599}}"
+}

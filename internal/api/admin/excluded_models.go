@@ -50,7 +50,7 @@ func deployedModelsDTO(models DeployedModelsSource) []deployedModelDTO {
 func entriesToDTO(entries []cluster.DeployedEntry) []deployedModelDTO {
 	out := make([]deployedModelDTO, 0, len(entries))
 	for _, e := range entries {
-		out = append(out, deployedModelDTO{Model: e.Model, Provider: e.Provider, FastMode: catalog.SupportsFastMode(e.Model)})
+		out = append(out, deployedModelDTO{Model: e.Model, Provider: e.Provider, FastMode: catalog.SupportsFastMode(e.Model), Local: catalog.IsLocal(e.Model)})
 	}
 	catalog.SortListing(out)
 	return out

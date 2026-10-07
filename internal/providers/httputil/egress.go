@@ -235,3 +235,49 @@ func isPublicIP(ip net.IP) bool {
 	}
 	return isPublicAddr(address)
 }
+
+// NewTransportForOrigin is NewTransportWithResponseHeaderTimeout for a client
+// whose base URL is deployment configuration that may name a private-network
+// host, such as a self-hosted model server. Requests to baseURL's own origin
+// may dial any address even when upstream egress is restricted to public
+// destinations; every other origin keeps the restricted policy, and a base URL
+// with no valid origin gets no exception. Pair it with NewClient, which refuses
+// redirects, so a response cannot steer the client to another private origin.
+func NewTransportForOrigin(baseURL string, dialTimeout, tlsTimeout, responseHeaderTimeout time.Duration) http.RoundTripper {
+	return newTransportForOrigin(baseURL, dialTimeout, tlsTimeout, responseHeaderTimeout, publicDestinationsOnly)
+}
+
+func newTransportForOrigin(baseURL string, dialTimeout, tlsTimeout, responseHeaderTimeout time.Duration, publicOnly bool) http.RoundTripper {
+	if !publicOnly {
+		return newTransport(dialTimeout, tlsTimeout, responseHeaderTimeout, false)
+	}
+	restricted := newTransport(dialTimeout, tlsTimeout, responseHeaderTimeout, true)
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return restricted
+	}
+	origin, err := canonicalDiscoveryOrigin(parsed)
+	if err != nil {
+		return restricted
+	}
+	return &configuredOriginRoundTripper{
+		origin:     origin,
+		configured: newTransport(dialTimeout, tlsTimeout, responseHeaderTimeout, false),
+		restricted: restricted,
+	}
+}
+
+// configuredOriginRoundTripper sends requests for one configured origin over
+// an unrestricted transport and everything else over the restricted one.
+type configuredOriginRoundTripper struct {
+	origin     string
+	configured http.RoundTripper
+	restricted http.RoundTripper
+}
+
+func (t *configuredOriginRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	if origin, err := canonicalDiscoveryOrigin(request.URL); err == nil && origin == t.origin {
+		return t.configured.RoundTrip(request)
+	}
+	return t.restricted.RoundTrip(request)
+}
