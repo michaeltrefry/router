@@ -15,6 +15,7 @@ import (
 	"weave-os/router/internal/requestcontext"
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
+	"weave-os/router/internal/router/sessionpin"
 	"weave-os/router/internal/translate"
 
 	"github.com/stretchr/testify/assert"
@@ -81,6 +82,11 @@ func codexLocalService(t *testing.T, id string, upstream *localUpstream, extraYA
 
 func codexLocalServiceFromEntry(t *testing.T, id, entryYAML, extraYAML string) (*proxy.Service, *recordingOpenAI, *codexRouter) {
 	t.Helper()
+	return codexLocalServiceWithPins(t, id, entryYAML, extraYAML, nil)
+}
+
+func codexLocalServiceWithPins(t *testing.T, id, entryYAML, extraYAML string, pins sessionpin.Store) (*proxy.Service, *recordingOpenAI, *codexRouter) {
+	t.Helper()
 	path := writeLocalModelsFile(t, entryYAML+extraYAML)
 	openAIClient := &recordingOpenAI{}
 	providerMap := map[string]providers.Client{providers.ProviderOpenAI: openAIClient}
@@ -96,7 +102,7 @@ func codexLocalServiceFromEntry(t *testing.T, id, entryYAML, extraYAML string) (
 		delete(providers.APIKeyEnvVars, provider)
 	})
 	rtr := &codexRouter{}
-	svc := proxy.NewService(rtr, providerMap, nil, false, nil, nil, false, providers.ProviderOpenAI, "gpt-5.6-luna", nil).
+	svc := proxy.NewService(rtr, providerMap, nil, false, nil, pins, false, providers.ProviderOpenAI, "gpt-5.6-luna", nil).
 		WithDeploymentKeyedProviders(keyed).
 		WithLocalTurnRoute(route.turnRoute)
 	return svc, openAIClient, rtr

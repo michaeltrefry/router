@@ -33,6 +33,10 @@ type ClientIdentity struct {
 	// OpenCodeSubagent marks an OpenCode child-session request. Routing
 	// metadata only: never used for auth, billing, or provider eligibility.
 	OpenCodeSubagent bool
+	// CodexSpawnThreadID is the Thread-Id of a Codex spawned sub-agent
+	// (x-openai-subagent: collab_spawn), which shares its parent's Session-Id.
+	// It scopes only the force-model pin; empty on every other request.
+	CodexSpawnThreadID string
 }
 
 // OpenCodeSessionHeader carries OpenCode's own session id (ses_...), which

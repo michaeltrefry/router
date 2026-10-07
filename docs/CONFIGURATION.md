@@ -795,6 +795,16 @@ with nowhere to go (HTTP 503 from the scorer), so exclude deliberately.
 pin applies to parent and child agent threads that share the same client-session
 identity, regardless of their first prompt or active routing strategy. Clients
 that send no session identity can only be pinned at the current thread scope.
+Codex spawned sub-agents (`x-openai-subagent: collab_spawn`) on `/v1/responses`
+are the exception:
+they share their parent's `session-id` but send their own `thread-id`, and the
+force pin is keyed on that thread. A force in the main thread (whose `thread-id`
+equals its `session-id`) therefore holds only the main thread, and its spawned
+sub-agents keep normal routing, including the local turn route. A force issued
+inside a sub-agent pins only that sub-agent. Codex review, compaction and other
+threads keep the session-wide pin. Session pins, caching and `client_session_id`
+remain keyed on the session. An `x-weave-force-model` header still forces the
+request that carries it, sub-agent or not.
 Codex handles its own `/model` locally and never sends the command itself; on
 an opted-in install (`X-Weave-Codex-Native-Model-Pin: 1`) the router instead
 keys off the `<model_switch>` developer fragment Codex records when the user
