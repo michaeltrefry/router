@@ -102,10 +102,12 @@ func localModelServes(provider, model string, req router.Request) bool {
 }
 
 // codexSubAgentHeader carries the kind of Codex thread a request comes from;
-// codexSpawnedSubAgent marks a sub-agent the model spawned.
+// codexSpawnedSubAgent marks a sub-agent the model spawned. codexThreadHeader
+// names the thread; a main thread's equals its Session-Id.
 const (
 	codexSubAgentHeader  = "x-openai-subagent"
 	codexSpawnedSubAgent = "collab_spawn"
+	codexThreadHeader    = "Thread-Id"
 )
 
 // codexLocalSubAgentTurn reports whether a Codex spawned sub-agent turn on
