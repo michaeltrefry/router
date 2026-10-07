@@ -20,11 +20,19 @@ const (
 
 func forceKeyForHeaders(t *testing.T, headers map[string]string) [sessionpin.SessionKeyLen]byte {
 	t.Helper()
+	return forceKeyOnSurface(t, true, headers)
+}
+
+func forceKeyOnSurface(t *testing.T, responses bool, headers map[string]string) [sessionpin.SessionKeyLen]byte {
+	t.Helper()
 	h := http.Header{}
 	for k, v := range headers {
 		h.Set(k, v)
 	}
 	ctx := requestcontext.WithClientIdentity(context.Background(), ClientIdentityFromHeaders(h))
+	if responses {
+		ctx = context.WithValue(ctx, responsesSurfaceContextKey{}, true)
+	}
 	env, err := translate.ParseAnthropic([]byte(`{"model":"claude-opus-4-8","messages":[{"role":"user","content":"task"}]}`))
 	require.NoError(t, err)
 	threadKey := deriveSessionKeyForRequest(ctx, env, "api-key")
@@ -52,6 +60,15 @@ func TestForceModelSessionKey_CodexSpawnedSubAgentIsThreadScoped(t *testing.T) {
 		})
 		assert.Equal(t, main, other, "%s threads keep the session force", kind)
 	}
+}
+
+func TestForceModelSessionKey_CodexSpawnedSubAgentOffResponsesKeepsSessionKey(t *testing.T) {
+	const session = "019a0000-0000-7000-8000-000000000001"
+	main := forceKeyOnSurface(t, false, map[string]string{"User-Agent": codexTestUA, "Session-Id": session, "Thread-Id": session})
+	spawn := forceKeyOnSurface(t, false, map[string]string{
+		"User-Agent": codexTestUA, "Session-Id": session, "Thread-Id": "019a0000-0000-7000-8000-000000000002", "X-Openai-Subagent": "collab_spawn",
+	})
+	assert.Equal(t, main, spawn, "a collab_spawn request outside Responses ingress keeps the session force key")
 }
 
 func TestForceModelSessionKey_ClaudeCodeUnchangedBySubAgentHeaders(t *testing.T) {

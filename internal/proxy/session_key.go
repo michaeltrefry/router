@@ -151,15 +151,17 @@ const (
 
 // deriveForceModelSessionKeyForRequest omits the first-message discriminator
 // so an explicit force applies to every thread in one client session. A Codex
-// spawned sub-agent is the exception: it is keyed on its own thread, so the
-// main thread's force does not hold the sub-agent off its normal routing.
+// spawned sub-agent on Responses ingress is the exception: it is keyed on its
+// own thread, so the main thread's force does not hold the sub-agent off its
+// normal routing.
 func deriveForceModelSessionKeyForRequest(
 	ctx context.Context,
 	env *translate.RequestEnvelope,
 	apiKeyID string,
 	threadSessionKey [sessionpin.SessionKeyLen]byte,
 ) [sessionpin.SessionKeyLen]byte {
-	if thread := ClientIdentityFrom(ctx).CodexSpawnThreadID; thread != "" {
+	thread := ClientIdentityFrom(ctx).CodexSpawnThreadID
+	if responses, _ := ctx.Value(responsesSurfaceContextKey{}).(bool); responses && thread != "" {
 		return requestcontext.ConversationKey(sessionCredentialIdentity(ctx, apiKeyID), "codex_thread:"+thread, forceModelSessionKeyDomain, threadSessionKey)
 	}
 	return deriveConversationSessionKeyForRequest(ctx, env, apiKeyID, threadSessionKey, forceModelSessionKeyDomain)

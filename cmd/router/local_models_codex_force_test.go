@@ -52,8 +52,21 @@ func TestLocalModel_CodexMainThreadForceLeavesSpawnedSubAgentOnLocalRoute(t *tes
 		return len(upstream.bodies)
 	}
 
+	forcePins := func() int {
+		pins.mu.Lock()
+		defer pins.mu.Unlock()
+		n := 0
+		for _, p := range pins.pins {
+			if p.Role == "force_model" {
+				n++
+			}
+		}
+		return n
+	}
+
 	serve(codexForceCommandTurn, codexThreadHeaders(codexForceSession, nil))
 	require.Len(t, pins.pins, 1, "the command writes one force pin")
+	require.Equal(t, 1, forcePins())
 
 	serve(codexMainTurn, codexThreadHeaders(codexForceSession, nil))
 	serve(codexMainTurn, codexThreadHeaders(codexForceSubAgent, map[string]string{"x-openai-subagent": "collab_spawn"}))
@@ -64,6 +77,11 @@ func TestLocalModel_CodexMainThreadForceLeavesSpawnedSubAgentOnLocalRoute(t *tes
 		"x-openai-subagent": "collab_spawn", proxy.ForceModelHeader: codexForcedModel,
 	}))
 	assert.Equal(t, 1, localCalls(), "a per-request force header still forces the sub-agent")
-	assert.Equal(t, []string{codexForcedModel, codexForcedModel, codexForcedModel}, openAIClient.servedModels(),
-		"the main thread stays forced across its turns and the header-forced sub-agent is served on the forced model")
+	assert.Equal(t, 2, forcePins(), "the header force is pinned on the sub-agent's own thread key, not the main thread's")
+
+	serve(codexMainTurn, codexThreadHeaders(codexForceSubAgent, map[string]string{"x-openai-subagent": "collab_spawn"}))
+	assert.Equal(t, 1, localCalls(), "the sub-agent stays forced through its own thread pin without the header")
+	serve(codexMainTurn, codexThreadHeaders(codexForceSession, nil))
+	assert.Equal(t, []string{codexForcedModel, codexForcedModel, codexForcedModel, codexForcedModel, codexForcedModel}, openAIClient.servedModels(),
+		"the main thread stays forced across its turns and the sub-agent is served on the forced model")
 }
