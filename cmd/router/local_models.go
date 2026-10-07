@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
 	"regexp"
@@ -43,6 +44,9 @@ var (
 	errMidTierSubstituteModel    = errors.New("mid-tier substitute: model must name a configured local model")
 	errMidTierSubstituteTier     = errors.New("mid-tier substitute: model must be tier mid")
 	errSubscriptionFallbackModel = errors.New("subscription fallback: model must name a configured local model")
+	errModelMappingSource        = errors.New("model mapping: source must be a catalog model")
+	errModelMappingTarget        = errors.New("model mapping: target must be a catalog model")
+	errModelMappingChain         = errors.New("model mapping: target must not itself be mapped")
 )
 
 // Lowercase because force-model input is lowercased before catalog lookup; no
@@ -57,6 +61,8 @@ type localModelsFile struct {
 	// SubscriptionFallback shares the substitute's shape: a model and an
 	// enabled flag that defaults to true.
 	SubscriptionFallback *localMidTierSubstituteEntry `yaml:"subscription_fallback"`
+	// ModelMapping maps an automatically selected model to the model served.
+	ModelMapping map[string]string `yaml:"model_mapping"`
 }
 
 // localMidTierSubstituteEntry names the local model that replaces automatic
@@ -73,12 +79,14 @@ type localTurnRoutingEntry struct {
 
 // localModelsConfig is a validated local-models file. A zero turnRoute
 // leaves every turn type on normal routing; a zero midTier substitutes
-// nothing; a zero subscriptionFallback leaves subscription refusals as they are.
+// nothing; a zero subscriptionFallback leaves subscription refusals as they
+// are; an empty modelMapping serves every selection as chosen.
 type localModelsConfig struct {
 	models               []localModel
 	turnRoute            proxy.LocalTurnRoute
 	midTier              proxy.MidTierSubstitute
 	subscriptionFallback proxy.SubscriptionLocalFallback
+	modelMapping         proxy.ModelMapping
 }
 
 type localModelEntry struct {
@@ -144,7 +152,34 @@ func parseLocalModels(r io.Reader, getenv func(string) string) (localModelsConfi
 	if err != nil {
 		return localModelsConfig{}, err
 	}
-	return localModelsConfig{models: out, turnRoute: route, midTier: midTier, subscriptionFallback: fallback}, nil
+	mapping, err := validateModelMapping(file.ModelMapping)
+	if err != nil {
+		return localModelsConfig{}, err
+	}
+	return localModelsConfig{models: out, turnRoute: route, midTier: midTier, subscriptionFallback: fallback, modelMapping: mapping}, nil
+}
+
+// validateModelMapping checks that both sides of every mapping are built-in
+// catalog models and that no target is itself mapped, since a mapping is
+// applied once. Local models are not catalog rows until registration, so a
+// local target is rejected here.
+func validateModelMapping(entries map[string]string) (proxy.ModelMapping, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	for _, source := range slices.Sorted(maps.Keys(entries)) {
+		target := entries[source]
+		if _, known := catalog.ByID(source); !known {
+			return nil, fmt.Errorf("%w: %q", errModelMappingSource, source)
+		}
+		if _, known := catalog.ByID(target); !known || catalog.IsLocal(target) {
+			return nil, fmt.Errorf("%w: %q maps to %q", errModelMappingTarget, source, target)
+		}
+		if _, mapped := entries[target]; mapped {
+			return nil, fmt.Errorf("%w: %q maps to %q", errModelMappingChain, source, target)
+		}
+	}
+	return proxy.ModelMapping(entries), nil
 }
 
 // validateSubscriptionFallback resolves the subscription_fallback block. Any
@@ -373,6 +408,9 @@ func loadLocalModels(
 	}
 	if cfg.subscriptionFallback.Model != "" {
 		logger.Info("Subscription local fallback enabled", "model", cfg.subscriptionFallback.Model)
+	}
+	if len(cfg.modelMapping) > 0 {
+		logger.Info("Model mapping enabled", "mappings", cfg.modelMapping)
 	}
 	return cfg, nil
 }

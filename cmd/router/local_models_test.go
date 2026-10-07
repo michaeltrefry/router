@@ -73,6 +73,13 @@ func TestParseLocalModels_ExampleConfig(t *testing.T) {
 	}, cfg.turnRoute)
 	assert.Equal(t, proxy.MidTierSubstitute{Provider: "local_qwen3.8-flash-next", Model: "qwen3.8-flash-next"}, cfg.midTier)
 	assert.Equal(t, proxy.SubscriptionLocalFallback{Provider: "local_qwen3.8-flash-next", Model: "qwen3.8-flash-next"}, cfg.subscriptionFallback)
+	assert.Equal(t, proxy.ModelMapping{
+		"claude-opus-5":   "claude-opus-5-5",
+		"claude-fable-5":  "claude-fable-5-1",
+		"claude-sonnet-5": "claude-sonnet-5-5",
+		"gpt-5.5":         "gpt-6.1-sol",
+		"gpt-5.4-mini":    "gpt-6-luna",
+	}, cfg.modelMapping)
 }
 
 func TestParseLocalModels_TurnRouting(t *testing.T) {

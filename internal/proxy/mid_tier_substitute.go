@@ -42,7 +42,12 @@ func (s *Service) substituteMidTier(ctx context.Context, res *turnLoopResult, re
 	if s.midTierModel == "" || localRoutingDisabled(ctx) || !midTierSubstitutable(*res) {
 		return
 	}
+	// A mapped selection is judged by the router's own pick, which session
+	// state keeps as the turn's selection.
 	original := res.Decision
+	if res.SubstitutionReason == reasonModelMapping {
+		original = res.SubstitutedFrom
+	}
 	if catalog.TierFor(original.Model) != catalog.TierMid || original.Model == s.midTierModel {
 		return
 	}
@@ -55,7 +60,7 @@ func (s *Service) substituteMidTier(ctx context.Context, res *turnLoopResult, re
 	// Retarget a copy of the routed decision, keeping its routing metadata;
 	// the plan resolver authorizes the new target under the deployment
 	// override source. The original's effort is the replaced model's knob.
-	substitute := original
+	substitute := res.Decision
 	substitute.Provider, substitute.Model = s.midTierProvider, s.midTierModel
 	substitute.Effort = ""
 	substitute.Reason = reasonMidTierSubstitute
@@ -68,6 +73,7 @@ func (s *Service) substituteMidTier(ctx context.Context, res *turnLoopResult, re
 		"original_model", original.Model,
 		"original_provider", original.Provider,
 		"original_reason", original.Reason,
+		"mapped_model", res.MappedDecision.Model,
 		"substitute_model", s.midTierModel,
 		"substitute_provider", s.midTierProvider,
 	)

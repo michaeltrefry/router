@@ -9,6 +9,7 @@ import (
 	"weave-os/router/internal/observability"
 	"weave-os/router/internal/providers"
 	"weave-os/router/internal/router"
+	"weave-os/router/internal/router/policy"
 )
 
 // markerReasonLocalFailure follows the failed local model's label in the
@@ -66,6 +67,12 @@ func planLocalFailureFallback(res turnLoopResult, reroute func() (turnLoopResult
 		normal.SubstitutedFrom = router.Decision{}
 		normal.SubstitutionReason = ""
 		normal.Origin = ""
+		if res.MappedDecision.Model != "" {
+			normal.Decision = res.MappedDecision
+			normal.SubstitutedFrom = res.SubstitutedFrom
+			normal.SubstitutionReason = reasonModelMapping
+			normal.Origin = policy.OverrideSourceDeployment
+		}
 		return &localFailureFallback{local: res.Decision, source: reasonMidTierSubstitute, normal: &normal}
 	case res.LocalTurnRouted && reroute != nil:
 		return &localFailureFallback{local: res.Decision, source: localFailureSourceTurnRoute, reroute: reroute}

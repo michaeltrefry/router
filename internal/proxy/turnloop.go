@@ -253,9 +253,12 @@ type turnLoopResult struct {
 	// SubstitutedFrom is the router's own pick when a local model replaced it
 	// in Decision; zero otherwise.
 	SubstitutedFrom router.Decision
-	// SubstitutionReason names what replaced SubstitutedFrom: the mid-tier
-	// substitute or the subscription local fallback.
+	// SubstitutionReason names what replaced SubstitutedFrom: the model
+	// mapping, the mid-tier substitute or the subscription local fallback.
 	SubstitutionReason string
+	// MappedDecision is the model mapping's target for this turn, kept when
+	// a later rule replaces it in Decision; zero when no mapping applied.
+	MappedDecision router.Decision
 	// LocalTurnRouted marks a decision the local turn route made.
 	LocalTurnRouted bool
 	// PlannerDecision holds the planner's verdict and EV math when the planner ran.
@@ -719,7 +722,7 @@ func (s *Service) runTurnLoop(
 		if routeErr == nil {
 			routeErr = policyPinServed(ctx, res)
 			if routeErr == nil {
-				s.substituteMidTier(ctx, &res, req)
+				s.applyServingRules(ctx, &res, req)
 				logAuthoritativeUpgrade(ctx, res)
 			}
 		}
