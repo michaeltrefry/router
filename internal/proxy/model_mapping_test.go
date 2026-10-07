@@ -495,3 +495,48 @@ func logLine(t *testing.T, logs *bytes.Buffer, msg string) map[string]any {
 	t.Fatalf("no %q line logged", msg)
 	return nil
 }
+
+// sequenceRouter answers its nth call with decisions[n], repeating the last,
+// and records every request.
+type sequenceRouter struct {
+	decisions []router.Decision
+	requests  []router.Request
+}
+
+func (r *sequenceRouter) Route(_ context.Context, req router.Request) (router.Decision, error) {
+	r.requests = append(r.requests, req)
+	return r.decisions[min(len(r.requests), len(r.decisions))-1], nil
+}
+
+// A usage-bypass reroute that lands on a model admitted only for its Codex
+// subscription mapping, where the mapping cannot apply, is routed again
+// without the admitted models instead of dispatching the uncovered pick.
+func TestModelMapping_UsageBypassRerouteNeverDispatchesUnservedAdmission(t *testing.T) {
+	f := newMidTierFixture(t, "test-map-bypass-admitted", sonnet5Decision, true, nil)
+	f.anthropic.proxyErr = &providers.UpstreamErrorResponse{
+		Status: http.StatusTooManyRequests,
+		Body:   []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"weekly limit exceeded"}}`),
+	}
+	scorer := &sequenceRouter{decisions: []router.Decision{
+		{Provider: providers.ProviderOpenAI, Model: "gpt-5.4-mini", Reason: "cluster"},
+		sonnet5Decision,
+	}}
+	openai := &fakeProvider{}
+	f.svc = proxy.NewService(scorer,
+		map[string]providers.Client{providers.ProviderAnthropic: f.anthropic, providers.ProviderOpenAI: openai, f.provider: f.local},
+		nil, false, nil, f.store, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+		WithDeploymentKeyedProviders(map[string]struct{}{providers.ProviderAnthropic: {}, f.provider: {}}).
+		WithMidTierSubstitute(proxy.MidTierSubstitute{Provider: f.provider, Model: f.model}).
+		WithModelMapping(proxy.ModelMapping{"gpt-5.4-mini": "gpt-6-luna"})
+	ctx := context.WithValue(midTierBypassCtx(f), proxy.OpenAISubscriptionContextKey{}, "eyJhbGciOiJSUzI1NiJ9.codex.sig")
+	ctx = context.WithValue(ctx, proxy.OpenAIAccountIDContextKey{}, "acct-123")
+	ctx = context.WithValue(ctx, proxy.InstallationExcludedModelsContextKey{}, []string{"gpt-6-luna"})
+
+	f.serve(t, ctx, midTierSonnetBody, nil)
+
+	require.Len(t, scorer.requests, 2)
+	assert.NotContains(t, scorer.requests[0].ExcludedModels, "gpt-5.4-mini", "the mapping admits the source")
+	assert.Contains(t, scorer.requests[1].ExcludedModels, "gpt-5.4-mini")
+	assert.Empty(t, openai.proxyBodies, "the uncovered pick is never dispatched")
+	require.Len(t, f.local.proxyBodies, 1, "the second pick, claude-sonnet-5, is served by the substitute")
+}

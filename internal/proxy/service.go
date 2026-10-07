@@ -3722,7 +3722,8 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 	if feats.MaxTokens > outputReserve {
 		outputReserve = feats.MaxTokens
 	}
-	baseExcluded := s.excludeCodexOAuthOnlyModels(ctx, r.Header, enabledProviders, s.excludedModelsForRequest(ctx))
+	baseExcluded, mappingAdmitted := s.excludeCodexOAuthOnlyModels(ctx, r.Header, enabledProviders, s.excludedModelsForRequest(ctx))
+	ctx = withMappingAdmitted(ctx, mappingAdmitted)
 
 	// Snapshot inbound (client-sent) state BEFORE any env rewrite. The
 	// compaction tracker, spiral scan, and tool-output telemetry must compare
@@ -3905,7 +3906,20 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			}
 			routeRes.Decision = decision
 			routeRes.Fresh = decision
+			unmapped := routeRes
 			s.applyServingRules(ctx, &routeRes, req)
+			if admitted := unservedMappingAdmission(ctx, routeRes); admitted != nil {
+				req.ExcludedModels = mergeExcludedModels(req.ExcludedModels, admitted)
+				decision, rerouteErr = s.routeFor(rerouteCtx, req)
+				if rerouteErr != nil {
+					log.Error("Reroute after usage-bypass failure failed", "err", rerouteErr)
+					return rerouteErr
+				}
+				routeRes = unmapped
+				routeRes.Decision = decision
+				routeRes.Fresh = decision
+				s.applyServingRules(ctx, &routeRes, req)
+			}
 		}
 	}
 
@@ -6346,19 +6360,26 @@ func (s *Service) hasOpenAIInfrastructureCredential(ctx context.Context, headers
 // resolution. When ChatGPT OAuth is the only way OpenAI became eligible (or
 // billing forbids paid fallback), only the native Codex roster and explicitly
 // approved catalog fallback models may select the OpenAI binding. Other
-// infrastructure-backed models remain ineligible without a paid credential.
+// infrastructure-backed models remain ineligible without a paid credential,
+// except a model mapping source whose target the subscription can serve: it
+// stays selectable and is returned in admitted, which the turn loop uses to
+// re-route a turn that would dispatch it unmapped.
 func (s *Service) excludeCodexOAuthOnlyModels(
 	ctx context.Context,
 	headers http.Header,
 	enabledProviders map[string]struct{},
 	excluded map[string]struct{},
-) map[string]struct{} {
+) (out, admitted map[string]struct{}) {
 	_, codexAvailable := subscriptionServableProviders(ctx, headers)[providers.ProviderOpenAI]
 	if !codexAvailable || (!paidFallbackForbidden(ctx) && s.hasOpenAIInfrastructureCredential(ctx, headers)) {
-		return excluded
+		return excluded, nil
 	}
 	for _, model := range catalog.Models {
 		if codexSubscriptionCanAttemptModel(model.ID) {
+			continue
+		}
+		if target, mapped := s.modelMapping[model.ID]; mapped && codexSubscriptionCanAttemptModel(target) {
+			admitted = excludingModel(admitted, model.ID)
 			continue
 		}
 		// Match catalog binding resolution: the first enabled binding is the one
@@ -6376,7 +6397,7 @@ func (s *Service) excludeCodexOAuthOnlyModels(
 			break
 		}
 	}
-	return excluded
+	return excluded, admitted
 }
 
 // resolveAndInjectCredentials resolves credentials for the selected provider
@@ -7001,7 +7022,8 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 	if feats.MaxTokens > outputReserveOAI {
 		outputReserveOAI = feats.MaxTokens
 	}
-	baseExcludedOAI := s.excludeCodexOAuthOnlyModels(ctx, r.Header, enabledProviders, s.excludedModelsForRequest(ctx))
+	baseExcludedOAI, mappingAdmittedOAI := s.excludeCodexOAuthOnlyModels(ctx, r.Header, enabledProviders, s.excludedModelsForRequest(ctx))
+	ctx = withMappingAdmitted(ctx, mappingAdmittedOAI)
 
 	// Snapshot the inbound tool-output size before any env rewrite
 	// (runTurnLoop's switch handover); see toolResultBytesPtr.

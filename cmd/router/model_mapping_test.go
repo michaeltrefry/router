@@ -8,7 +8,21 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"weave-os/router/internal/proxy"
+	"weave-os/router/internal/router/cluster"
 )
+
+// A mapping source the active scorer can never select fails boot by name,
+// while the shipped mapping passes against the real v0.75 roster.
+func TestValidateModelMappingSelectable(t *testing.T) {
+	stack := newShippedStack(t)
+	candidates := stack.spy.inner.(*cluster.Multiversion).DefaultDeployedModels()
+
+	require.NoError(t, validateModelMappingSelectable(stack.cfg.modelMapping, shippedScorerVersion, candidates))
+
+	err := validateModelMappingSelectable(proxy.ModelMapping{"claude-opus-5": "claude-opus-5-5", "gpt-5.4-nano": "gpt-6-luna"}, shippedScorerVersion, candidates)
+	require.ErrorIs(t, err, errModelMappingUnselectable)
+	assert.Contains(t, err.Error(), `"gpt-5.4-nano"`)
+}
 
 func TestParseLocalModels_ModelMapping(t *testing.T) {
 	env := envFrom(map[string]string{"KEY_A": "a"})

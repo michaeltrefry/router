@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -741,6 +743,7 @@ func (s *Service) runTurnLoop(
 	reqHeaders http.Header,
 	req router.Request,
 ) (res turnLoopResult, routeErr error) {
+	entryCtx, entryReq := ctx, req
 	defer func() {
 		if routeErr == nil {
 			routeErr = policyPinServed(ctx, res)
@@ -748,6 +751,19 @@ func (s *Service) runTurnLoop(
 				s.applyServingRules(ctx, &res, req)
 				logAuthoritativeUpgrade(ctx, res)
 			}
+		}
+		if routeErr != nil {
+			return
+		}
+		// A mapping-admitted model the mapping did not retarget has no
+		// credential on this request: route again as if it were never admitted.
+		if admitted := unservedMappingAdmission(entryCtx, res); admitted != nil {
+			observability.FromContext(ctx).Info("Model mapping could not serve a subscription-admitted selection; routing without mapping-admitted models",
+				"selected_model", res.Decision.Model,
+				"excluded_models", strings.Join(slices.Sorted(maps.Keys(admitted)), ","),
+			)
+			entryReq.ExcludedModels = mergeExcludedModels(entryReq.ExcludedModels, admitted)
+			res, routeErr = s.runTurnLoop(withMappingAdmitted(entryCtx, nil), env, feats, apiKeyID, installationID, subAgentHint, reqHeaders, entryReq)
 		}
 	}()
 	log := observability.FromContext(ctx)

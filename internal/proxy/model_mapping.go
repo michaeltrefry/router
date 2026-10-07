@@ -120,3 +120,33 @@ func (s *Service) applyServingRules(ctx context.Context, res *turnLoopResult, re
 	s.mapModel(ctx, res, req)
 	s.substituteLocal(ctx, res, req)
 }
+
+type mappingAdmittedContextKey struct{}
+
+// withMappingAdmitted records the models excludeCodexOAuthOnlyModels kept
+// selectable only because their mapped target is subscription-servable.
+func withMappingAdmitted(ctx context.Context, admitted map[string]struct{}) context.Context {
+	if len(admitted) == 0 && ctx.Value(mappingAdmittedContextKey{}) == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, mappingAdmittedContextKey{}, admitted)
+}
+
+// unservedMappingAdmission returns the request's mapping-admitted models when
+// res would dispatch one of them unmapped, directly or as a local
+// substitute's normal route, else nil. Such a model has no credential that
+// may serve it on this request.
+func unservedMappingAdmission(ctx context.Context, res turnLoopResult) map[string]struct{} {
+	admitted, _ := ctx.Value(mappingAdmittedContextKey{}).(map[string]struct{})
+	if len(admitted) == 0 {
+		return nil
+	}
+	dispatched := res.Decision.Model
+	if localSubstitutionReason(res.SubstitutionReason) && res.MappedDecision.Model == "" {
+		dispatched = res.SubstitutedFrom.Model
+	}
+	if _, unserved := admitted[dispatched]; !unserved {
+		return nil
+	}
+	return admitted
+}
