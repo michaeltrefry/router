@@ -299,8 +299,9 @@ pin, planner state and HMM history keep the router's own pick, and the turn's
 policy outcome reports that pick and is excluded from training
 (`training_exclusion_reason: model_mapping`).
 
-Mapping runs first, then mid-tier substitution, which still judges the tier of
-the router's own pick: a `claude-sonnet-5` selection is mapped to
+Mapping runs first, then the substitution rules (matched on the mapped model),
+then mid-tier substitution, which still judges the tier of the router's own
+pick: a `claude-sonnet-5` selection is mapped to
 `claude-sonnet-5-5` and, with `mid_tier_substitute` on, served on the local
 model; if that local model fails before output, the turn falls back to
 `claude-sonnet-5-5`.
@@ -315,6 +316,57 @@ mapped model in `mapped_model`. The routing marker reads
 when the mapped turn was then substituted. Because the session records the
 router's pick, a later turn with the same pick is not a model switch: it shows
 no marker and keeps the transcript's signed thinking blocks.
+
+#### Substitution rules
+
+An optional top-level `substitution_rules` list serves the router's automatic
+selection on a configured local model when the model the turn lands on
+matches a pattern:
+
+```yaml
+substitution_rules:
+  - match: gpt-*-luna
+    model: qwen3.8-flash-next
+  - match: gpt-*-terra
+    model: qwen3.8-flash-next
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `match` | yes | A catalog model ID or a glob over model IDs (Go `path.Match`: `*`, `?`, `[...]`). It must name at least one built-in catalog model. |
+| `model` | yes | `id` of an entry under `models`; any tier. |
+
+The router fails to boot with `substitution rule N: substitution rule: model
+must name a configured local model`, `... match is not a valid glob pattern`
+or `... match names no catalog model` otherwise.
+
+Serving rules run in one order after every routing step: `model_mapping`
+first, then `substitution_rules` in the order listed, then
+`mid_tier_substitute`, which is the last rule. The first matching rule wins
+and later rules are not tried. A pattern rule matches the final model, after
+mapping; `mid_tier_substitute` matches the tier of the router's own pick. With
+the shipped mapping `gpt-5.4-mini: gpt-6-luna`, a `gpt-5.4-mini` selection
+becomes `gpt-6-luna` and the `gpt-*-luna` rule serves it locally.
+
+Rules have the same scope as mid-tier substitution (an explicit
+`/force-model`, hard-pinned or local-turn-routed utility turns, classifier and
+compaction turns, usage-bypass or caller-model passthrough turns, and turns
+under an honoured `x-weave-policy-pin` are never substituted) and the same
+local-model checks. When the matched rule's local model cannot carry the turn,
+the turn is served on the matched model (the mapped model when mapped, else the
+router's pick) and logs `Local substitute skipped; serving the matched model`
+with `reason`, `matched_model` and `substitute_model`. When the local model
+fails before output, the local failure fallback serves the turn on that same
+matched model.
+
+A substituted turn logs `Local substitute served turn` with
+`substitution_reason: substitution_rule`. As with mid-tier substitution, the
+session pin, planner state, HMM history and policy outcome keep the router's
+own pick (`training_exclusion_reason: substitution_rule`), so a later turn with
+the same pick is not a model switch. The routing marker reads
+`→ <id> (local) · substitute for <model>`, or
+`→ <id> (local) · substitute for <mapped model> (mapped from <original model>)`
+for a mapped turn.
 
 #### Mid-tier substitution
 
@@ -351,8 +403,13 @@ starts once routing engages. A bypass attempt that fails with a retryable
 error is rerouted through the scorer, and a mid-tier pick on that reroute is
 substituted.
 
-A substituted turn logs `Mid-tier substitute served turn` with the original and
-substitute models, its completion line carries `substituted_from_model` and
+Mid-tier substitution is the last serving rule: `substitution_rules` are tried
+first, and a pattern rule that matches the turn takes it even when the
+selection is mid tier.
+
+A substituted turn logs `Local substitute served turn` with
+`substitution_reason: mid_tier_substitute` and the original and substitute
+models, its completion line carries `substituted_from_model` and
 `substituted_from_provider` next to `decision_model`, and its routing marker
 reads `→ <substitute> (local) · substitute for <original model>`. Its policy outcome reports the
 original model as the selection and is excluded from training
@@ -414,14 +471,14 @@ badge naming the model that answered.
 
 #### Local failure fallback
 
-When a turn that turn-type routing or mid-tier substitution put on a local
-model fails before anything reached the client (connection refused, a 5xx, a
+When a turn that turn-type routing, a substitution rule or mid-tier
+substitution put on a local model fails before anything reached the client (connection refused, a 5xx, a
 response-header timeout, or any other error before the first byte), the router
 serves the same turn on the target it would have had without the local rule:
 
-- a mid-tier substituted turn goes to the router's original pick (the model
-  named in `substituted_from_model`), or to its mapped model when
-  `model_mapping` applied, with no second routing pass;
+- a turn a substitution rule or mid-tier substitution served goes to the
+  router's original pick (the model named in `substituted_from_model`), or to
+  its mapped model when `model_mapping` applied, with no second routing pass;
 - a turn-type routed turn is routed again with local rules disabled, only
   after the local model has failed: a title or probe turn lands on its utility
   hard pin, a sub-agent turn on `ROUTER_SUBAGENT_*` or the scorer, a Codex
@@ -453,8 +510,8 @@ subscription is already read spent with no paid key goes to the subscription
 fallback model without contacting the vendor, as on any other turn.
 
 A rescued turn logs `Local model failed before output; serving the turn on its
-normal route` with `local_model`, `local_source` (`local_turn_route` or
-`mid_tier_substitute`), `fallback_model` and the failure's status. Its
+normal route` with `local_model`, `local_source` (`local_turn_route`,
+`substitution_rule` or `mid_tier_substitute`), `fallback_model` and the failure's status. Its
 completion line carries `local_failure_fallback=true` and the serving model as
 `decision_model`; the span carries `dispatch.local_failure_fallback`. The
 marker is the one the normal route would show, followed by
