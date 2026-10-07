@@ -152,6 +152,9 @@ type Service struct {
 	// WithMidTierSubstitute.
 	midTierProvider string
 	midTierModel    string
+	// substitutionRules replace automatic selections matching a model
+	// pattern, ahead of the mid-tier substitute; see WithSubstitutionRules.
+	substitutionRules []SubstitutionRule
 	// modelMapping retargets automatic selections; see WithModelMapping.
 	modelMapping ModelMapping
 	// subscriptionFallback{Provider,Model} serve turns a subscription refused
@@ -899,7 +902,7 @@ func routingReasonShort(res turnLoopResult) string {
 	if res.SubstitutionReason == reasonModelMapping {
 		return markerReasonModelMapping + " " + res.SubstitutedFrom.Model
 	}
-	if res.SubstitutionReason == reasonMidTierSubstitute && res.MappedDecision.Model != "" {
+	if localSubstitutionReason(res.SubstitutionReason) && res.MappedDecision.Model != "" {
 		return markerReasonMidTierSubstitute + " " + res.MappedDecision.Model + " (" + markerReasonModelMapping + " " + res.SubstitutedFrom.Model + ")"
 	}
 	if res.SubstitutedFrom.Model != "" {

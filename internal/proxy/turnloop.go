@@ -254,7 +254,8 @@ type turnLoopResult struct {
 	// in Decision; zero otherwise.
 	SubstitutedFrom router.Decision
 	// SubstitutionReason names what replaced SubstitutedFrom: the model
-	// mapping, the mid-tier substitute or the subscription local fallback.
+	// mapping, a substitution rule, the mid-tier substitute or the
+	// subscription local fallback.
 	SubstitutionReason string
 	// MappedDecision is the model mapping's target for this turn, kept when
 	// a later rule replaces it in Decision; zero when no mapping applied.
@@ -407,12 +408,12 @@ func (r turnLoopResult) modelSwitched() bool {
 
 // recordedSelection is the decision session state records for this turn and
 // so the one PriorServedModel is compared against: the router's own pick when
-// the model mapping or mid-tier substitute serves another model in its place
+// the model mapping or a substitution rule serves another model in its place
 // every turn, else Decision. A subscription fallback or local-failure rescue
 // is not included, since its next turn returns to the original.
 func (r turnLoopResult) recordedSelection() router.Decision {
 	switch r.SubstitutionReason {
-	case reasonModelMapping, reasonMidTierSubstitute:
+	case reasonModelMapping, reasonMidTierSubstitute, reasonSubstitutionRule:
 		return r.SubstitutedFrom
 	}
 	return r.Decision

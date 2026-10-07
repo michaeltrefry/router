@@ -27,7 +27,7 @@ func (s *Service) WithModelMapping(mapping ModelMapping) *Service {
 }
 
 // mapModel retargets the router's automatic selection onto its mapped model.
-// It runs before the mid-tier substitute and shares its eligibility: forced,
+// It runs before the substitution rules and shares their eligibility: forced,
 // hard-pinned, utility, bypassed, classifier, compaction and policy-pinned
 // turns are dispatched unmapped, as is a turn whose target cannot serve req.
 // Session pins, HMM history and the policy outcome keep the router's own pick
@@ -118,5 +118,5 @@ func mappedProvider(target, provider string) string {
 // applyServingRules maps then substitutes the turn's automatic selection.
 func (s *Service) applyServingRules(ctx context.Context, res *turnLoopResult, req router.Request) {
 	s.mapModel(ctx, res, req)
-	s.substituteMidTier(ctx, res, req)
+	s.substituteLocal(ctx, res, req)
 }

@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -47,6 +48,9 @@ var (
 	errModelMappingSource        = errors.New("model mapping: source must be a catalog model")
 	errModelMappingTarget        = errors.New("model mapping: target must be a catalog model")
 	errModelMappingChain         = errors.New("model mapping: target must not itself be mapped")
+	errSubstitutionRuleModel     = errors.New("substitution rule: model must name a configured local model")
+	errSubstitutionRuleGlob      = errors.New("substitution rule: match is not a valid glob pattern")
+	errSubstitutionRuleNoMatch   = errors.New("substitution rule: match names no catalog model")
 )
 
 // Lowercase because force-model input is lowercased before catalog lookup; no
@@ -63,6 +67,16 @@ type localModelsFile struct {
 	SubscriptionFallback *localMidTierSubstituteEntry `yaml:"subscription_fallback"`
 	// ModelMapping maps an automatically selected model to the model served.
 	ModelMapping map[string]string `yaml:"model_mapping"`
+	// SubstitutionRules serve a (mapped) automatic selection matching a
+	// model pattern on a local model; the first match wins.
+	SubstitutionRules []localSubstitutionRuleEntry `yaml:"substitution_rules"`
+}
+
+// localSubstitutionRuleEntry serves selections whose model matches Match, a
+// model ID or glob pattern, on the configured local model Model.
+type localSubstitutionRuleEntry struct {
+	Match string `yaml:"match"`
+	Model string `yaml:"model"`
 }
 
 // localMidTierSubstituteEntry names the local model that replaces automatic
@@ -80,13 +94,15 @@ type localTurnRoutingEntry struct {
 // localModelsConfig is a validated local-models file. A zero turnRoute
 // leaves every turn type on normal routing; a zero midTier substitutes
 // nothing; a zero subscriptionFallback leaves subscription refusals as they
-// are; an empty modelMapping serves every selection as chosen.
+// are; an empty modelMapping serves every selection as chosen; empty
+// substitutionRules substitute nothing by model pattern.
 type localModelsConfig struct {
 	models               []localModel
 	turnRoute            proxy.LocalTurnRoute
 	midTier              proxy.MidTierSubstitute
 	subscriptionFallback proxy.SubscriptionLocalFallback
 	modelMapping         proxy.ModelMapping
+	substitutionRules    []proxy.SubstitutionRule
 }
 
 type localModelEntry struct {
@@ -156,7 +172,51 @@ func parseLocalModels(r io.Reader, getenv func(string) string) (localModelsConfi
 	if err != nil {
 		return localModelsConfig{}, err
 	}
-	return localModelsConfig{models: out, turnRoute: route, midTier: midTier, subscriptionFallback: fallback, modelMapping: mapping}, nil
+	rules, err := validateSubstitutionRules(file.SubstitutionRules, seen)
+	if err != nil {
+		return localModelsConfig{}, err
+	}
+	return localModelsConfig{
+		models: out, turnRoute: route, midTier: midTier, subscriptionFallback: fallback,
+		modelMapping: mapping, substitutionRules: rules,
+	}, nil
+}
+
+// validateSubstitutionRules resolves the substitution_rules list in order.
+// Each match must be a valid glob naming at least one built-in catalog model,
+// so a misspelt ID cannot silently substitute nothing, and each model must be
+// a configured local model of any tier.
+func validateSubstitutionRules(entries []localSubstitutionRuleEntry, models map[string]struct{}) ([]proxy.SubstitutionRule, error) {
+	rules := make([]proxy.SubstitutionRule, 0, len(entries))
+	for i, entry := range entries {
+		if _, configured := models[entry.Model]; !configured {
+			return nil, fmt.Errorf("substitution rule %d: %w: %q", i+1, errSubstitutionRuleModel, entry.Model)
+		}
+		if _, err := path.Match(entry.Match, ""); err != nil {
+			return nil, fmt.Errorf("substitution rule %d: %w: %q", i+1, errSubstitutionRuleGlob, entry.Match)
+		}
+		if !matchesCatalogModel(entry.Match) {
+			return nil, fmt.Errorf("substitution rule %d: %w: %q", i+1, errSubstitutionRuleNoMatch, entry.Match)
+		}
+		rules = append(rules, proxy.SubstitutionRule{Match: entry.Match, Provider: providers.LocalProviderName(entry.Model), Model: entry.Model})
+	}
+	if len(rules) == 0 {
+		return nil, nil
+	}
+	return rules, nil
+}
+
+// matchesCatalogModel reports whether pattern matches a built-in catalog model.
+func matchesCatalogModel(pattern string) bool {
+	for _, m := range catalog.Models {
+		if m.ID == "" || catalog.IsLocal(m.ID) {
+			continue
+		}
+		if matched, _ := path.Match(pattern, m.ID); matched {
+			return true
+		}
+	}
+	return false
 }
 
 // validateModelMapping checks that both sides of every mapping are built-in
@@ -411,6 +471,9 @@ func loadLocalModels(
 	}
 	if len(cfg.modelMapping) > 0 {
 		logger.Info("Model mapping enabled", "mappings", cfg.modelMapping)
+	}
+	for _, rule := range cfg.substitutionRules {
+		logger.Info("Substitution rule enabled", "match", rule.Match, "model", rule.Model)
 	}
 	return cfg, nil
 }
