@@ -33,31 +33,17 @@ func (s *Service) WithModelMapping(mapping ModelMapping) *Service {
 // Session pins, HMM history and the policy outcome keep the router's own pick
 // through SubstitutedFrom.
 func (s *Service) mapModel(ctx context.Context, res *turnLoopResult, req router.Request) {
-	if len(s.modelMapping) == 0 || !midTierSubstitutable(*res) {
+	mappedDecision, ineligible, applies := s.mappingFor(ctx, *res, req)
+	if !applies {
 		return
 	}
 	original := res.Decision
-	target, mapped := s.modelMapping[original.Model]
-	if !mapped {
-		return
-	}
-	if _, pinned := router.HonouredPolicyPin(ctx); pinned {
-		return
-	}
-	// Retarget a copy of the routed decision, keeping its effort; the arm
-	// selection names an upstream of the original model, so it is dropped.
-	// The plan resolver authorizes the new target under the deployment
-	// override source.
-	mappedDecision := original
-	mappedDecision.Model = target
-	mappedDecision.Provider = mappedProvider(target, original.Provider)
-	mappedDecision.Metadata = withoutArmSelection(original.Metadata)
-	if reason := s.mappingTargetIneligibility(ctx, mappedDecision, req); reason != "" {
+	if ineligible != "" {
 		observability.FromContext(ctx).Info("Model mapping skipped; serving the trained model",
-			"reason", reason,
+			"reason", ineligible,
 			"turn_type", string(res.TurnType),
 			"original_model", original.Model,
-			"mapped_model", target,
+			"mapped_model", mappedDecision.Model,
 			"mapped_provider", mappedDecision.Provider,
 		)
 		return
@@ -71,9 +57,35 @@ func (s *Service) mapModel(ctx context.Context, res *turnLoopResult, req router.
 		"turn_type", string(res.TurnType),
 		"original_model", original.Model,
 		"original_provider", original.Provider,
-		"mapped_model", target,
+		"mapped_model", mappedDecision.Model,
 		"mapped_provider", mappedDecision.Provider,
 	)
+}
+
+// mappingFor returns res's decision retargeted onto its mapped model, and why
+// that target cannot serve req ("" when it can). applies is false when the
+// mapping has no say over the turn.
+func (s *Service) mappingFor(ctx context.Context, res turnLoopResult, req router.Request) (mapped router.Decision, ineligible string, applies bool) {
+	if len(s.modelMapping) == 0 || !midTierSubstitutable(res) {
+		return router.Decision{}, "", false
+	}
+	original := res.Decision
+	target, ok := s.modelMapping[original.Model]
+	if !ok {
+		return router.Decision{}, "", false
+	}
+	if _, pinned := router.HonouredPolicyPin(ctx); pinned {
+		return router.Decision{}, "", false
+	}
+	// Retarget a copy of the routed decision, keeping its effort; the arm
+	// selection names an upstream of the original model, so it is dropped.
+	// The plan resolver authorizes the new target under the deployment
+	// override source.
+	mapped = original
+	mapped.Model = target
+	mapped.Provider = mappedProvider(target, original.Provider)
+	mapped.Metadata = withoutArmSelection(original.Metadata)
+	return mapped, s.mappingTargetIneligibility(ctx, mapped, req), true
 }
 
 // mappingTargetIneligibility names why req may not be served on the mapped
@@ -130,6 +142,20 @@ func withMappingAdmitted(ctx context.Context, admitted map[string]struct{}) cont
 		return ctx
 	}
 	return context.WithValue(ctx, mappingAdmittedContextKey{}, admitted)
+}
+
+// unmappableAdmission returns the request's mapping-admitted models when
+// res's decision is one of them and the mapping will not retarget it, else
+// nil. It judges a scorer pick before the turn builds on it.
+func (s *Service) unmappableAdmission(ctx context.Context, res turnLoopResult, req router.Request) map[string]struct{} {
+	admitted, _ := ctx.Value(mappingAdmittedContextKey{}).(map[string]struct{})
+	if _, ok := admitted[res.Decision.Model]; !ok {
+		return nil
+	}
+	if _, ineligible, applies := s.mappingFor(ctx, res, req); applies && ineligible == "" {
+		return nil
+	}
+	return admitted
 }
 
 // unservedMappingAdmission returns the request's mapping-admitted models when
