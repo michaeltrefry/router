@@ -16,6 +16,7 @@ import (
 	"weave-os/router/internal/providers"
 	"weave-os/router/internal/proxy"
 	"weave-os/router/internal/router"
+	"weave-os/router/internal/router/catalog"
 	"weave-os/router/internal/router/sessionpin"
 
 	"github.com/google/uuid"
@@ -333,4 +334,135 @@ func TestModelMapping_EligibleTargetIsMapped(t *testing.T) {
 			assert.Equal(t, tc.want, rec.Header().Get(proxy.HeaderRouterModel))
 		})
 	}
+}
+
+// mappingDisabledStore disables the listed models for automatic routing.
+type mappingDisabledStore map[string]string
+
+func (s mappingDisabledStore) ListGlobalAutomaticRoutingExclusions(context.Context) (map[string]string, error) {
+	return s, nil
+}
+
+const mappingImageBody = `{
+	"model":"claude-opus-4-7",
+	"system":"sys",
+	"messages":[{"role":"user","content":[
+		{"type":"text","text":"what is in this picture"},
+		{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAA"}}
+	]}]
+}`
+
+// A target this request cannot be served on dispatches the trained model
+// unchanged, and the skip names its reason.
+func TestModelMapping_RequestIneligibleTargetServesTrainedModel(t *testing.T) {
+	cases := map[string]struct {
+		body   string
+		mutate func(*catalog.Model)
+		setup  func(f localTurnFixture)
+		reason string
+	}{
+		"target provider not enrolled for the request": {
+			body: pinTestBody,
+			setup: func(f localTurnFixture) {
+				f.svc.WithDeploymentKeyedProviders(map[string]struct{}{providers.ProviderAnthropic: {}})
+			},
+			reason: "provider_not_enabled",
+		},
+		"request beyond the target's context window": {
+			body:   pinTestBody,
+			mutate: func(m *catalog.Model) { m.ContextWindow = 1 },
+			reason: "context_window_exceeded",
+		},
+		"images the target cannot read": {
+			body:   mappingImageBody,
+			reason: "not_image_capable",
+		},
+		"tools on a low tool-use target": {
+			body:   midTierToolResultBody,
+			mutate: func(m *catalog.Model) { m.ToolUseQuality = catalog.ToolUseLow },
+			reason: "low_tool_rating",
+		},
+		"tools on a low agentic target": {
+			body:   midTierToolResultBody,
+			mutate: func(m *catalog.Model) { m.AgenticUse = catalog.AgenticLow },
+			reason: "low_tool_rating",
+		},
+		"target disabled for automatic routing": {
+			body: pinTestBody,
+			setup: func(f localTurnFixture) {
+				f.svc.WithGlobalAutomaticExclusions(mappingDisabledStore{f.model: "withdrawn"})
+			},
+			reason: "automatic_routing_disabled",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newMidTierFixture(t, "test-map-ineligible", opus5Decision, false, tc.mutate)
+			f.svc.WithModelMapping(proxy.ModelMapping{"claude-opus-5": f.model})
+			if tc.setup != nil {
+				tc.setup(f)
+			}
+			var logs bytes.Buffer
+			ctx := observability.WithLogger(authedCtx(uuid.New().String()), slog.New(slog.NewJSONHandler(&logs, nil)))
+
+			rec := f.serve(t, ctx, tc.body, nil)
+
+			assert.Empty(t, f.local.proxyBodies)
+			require.Len(t, f.anthropic.proxyBodies, 1)
+			assert.Equal(t, "claude-opus-5", upstreamModel(t, f.anthropic.proxyBodies[0]))
+			assert.Equal(t, "claude-opus-5", rec.Header().Get(proxy.HeaderRouterModel))
+			skip := logLine(t, &logs, "Model mapping skipped; serving the trained model")
+			assert.Equal(t, tc.reason, skip["reason"])
+			assert.Equal(t, "claude-opus-5", skip["original_model"])
+			assert.Equal(t, f.model, skip["mapped_model"])
+			assert.Empty(t, completionLine(t, &logs)["substitution_reason"])
+		})
+	}
+}
+
+// The request-level cases above fail only for the reason they name: the same
+// target serves a request it can carry.
+func TestModelMapping_RequestEligibleTargetIsMapped(t *testing.T) {
+	f := newMidTierFixture(t, "test-map-eligible", opus5Decision, false, nil)
+	f.svc.WithModelMapping(proxy.ModelMapping{"claude-opus-5": f.model})
+
+	rec := f.serve(t, authedCtx(uuid.New().String()), pinTestBody, nil)
+
+	require.Len(t, f.local.proxyBodies, 1)
+	assert.Empty(t, f.anthropic.proxyBodies)
+	assert.Equal(t, f.model, rec.Header().Get(proxy.HeaderRouterModel))
+}
+
+// OpenAI enrolled only through the caller's Codex subscription serves only the
+// models that subscription covers; a target outside it falls back.
+func TestModelMapping_CodexSubscriptionOnlyServesCoveredTargets(t *testing.T) {
+	svc, anthropic, openai := newMappingService(t, proxy.ModelMapping{"claude-opus-5": "gpt-5.4-nano"}, true)
+	svc.WithDeploymentKeyedProviders(map[string]struct{}{providers.ProviderAnthropic: {}})
+	ctx := context.WithValue(authedCtx(uuid.New().String()), proxy.OpenAISubscriptionContextKey{}, "eyJhbGciOiJSUzI1NiJ9.codex.sig")
+	ctx = context.WithValue(ctx, proxy.OpenAIAccountIDContextKey{}, "acct-123")
+	rec := httptest.NewRecorder()
+
+	require.NoError(t, svc.ProxyMessages(ctx, []byte(pinTestBody), rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil)))
+
+	assert.Empty(t, openai.proxyBodies)
+	require.Len(t, anthropic.proxyBodies, 1)
+	assert.Equal(t, "claude-opus-5", upstreamModel(t, anthropic.proxyBodies[0]))
+	assert.Equal(t, "claude-opus-5", rec.Header().Get(proxy.HeaderRouterModel))
+}
+
+// logLine returns the first decoded log line whose message is msg.
+func logLine(t *testing.T, logs *bytes.Buffer, msg string) map[string]any {
+	t.Helper()
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		var fields map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &fields))
+		if fields["msg"] == msg {
+			return fields
+		}
+	}
+	t.Fatalf("no %q line logged", msg)
+	return nil
 }

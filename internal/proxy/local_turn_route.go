@@ -88,17 +88,27 @@ func (s *Service) localTurnTarget(tt turntype.TurnType, req router.Request) (pro
 // request fits its context window, carries no images it cannot read, and
 // carries no tools when it is rated low for tool or agentic use.
 func localModelServes(provider, model string, req router.Request) bool {
-	if !automaticPinEligible(sessionpin.Pin{Provider: provider, Model: model}, req) {
-		return false
+	return automaticServingIneligibility(provider, model, req) == ""
+}
+
+// automaticServingIneligibility names why a model the router serves on its
+// own behalf may not take req, or returns "" when it may.
+func automaticServingIneligibility(provider, model string, req router.Request) string {
+	pin := sessionpin.Pin{Provider: provider, Model: model}
+	if !pinEligible(pin, req) {
+		return forcedPinIneligibilityReason(pin, req)
+	}
+	if automaticallyDisabled(req, model) {
+		return "automatic_routing_disabled"
 	}
 	if req.EstimatedInputTokens > catalog.ContextWindowForBinding(model, provider) {
-		return false
+		return "context_window_exceeded"
 	}
 	if entry, known := catalog.ByID(model); known && req.HasTools &&
 		(entry.ToolUseQuality == catalog.ToolUseLow || entry.AgenticUse == catalog.AgenticLow) {
-		return false
+		return "low_tool_rating"
 	}
-	return true
+	return ""
 }
 
 // codexSubAgentHeader carries the kind of Codex thread a request comes from;

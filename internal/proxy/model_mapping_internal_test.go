@@ -30,7 +30,7 @@ func TestMapModel_DropsArmSelectionOnACopy(t *testing.T) {
 		Decision: router.Decision{Provider: providers.ProviderAnthropic, Model: "claude-opus-5", Reason: "cluster", Metadata: original},
 	}
 
-	svc.mapModel(context.Background(), &res)
+	svc.mapModel(context.Background(), &res, router.Request{})
 
 	require.Equal(t, "claude-opus-5-5", res.Decision.Model)
 	require.NotNil(t, res.Decision.Metadata)
