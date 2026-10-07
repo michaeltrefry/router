@@ -401,8 +401,30 @@ func (a authorityCacheShadow) EVRan() bool {
 func (r turnLoopResult) modelSwitched() bool {
 	// Compare serving identities: a same-model effort change reshapes the
 	// prompt-cache prefix and invalidates thinking-block signatures.
-	transition := r.PriorServedModel != "" && r.PriorServedModel != r.Decision.ServedIdentity()
+	transition := r.PriorServedModel != "" && r.PriorServedModel != r.recordedSelection().ServedIdentity()
 	return transition || r.SessionEverSwitched || r.StripThinkingBlocks
+}
+
+// recordedSelection is the decision session state records for this turn and
+// so the one PriorServedModel is compared against: the router's own pick when
+// the model mapping or mid-tier substitute serves another model in its place
+// every turn, else Decision. A subscription fallback or local-failure rescue
+// is not included, since its next turn returns to the original.
+func (r turnLoopResult) recordedSelection() router.Decision {
+	switch r.SubstitutionReason {
+	case reasonModelMapping, reasonMidTierSubstitute:
+		return r.SubstitutedFrom
+	}
+	return r.Decision
+}
+
+// priorServed reports whether model continues the session's last served
+// model; the turn's own Decision is judged by its recordedSelection.
+func (r turnLoopResult) priorServed(model string) bool {
+	if model == r.Decision.Model {
+		model = r.recordedSelection().Model
+	}
+	return baseModelOf(r.PriorServedModel) == model
 }
 
 func isHMMDecision(dec router.Decision) bool {

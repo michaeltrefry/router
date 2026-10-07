@@ -272,7 +272,11 @@ target), and a target must not itself be mapped; the router fails to boot with
 a catalog model` or `model mapping: target must not itself be mapped`
 otherwise. The target keeps the selection's provider when it is bound there,
 else uses the target's primary provider, and is authorized as a deployment
-override.
+override. A turn whose target the request may not use is served on the
+router's own pick instead: the installation excluded the target or its
+provider, the target is outside an allowed-models list, or the target's
+provider has no registered client in this deployment (boot does not require
+one).
 
 Mapping has the same scope as mid-tier substitution: an explicit
 `/force-model`, hard-pinned or local-turn-routed utility turns, classifier and
@@ -293,7 +297,11 @@ A mapped turn's completion line carries `decision_model` (the served model),
 `substitution_reason: model_mapping` and `mapped_model`; a mapped then
 substituted turn carries `substitution_reason: mid_tier_substitute` and the
 mapped model in `mapped_model`. The routing marker reads
-`→ <mapped model> · mapped from <original model>`.
+`→ <mapped model> · mapped from <original model>`, or
+`→ <local model> (local) · substitute for <mapped model> (mapped from <original model>)`
+when the mapped turn was then substituted. Because the session records the
+router's pick, a later turn with the same pick is not a model switch: it shows
+no marker and keeps the transcript's signed thinking blocks.
 
 #### Mid-tier substitution
 

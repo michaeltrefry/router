@@ -323,7 +323,7 @@ func TestMidTierSubstitute_HMMHistoryKeepsOriginalPick(t *testing.T) {
 				return
 			}
 			assert.Equal(t, tc.wantSubstFrom, line["substituted_from_model"])
-			assert.Contains(t, line["routing_marker"], "· substitute for "+tc.wantSubstFrom)
+			assert.Empty(t, line["routing_marker"], "a second turn on the substitute is not a model switch")
 			assert.Len(t, f.local.proxyBodies, 2)
 		})
 	}

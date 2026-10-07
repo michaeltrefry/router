@@ -730,7 +730,7 @@ func routingMarkerFor(res turnLoopResult) string {
 	// Same model as last turn: the user already knows. Empty prior model means
 	// the first turn of this session (or role), which still shows. Effort changes
 	// do not constitute a new model choice for this display surface.
-	if baseModelOf(res.PriorServedModel) == res.Decision.Model {
+	if res.priorServed(res.Decision.Model) {
 		return ""
 	}
 	// A sidecar-supplied marker is a genuine per-turn status line (e.g.
@@ -797,7 +797,7 @@ func modelSelectionReason(res turnLoopResult, failoverReason string) string {
 func modelSelectionMarkerForRequest(ctx context.Context, res turnLoopResult, marker, servedModel, failoverReason string) string {
 	show, _ := ctx.Value(InstallationShowModelSelectionReasoningContextKey{}).(bool)
 	if !show || marker == "" || servedModel == "" || res.SuggestionMode || res.HardPinned ||
-		isUnpinnedScoredTurn(res.TurnType) || baseModelOf(res.PriorServedModel) == servedModel {
+		isUnpinnedScoredTurn(res.TurnType) || res.priorServed(servedModel) {
 		return marker
 	}
 	lineEnd := strings.IndexByte(marker, '\n')
@@ -869,7 +869,7 @@ func baselineRoutingMarkerFor(res turnLoopResult, baselineModel string) string {
 	}
 	// A failover that lands back on the model already serving is a no-op repeat;
 	// only a genuine switch to a different model is worth surfacing.
-	if baseModelOf(res.PriorServedModel) == baselineModel {
+	if res.priorServed(baselineModel) {
 		return ""
 	}
 	return "✦ **Weave Router** → " + baselineModel + " · " + markerReasonBaseline + "\n\n"
@@ -878,7 +878,7 @@ func baselineRoutingMarkerFor(res turnLoopResult, baselineModel string) string {
 // siblingRoutingMarkerFor renders the routing badge for an in-turn same-cluster
 // failover, naming the candidate that actually serves.
 func siblingRoutingMarkerFor(res turnLoopResult, siblingModel string) string {
-	if res.SuggestionMode || siblingModel == "" || baseModelOf(res.PriorServedModel) == siblingModel {
+	if res.SuggestionMode || siblingModel == "" || res.priorServed(siblingModel) {
 		return ""
 	}
 	return "✦ **Weave Router** → " + siblingModel + " · " + markerReasonSibling + "\n\n"
@@ -887,7 +887,7 @@ func siblingRoutingMarkerFor(res turnLoopResult, siblingModel string) string {
 // cyberRefusalRoutingMarkerFor renders the routing badge for a turn re-served
 // after the picked model refused it.
 func cyberRefusalRoutingMarkerFor(res turnLoopResult, fallbackModel string) string {
-	if res.SuggestionMode || fallbackModel == "" || baseModelOf(res.PriorServedModel) == fallbackModel {
+	if res.SuggestionMode || fallbackModel == "" || res.priorServed(fallbackModel) {
 		return ""
 	}
 	return "✦ **Weave Router** → " + fallbackModel + " · " + markerReasonCyberRefusal + "\n\n"
@@ -898,6 +898,9 @@ func cyberRefusalRoutingMarkerFor(res turnLoopResult, fallbackModel string) stri
 func routingReasonShort(res turnLoopResult) string {
 	if res.SubstitutionReason == reasonModelMapping {
 		return markerReasonModelMapping + " " + res.SubstitutedFrom.Model
+	}
+	if res.SubstitutionReason == reasonMidTierSubstitute && res.MappedDecision.Model != "" {
+		return markerReasonMidTierSubstitute + " " + res.MappedDecision.Model + " (" + markerReasonModelMapping + " " + res.SubstitutedFrom.Model + ")"
 	}
 	if res.SubstitutedFrom.Model != "" {
 		return markerReasonMidTierSubstitute + " " + res.SubstitutedFrom.Model
@@ -5625,6 +5628,9 @@ func applyRoutingStateAttrs(
 	servedIdentity string,
 	sessionKey [sessionpin.SessionKeyLen]byte,
 ) *otel.AttrBuilder {
+	if servedIdentity == res.Decision.ServedIdentity() {
+		servedIdentity = res.recordedSelection().ServedIdentity()
+	}
 	return b.String("routing.session_key", sessionKeyHex(sessionKey)).
 		String("routing.pin_role", res.PinRole).
 		String("routing.prior_served_model", res.PriorServedModel).

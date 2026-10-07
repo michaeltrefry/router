@@ -43,12 +43,22 @@ func (s *Service) mapModel(ctx context.Context, res *turnLoopResult) {
 	if _, pinned := router.HonouredPolicyPin(ctx); pinned {
 		return
 	}
-	// Retarget a copy of the routed decision, keeping its routing metadata
-	// and effort; the plan resolver authorizes the new target under the
-	// deployment override source.
+	// Retarget a copy of the routed decision, keeping its effort; the arm
+	// selection names an upstream of the original model, so it is dropped.
+	// The plan resolver authorizes the new target under the deployment
+	// override source.
 	mappedDecision := original
 	mappedDecision.Model = target
 	mappedDecision.Provider = mappedProvider(target, original.Provider)
+	mappedDecision.Metadata = withoutArmSelection(original.Metadata)
+	if !s.mappingTargetEligible(ctx, mappedDecision) {
+		observability.FromContext(ctx).Debug("Model mapping skipped for an ineligible target",
+			"original_model", original.Model,
+			"mapped_model", target,
+			"mapped_provider", mappedDecision.Provider,
+		)
+		return
+	}
 	res.SubstitutedFrom = original
 	res.SubstitutionReason = reasonModelMapping
 	res.MappedDecision = mappedDecision
@@ -61,6 +71,27 @@ func (s *Service) mapModel(ctx context.Context, res *turnLoopResult) {
 		"mapped_model", target,
 		"mapped_provider", mappedDecision.Provider,
 	)
+}
+
+// mappingTargetEligible reports whether this request may be served on the
+// mapped target: neither the model nor its provider is excluded, the model
+// clears every positive allowlist, and the provider has a registered dispatch
+// client. An ineligible target serves the router's own pick instead.
+func (s *Service) mappingTargetEligible(ctx context.Context, target router.Decision) bool {
+	if _, excluded := s.excludedModelsForRequest(ctx)[target.Model]; excluded {
+		return false
+	}
+	// The desugared exclusion set covers only the routable universe, which
+	// need not contain a mapping target.
+	if allowed := allowedModelsForRequest(ctx); allowed != nil {
+		if _, ok := allowed[target.Model]; !ok {
+			return false
+		}
+	}
+	if _, excluded := s.excludedProvidersForRequest(ctx)[target.Provider]; excluded {
+		return false
+	}
+	return s.clients.Has(target.Provider)
 }
 
 // mappedProvider keeps the selection's provider when the target is bound to
