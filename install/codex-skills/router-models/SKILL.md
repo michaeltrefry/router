@@ -19,9 +19,11 @@ Start by running:
 ```
 
 That prints every deployed model grouped by provider, with `[x]` for models the
-router may pick and `[ ]` for models it may not. Present it back as a compact
-checklist in that same `[x]` / `[ ]` form, keeping the provider grouping and the
-exact model ids — the user selects models by id.
+router may pick and `[ ]` for models it may not. Present it back grouped by
+provider, with an **On:** line and an **Off:** line under each provider listing
+the exact model ids (comma-separated). Don't write `[x]` / `[ ]` or a markdown
+task list — chat renders checked tasks struck through, which reads as disabled.
+Keep the exact model ids — the user selects models by id.
 
 Then:
 
