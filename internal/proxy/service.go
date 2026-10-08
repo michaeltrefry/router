@@ -1278,12 +1278,13 @@ func installationFastModeModelsFromContext(ctx context.Context) []string {
 	return out
 }
 
-// preferredModelsForRequest returns the installation's ordinary soft ranking.
+// preferredModelsForRequest returns the installation's ordinary soft ranking,
+// expanded so a preferred served model ranks the selections served as it.
 func (s *Service) preferredModelsForRequest(ctx context.Context) []string {
 	if planOwnedServingRequest(ctx) {
 		return nil
 	}
-	return installationPreferredModelsFromContext(ctx)
+	return s.expandPreferredModels(ctx, installationPreferredModelsFromContext(ctx))
 }
 
 // clusterArmOverridesForRequest returns per-cluster arm overrides from ctx, or

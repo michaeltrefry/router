@@ -45,9 +45,9 @@ func deployedProvidersDTO(models DeployedModelsSource) []string {
 	return out
 }
 
-// GetExcludedProvidersHandler returns deployed providers and the installation's
+// GetExcludedProvidersHandler returns selectable providers and the installation's
 // exclusion list. `env_override_active` tells the UI to render read-only.
-func GetExcludedProvidersHandler(authSvc *auth.Service, models DeployedModelsSource, override ProviderExclusionOverrideSource) gin.HandlerFunc {
+func GetExcludedProvidersHandler(authSvc *auth.Service, models DeployedModelsSource, routable RoutableModelsSource, override ProviderExclusionOverrideSource) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		installation, ok := resolveInstallation(c, authSvc)
 		if !ok {
@@ -67,7 +67,7 @@ func GetExcludedProvidersHandler(authSvc *auth.Service, models DeployedModelsSou
 		}
 
 		c.JSON(http.StatusOK, excludedProvidersResponse{
-			Available:         deployedProvidersDTO(models),
+			Available:         selectableProviders(models, routable),
 			Excluded:          excluded,
 			EnvOverrideActive: envActive,
 		})
@@ -76,7 +76,7 @@ func GetExcludedProvidersHandler(authSvc *auth.Service, models DeployedModelsSou
 
 // UpdateExcludedProvidersHandler replaces the installation's exclusion list.
 // 400 on unknown providers; 403 if the env override is active.
-func UpdateExcludedProvidersHandler(authSvc *auth.Service, models DeployedModelsSource, override ProviderExclusionOverrideSource) gin.HandlerFunc {
+func UpdateExcludedProvidersHandler(authSvc *auth.Service, models DeployedModelsSource, routable RoutableModelsSource, override ProviderExclusionOverrideSource) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		log := observability.FromGin(c)
 		installation, ok := resolveInstallation(c, authSvc)
@@ -96,7 +96,7 @@ func UpdateExcludedProvidersHandler(authSvc *auth.Service, models DeployedModels
 			return
 		}
 
-		available := deployedProvidersDTO(models)
+		available := selectableProviders(models, routable)
 		allowed := make(map[string]struct{}, len(available))
 		for _, p := range available {
 			allowed[p] = struct{}{}

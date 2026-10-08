@@ -56,6 +56,9 @@ func (*fastModeInstallationRepo) UpdateAllowedModels(context.Context, string, st
 func (*fastModeInstallationRepo) UpdateExcludedProviders(context.Context, string, string, []string) error {
 	return errFastModeRepoNotUsed
 }
+func (*fastModeInstallationRepo) UpdatePreferredModels(context.Context, string, string, []string) error {
+	return errFastModeRepoNotUsed
+}
 func (*fastModeInstallationRepo) UpdateRoutingPreference(context.Context, string, string, *float64) error {
 	return errFastModeRepoNotUsed
 }

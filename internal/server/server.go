@@ -317,12 +317,25 @@ func RegisterWithFeatures(engine *gin.Engine, authSvc *auth.Service, proxySvc *p
 		mgmt.GET("/fast-mode-models", admin.GetFastModeModelsHandler(authSvc))
 		mgmt.PUT("/fast-mode-models", admin.UpdateFastModeModelsHandler(authSvc))
 		if deployedModels != nil {
-			mgmt.GET("/excluded-models", admin.GetExcludedModelsHandler(authSvc, deployedModels, proxySvc))
-			mgmt.PUT("/excluded-models", admin.UpdateExcludedModelsHandler(authSvc, deployedModels, proxySvc))
 			mgmt.GET("/allowed-models", admin.GetAllowedModelsHandler(authSvc, deployedModels))
 			mgmt.PUT("/allowed-models", admin.UpdateAllowedModelsHandler(authSvc, deployedModels, proxySvc))
-			mgmt.GET("/excluded-providers", admin.GetExcludedProvidersHandler(authSvc, deployedModels, proxySvc))
-			mgmt.PUT("/excluded-providers", admin.UpdateExcludedProvidersHandler(authSvc, deployedModels, proxySvc))
+			// Model selection is safe for an installation-scoped rk_ key: it can
+			// only affect that key's own installation and cannot mint credentials.
+			modelSelection := engine.Group("/admin/v1", middleware.WithTimeout(adminTimeout), middleware.WithAdminOrAuth(authSvc, byokRequiresOptIn))
+			modelSelection.GET("/models", admin.GetModelsHandler(authSvc, proxySvc, proxySvc))
+			modelSelection.GET("/excluded-models", admin.GetExcludedModelsHandler(authSvc, deployedModels, proxySvc))
+			modelSelection.PUT("/excluded-models", admin.UpdateExcludedModelsHandler(authSvc, deployedModels, proxySvc))
+			modelSelection.POST("/excluded-models", admin.AddExcludedModelHandler(authSvc, proxySvc))
+			modelSelection.POST("/excluded-models/remove", admin.RemoveExcludedModelHandler(authSvc, proxySvc))
+			modelSelection.GET("/preferred-models", admin.GetPreferredModelsHandler(authSvc))
+			modelSelection.PUT("/preferred-models", admin.UpdatePreferredModelsHandler(authSvc, proxySvc))
+			modelSelection.POST("/preferred-models", admin.AddPreferredModelHandler(authSvc, proxySvc))
+			modelSelection.POST("/preferred-models/remove", admin.RemovePreferredModelHandler(authSvc, proxySvc))
+			modelSelection.GET("/providers", admin.GetProvidersHandler(authSvc, deployedModels, proxySvc, proxySvc))
+			modelSelection.GET("/excluded-providers", admin.GetExcludedProvidersHandler(authSvc, deployedModels, proxySvc, proxySvc))
+			modelSelection.PUT("/excluded-providers", admin.UpdateExcludedProvidersHandler(authSvc, deployedModels, proxySvc, proxySvc))
+			modelSelection.POST("/excluded-providers", admin.AddExcludedProviderHandler(authSvc, deployedModels, proxySvc, proxySvc))
+			modelSelection.POST("/excluded-providers/remove", admin.RemoveExcludedProviderHandler(authSvc, deployedModels, proxySvc, proxySvc))
 		}
 	}
 

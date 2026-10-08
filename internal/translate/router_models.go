@@ -14,14 +14,12 @@ var routerModelsTokens = [...]string{
 // ExtractRouterModelsCommand reports whether the trailing user message is a
 // bare router-models directive, stripping it so no upstream ever sees it.
 //
-// Bare only, and that restriction is load-bearing. Listing is a read the
-// router can answer from the request it is already holding. Mutating the
-// selection (`enable`/`disable`/`prefer`/`providers`) is an admin operation:
-// those endpoints sit behind WithAdminOnly, which rejects the rk_ data-plane
-// key a chat request carries precisely so a leaked key cannot rewrite routing
-// config. Answering an argument form here would either be a no-op or a hole
-// through that boundary, so anything with arguments falls through to the
-// skill, which shells out to the installer and authenticates properly.
+// Bare only. Listing is a read the router can answer from the request it is
+// already holding. Mutating the selection (`enable`/`disable`/`prefer`/
+// `providers`) is a write to the /admin/v1 model-selection API, which only a
+// self-hosted router mounts; anything with arguments falls through to the
+// skill, which shells out to the installer so that boundary, and the
+// managed-router refusal, live in one place.
 func (env *RequestEnvelope) ExtractRouterModelsCommand() bool {
 	return env.extractLeadingCommand(parseRouterModelsCommand)
 }

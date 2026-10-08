@@ -814,6 +814,58 @@ dropped refuses to boot instead. The gateway validates its environment and signi
 key before it opens the registry, and `/readyz` stays fail-closed afterwards.
 Keep the signing key identical on gateway and workers of the same environment.
 
+## Model-selection API
+
+Self-hosted deployments expose installation-scoped model selection under
+`/admin/v1`; managed deployments mount none of it. Authenticate with an admin
+dashboard cookie or a routing router key (`X-Weave-Router-Key`, or an `rk_`
+bearer token), installation-shared or personal. A router key changes only its
+own installation's settings, the same installation the dashboard edits, and
+cannot reach key or provider-credential management, which stays cookie-only.
+This is the API behind `install.sh models` and the `/router-models` command.
+
+| Resource | Read | Replace | Add one | Remove one |
+|----------|------|---------|---------|------------|
+| Models | `GET /admin/v1/models` | — | — | — |
+| Model exclusions | `GET /admin/v1/excluded-models` | `PUT /admin/v1/excluded-models` | `POST /admin/v1/excluded-models` | `POST /admin/v1/excluded-models/remove` |
+| Preferred models | `GET /admin/v1/preferred-models` | `PUT /admin/v1/preferred-models` | `POST /admin/v1/preferred-models` | `POST /admin/v1/preferred-models/remove` |
+| Providers | `GET /admin/v1/providers` | — | — | — |
+| Provider exclusions | `GET /admin/v1/excluded-providers` | `PUT /admin/v1/excluded-providers` | `POST /admin/v1/excluded-providers` | `POST /admin/v1/excluded-providers/remove` |
+
+`GET /admin/v1/models` returns `[{model, provider, enabled, local}]`, sorted by
+provider then model, over the deployment's routable universe: catalog models
+with a configured provider, local models and model-mapping targets — the same
+set the bare `/router-models` directive lists. `enabled` is false for a model on
+the installation exclusion list (or the `ROUTER_EXCLUDED_MODELS` override).
+Providers return `[{provider, enabled}]` over the scorer's providers plus each
+local model's `local_<id>` provider. Exclusion GET responses retain
+`available`, `excluded` and `env_override_active` for the dashboard.
+Preferred-model responses are `{preferred: [...]}` in priority order.
+
+Replace bodies are `{excluded: [...]}` or `{preferred: [...]}`. Per-item
+requests use `{model: "..."}` or `{provider: "..."}`; this avoids path escaping
+for model IDs that include `/`. Item operations are idempotent; an unknown ID
+returns 400. An active `ROUTER_EXCLUDED_MODELS` or `ROUTER_EXCLUDED_PROVIDERS`
+environment override makes the corresponding exclusion writes return 403.
+
+**Disabling** a model or provider writes the installation's `excluded_models` /
+`excluded_providers`, the lists the dashboard checkboxes edit, so both views
+agree. It takes effect on the next request. A disabled mapping target is not
+mapped to (the trained model serves), and a disabled local model is not
+substituted in.
+
+**Preferring** models sets the installation's priority ranking, a soft bonus
+the scorer adds to each preferred model it can select, enough to win close
+calls but not to override a clearly better model. Exclusions, allowlists and
+eligibility still apply, and forced or pinned turns ignore it. The scorer only
+ranks the models it was trained on, so before scoring each preferred model is
+followed in the ranking by the routable models the deployment would serve as
+it: `model_mapping` sources (preferring `claude-opus-5-5` with
+`claude-opus-5: claude-opus-5-5` ranks `claude-opus-5`, and the mapping then
+serves `claude-opus-5-5`) and models a `substitution_rules` entry serves on a
+preferred local model, matched after mapping. The mid-tier substitute is not
+expanded, and a preferred model nothing selects or serves as has no effect.
+
 ## Routing
 
 | Variable                          | Default                      | Purpose |
