@@ -173,17 +173,6 @@ var postBindPrefixes = []string{
 	"internal/translate/",
 }
 
-// reservedKeyAllowlist are sites that bind a reserved key deliberately (the
-// binder itself, or a logger with no bound value to collide with).
-var reservedKeyAllowlist = map[string]bool{
-	"internal/observability/logger.go":   true, // Middleware binds them
-	"internal/proxy/session_key.go":      true, // bindRequestLogger binds them
-	"internal/auth/service.go":           true, // SafeGo loggers, off request path
-	"internal/proxy/service.go":          true, // OTel span attrs + telemetry rows
-	"internal/proxy/usage_bypass.go":     true, // OTel span attrs + telemetry rows
-	"internal/api/anthropic/messages.go": true, // pre-Middleware oversize-body log
-}
-
 // TestNoReservedLogKeyShadowing fails when a log call passes a key already
 // bound to that logger, which would overwrite the bound value.
 func TestNoReservedLogKeyShadowing(t *testing.T) {
@@ -208,7 +197,7 @@ func TestNoReservedLogKeyShadowing(t *testing.T) {
 			return relErr
 		}
 		rel = filepath.ToSlash(rel)
-		if reservedKeyAllowlist[rel] || strings.HasPrefix(rel, "cmd/") {
+		if strings.HasPrefix(rel, "cmd/") {
 			return nil
 		}
 
@@ -230,6 +219,28 @@ func TestNoReservedLogKeyShadowing(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
+}
+
+// TestFindShadowedKeysCatchesCallSiteRepass pins the guard on the exact shape
+// that overwrote a bound session_key: a literal key passed to a level method
+// on a logger, here inside a helper in a post-bind package.
+func TestFindShadowedKeysCatchesCallSiteRepass(t *testing.T) {
+	src := `package proxy
+
+import "log/slog"
+
+func logUpstreamBody(log *slog.Logger, key string) {
+	log.Info("upstream prepared request",
+		"session_key", key,
+		"decision_model", "m",
+	)
+}
+`
+	path := filepath.Join(t.TempDir(), "service.go")
+	require.NoError(t, os.WriteFile(path, []byte(src), 0o600))
+
+	got := findShadowedKeys(t, path, append(append([]string{}, alwaysBoundKeys...), bindScopedKeys...))
+	assert.Equal(t, []string{"session_key"}, got)
 }
 
 // findShadowedKeys returns which of keys are passed as literal args to a

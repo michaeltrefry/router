@@ -3163,9 +3163,8 @@ func (s *Service) PassthroughToNamedProvider(ctx context.Context, providerName s
 // logUpstreamBody emits per-attempt dispatch metadata at Info. Body is
 // intentionally omitted — use captureMode/Redactor (turn_logs.go) for
 // per-attempt body capture.
-func logUpstreamBody(log *slog.Logger, sessionKey [sessionpin.SessionKeyLen]byte, decision router.Decision, feats translate.RoutingFeatures, body []byte) {
+func logUpstreamBody(log *slog.Logger, decision router.Decision, feats translate.RoutingFeatures, body []byte) {
 	log.Info("upstream prepared request",
-		"session_key", hex.EncodeToString(sessionKey[:8]),
 		"decision_model", decision.Model,
 		"decision_provider", decision.Provider,
 		"message_count", feats.MessageCount,
@@ -3408,7 +3407,6 @@ func (s *Service) repinOffRefusingModel(ctx context.Context, sessionKey [session
 		return
 	}
 	log.Info("safety refusal — re-pinned session off refusing model",
-		"session_key", shortSessionKey(sessionKey),
 		"refusal_category", category,
 		"from_model", served.Model,
 		"to_model", fbModel,
@@ -3873,10 +3871,10 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 				ctx = withSuppressedClaudeSubscription(ctx)
 				linkedSubscriptionRetry = true
 				log.Info("Subscription-only bypass hit retryable error; trying linked Claude accounts",
-					"request_id", requestID, "external_id", externalID, "model", routeRes.Decision.Model)
+					"external_id", externalID, "model", routeRes.Decision.Model)
 			} else {
 				log.Info("Subscription-only bypass hit retryable error; refusing instead of paid reroute",
-					"request_id", requestID, "external_id", externalID)
+					"external_id", externalID)
 				return ErrCreditsExhaustedSubscriptionUnavailable
 			}
 		}
@@ -4286,7 +4284,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			setExtractor:  setExtractor,
 			setStreamCost: setStreamCost,
 			logBody: func(d router.Decision, body []byte) {
-				logUpstreamBody(log, routeRes.SessionKey, d, feats, body)
+				logUpstreamBody(log, d, feats, body)
 			},
 		}
 	}
@@ -4304,7 +4302,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 				return nil, fmt.Errorf("emit body: %w", emitErr)
 			}
 			crossFormat = false
-			logUpstreamBody(log, routeRes.SessionKey, target, feats, prep.Body)
+			logUpstreamBody(log, target, feats, prep.Body)
 			tiered := anthropicTierAttemptFor(targetOpts, prep, targetMarker)
 			return func(actx context.Context, d router.Decision, p providers.Client) error {
 				attemptOpts, err := tiered.dispatch(actx, d, p, recordFastServed)
@@ -4324,12 +4322,11 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 				}
 				log.Warn("Retrying Anthropic request without output_config.format after upstream rejected it",
 					"model", d.Model,
-					"provider", d.Provider,
-					"request_id", requestID)
+					"provider", d.Provider)
 				if preludeBuf != nil {
 					preludeBuf.Discard()
 				}
-				logUpstreamBody(log, routeRes.SessionKey, target, feats, unstructuredPrep.Body)
+				logUpstreamBody(log, target, feats, unstructuredPrep.Body)
 				return s.anthropicNativeAttempt(env, r, unstructuredPrep, sink, preludeBuf, anthropicPrelude, streamCut, targetMarker, setExtractor, setStreamCost)(actx, d, p)
 			}, nil
 		case providers.FamilyOpenAICompat:
@@ -4363,7 +4360,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 					return fmt.Errorf("translate anthropic request: %w", emitErr), func(err error) error { return err }
 				}
 				reqStats = prep.Stats
-				logUpstreamBody(log, routeRes.SessionKey, d, feats, prep.Body)
+				logUpstreamBody(log, d, feats, prep.Body)
 				var usage otel.UsageSink
 				if s.usageRequired() {
 					extractor = otel.NewUsageExtractor(nil, d.Provider)
@@ -4437,8 +4434,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 					s.rememberGatewayLacksResponses(gatewayKey)
 					log.Warn("Gateway rejected the Responses API; retrying on chat/completions",
 						"model", d.Model,
-						"decision_provider", d.Provider,
-						"request_id", requestID)
+						"decision_provider", d.Provider)
 					if preludeBuf != nil {
 						preludeBuf.Discard()
 					}
@@ -4453,8 +4449,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 					s.rememberGatewayRejectsPromptCacheKey(gatewayKey)
 					log.Warn("Gateway rejected prompt_cache_key; retrying without the affinity hint",
 						"model", d.Model,
-						"decision_provider", d.Provider,
-						"request_id", requestID)
+						"decision_provider", d.Provider)
 					if preludeBuf != nil {
 						preludeBuf.Discard()
 					}
@@ -4470,7 +4465,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 				return nil, fmt.Errorf("translate anthropic request to gemini: %w", emitErr)
 			}
 			crossFormat = true
-			logUpstreamBody(log, routeRes.SessionKey, target, feats, prep.Body)
+			logUpstreamBody(log, target, feats, prep.Body)
 			// geminiUsedValidated marks a request sent with
 			// functionCallingConfig.mode=VALIDATED (Gemini 3.x, tools, unforced
 			// choice): Gemini compiles each tool schema into a decode-time grammar,
@@ -4535,13 +4530,12 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 						return finalize(rawErr)
 					}
 					log.Warn("Retrying Gemini request with functionCallingConfig.mode=AUTO after VALIDATED-mode 400",
-						"model", d.Model,
-						"request_id", requestID)
+						"model", d.Model)
 					if preludeBuf != nil {
 						preludeBuf.Discard()
 					}
 					reqStats = autoPrep.Stats
-					logUpstreamBody(log, routeRes.SessionKey, d, feats, autoPrep.Body)
+					logUpstreamBody(log, d, feats, autoPrep.Body)
 					rawErr, finalize = dispatchGemini(actx, d, p, autoPrep)
 				}
 				return finalize(rawErr)
@@ -4897,7 +4891,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			crossFormat = false
 			respSummary = translate.ResponseSummary{}
 			reqStats = providers.RequestMutationStats{}
-			logUpstreamBody(log, routeRes.SessionKey, baselineDecision, feats, baselinePrep.Body)
+			logUpstreamBody(log, baselineDecision, feats, baselinePrep.Body)
 			winnerIdx, proxyErr = s.dispatchWithFallback(baselineCtx, failoverInputs{
 				w:                      contentSink,
 				buf:                    preludeBuf,
@@ -4971,7 +4965,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			crossFormat = false
 			respSummary = translate.ResponseSummary{}
 			reqStats = providers.RequestMutationStats{}
-			logUpstreamBody(log, routeRes.SessionKey, decision, feats, subPrep.Body)
+			logUpstreamBody(log, decision, feats, subPrep.Body)
 			winnerIdx, proxyErr = s.dispatchWithFallback(subCtx, failoverInputs{
 				w:               contentSink,
 				buf:             preludeBuf,
@@ -7657,8 +7651,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 					stripPCK = true
 					log.Warn("Gateway rejected prompt_cache_key; retrying without the affinity hint",
 						"model", d.Model,
-						"decision_provider", d.Provider,
-						"request_id", requestID)
+						"decision_provider", d.Provider)
 					if preludeBuf != nil {
 						preludeBuf.Discard()
 					}
@@ -7687,8 +7680,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 				s.rememberGatewayLacksResponses(responsesEndpointKey)
 				log.Warn("OpenAI endpoint rejected the Responses API; retrying on chat/completions",
 					"model", d.Model,
-					"decision_provider", d.Provider,
-					"request_id", requestID)
+					"decision_provider", d.Provider)
 				if preludeBuf != nil {
 					preludeBuf.Discard()
 				}
@@ -7737,8 +7729,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 						return finalize(rawErr)
 					}
 					log.Warn("Retrying Gemini request with functionCallingConfig.mode=AUTO after VALIDATED-mode 400",
-						"model", d.Model,
-						"request_id", requestID)
+						"model", d.Model)
 					if preludeBuf != nil {
 						preludeBuf.Discard()
 					}
@@ -7795,8 +7786,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 				rawErr, finalize := dispatchAnthropic(actx, d, p, fast)
 				if rawErr != nil && fast && !committed(preludeBuf) && providers.IsAnthropicFastModeQuotaRejection(rawErr) {
 					log.Warn("Retrying Anthropic request at standard speed after fast-mode quota rejection",
-						"model", d.Model,
-						"request_id", requestID)
+						"model", d.Model)
 					if preludeBuf != nil {
 						preludeBuf.Discard()
 					}
@@ -8090,8 +8080,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 			log.Warn("Codex subscription failover: ChatGPT plan rejected the turn, retrying on Weave credits",
 				"model", decision.Model,
 				"err", proxyErr,
-				"upstream_status", upstreamStatus(proxyErr),
-				"request_id", requestID)
+				"upstream_status", upstreamStatus(proxyErr))
 			codexRetryRan = true
 			respSummary = translate.ResponseSummary{}
 			winnerIdx, proxyErr = s.dispatchWithFallback(subCtx, failoverInputs{
@@ -8134,8 +8123,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 			log.Warn("Claude subscription failover: subscription cannot access model, retrying on Weave credits",
 				"model", decision.Model,
 				"err", proxyErr,
-				"upstream_status", upstreamStatus(proxyErr),
-				"request_id", requestID)
+				"upstream_status", upstreamStatus(proxyErr))
 			claudeRetryRan = true
 			respSummary = translate.ResponseSummary{}
 			winnerIdx, proxyErr = s.dispatchWithFallback(subCtx, failoverInputs{
@@ -8200,8 +8188,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 				"failed_model", primaryModel,
 				"failed_provider", primaryProvider,
 				"fallback_model", cyberRetryTarget.Model,
-				"fallback_provider", cyberRetryTarget.Provider,
-				"request_id", requestID)
+				"fallback_provider", cyberRetryTarget.Provider)
 			if verbatimPassthrough {
 				verbatimPassthrough = false
 				responsesPassthrough = false
