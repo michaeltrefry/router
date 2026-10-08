@@ -75,6 +75,7 @@ type Service struct {
 	installations           InstallationRepository
 	apiKeys                 APIKeyRepository
 	credentialSubjects      CredentialSubjectLookup
+	personalKeys            PersonalKeyStore
 	externalKeys            ExternalAPIKeyRepository
 	users                   UserRepository
 	clusterModelLists       ClusterModelListRepository

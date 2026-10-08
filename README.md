@@ -124,6 +124,12 @@ curl -sS http://localhost:8080/v1/chat/completions \
 curl -sS http://localhost:8080/v1/route -H "Authorization: Bearer rk_..." -d '...'
 ```
 
+To serve turns on your Claude or ChatGPT subscription from the router itself,
+enable `ROUTER_SUBSCRIPTION_POOLS_ENABLED`, issue a personal key with
+`make personal-key EMAIL=you@example.com`, and enroll with
+`install.sh login claude|codex`. See
+[Self-hosted subscription accounts](docs/CONFIGURATION.md#self-hosted-subscription-accounts).
+
 ### What that stack looks like
 
 Only the grey boxes are off your machine. The router, the scorer, Postgres, and

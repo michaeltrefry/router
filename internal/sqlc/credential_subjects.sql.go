@@ -12,6 +12,63 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getActivePersonalKeyIDsForSubject = `-- name: GetActivePersonalKeyIDsForSubject :many
+SELECT id FROM router.model_router_api_keys
+WHERE credential_subject_id = $1::uuid AND installation_id = $2::uuid AND deleted_at IS NULL
+ORDER BY created_at, id
+`
+
+type GetActivePersonalKeyIDsForSubjectParams struct {
+	SubjectID      uuid.UUID
+	InstallationID uuid.UUID
+}
+
+// Lists a subject's live keys on one installation, oldest first.
+//
+//	SELECT id FROM router.model_router_api_keys
+//	WHERE credential_subject_id = $1::uuid AND installation_id = $2::uuid AND deleted_at IS NULL
+//	ORDER BY created_at, id
+func (q *Queries) GetActivePersonalKeyIDsForSubject(ctx context.Context, arg GetActivePersonalKeyIDsForSubjectParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, getActivePersonalKeyIDsForSubject, arg.SubjectID, arg.InstallationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getCredentialSubjectIdentityByEmail = `-- name: GetCredentialSubjectIdentityByEmail :one
+SELECT subject_id FROM router.credential_subject_identities
+WHERE installation_id = $1::uuid AND email = $2::varchar AND revoked_at IS NULL
+`
+
+type GetCredentialSubjectIdentityByEmailParams struct {
+	InstallationID uuid.UUID
+	Email          string
+}
+
+// Resolves a live email identity to its subject within one installation.
+//
+//	SELECT subject_id FROM router.credential_subject_identities
+//	WHERE installation_id = $1::uuid AND email = $2::varchar AND revoked_at IS NULL
+func (q *Queries) GetCredentialSubjectIdentityByEmail(ctx context.Context, arg GetCredentialSubjectIdentityByEmailParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getCredentialSubjectIdentityByEmail, arg.InstallationID, arg.Email)
+	var subject_id uuid.UUID
+	err := row.Scan(&subject_id)
+	return subject_id, err
+}
+
 const getServingInstallationsForProjection = `-- name: GetServingInstallationsForProjection :many
 SELECT id FROM router.model_router_installations
 WHERE id = ANY($1::uuid[]) AND external_id = $2::varchar AND deleted_at IS NULL
@@ -67,6 +124,26 @@ func (q *Queries) InsertCredentialSubject(ctx context.Context) (RouterCredential
 		&i.RevokedAt,
 	)
 	return i, err
+}
+
+const insertCredentialSubjectIdentity = `-- name: InsertCredentialSubjectIdentity :exec
+INSERT INTO router.credential_subject_identities(subject_id, installation_id, email)
+VALUES ($1::uuid, $2::uuid, $3::varchar)
+`
+
+type InsertCredentialSubjectIdentityParams struct {
+	SubjectID      uuid.UUID
+	InstallationID uuid.UUID
+	Email          string
+}
+
+// Self-hosted issuance records the operator's email so a re-run finds the same subject.
+//
+//	INSERT INTO router.credential_subject_identities(subject_id, installation_id, email)
+//	VALUES ($1::uuid, $2::uuid, $3::varchar)
+func (q *Queries) InsertCredentialSubjectIdentity(ctx context.Context, arg InsertCredentialSubjectIdentityParams) error {
+	_, err := q.db.Exec(ctx, insertCredentialSubjectIdentity, arg.SubjectID, arg.InstallationID, arg.Email)
+	return err
 }
 
 const insertCredentialSubjectInstallation = `-- name: InsertCredentialSubjectInstallation :exec

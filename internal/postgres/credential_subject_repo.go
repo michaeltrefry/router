@@ -62,31 +62,50 @@ func (r *CredentialSubjectRepo) CreatePending(ctx context.Context, externalID st
 	var created *auth.APIKey
 	err = pgx.BeginFunc(ctx, dbbudget.NewDBTX(r.pool), func(tx pgx.Tx) error {
 		queries := dbbudget.Queries(tx)
-		installations, err := queries.GetServingInstallationsForProjection(ctx, sqlc.GetServingInstallationsForProjectionParams{InstallationIds: []uuid.UUID{installationID}, ExternalID: externalID})
-		if err != nil {
+		if err := lockInstallation(ctx, queries, externalID, installationID); err != nil {
 			return err
 		}
-		if len(installations) != 1 {
-			return auth.ErrInstallationNotFound
-		}
-		subject, err := queries.InsertCredentialSubject(ctx)
-		if err != nil {
-			return err
-		}
-		if err := queries.InsertCredentialSubjectInstallation(ctx, sqlc.InsertCredentialSubjectInstallationParams{SubjectID: subject.ID, InstallationID: installationID}); err != nil {
-			return err
-		}
-		row, err := queries.InsertPersonalRoutingKey(ctx, sqlc.InsertPersonalRoutingKeyParams{InstallationID: installationID, SubjectID: subject.ID, ExternalID: key.ExternalID, Name: key.Name, KeyPrefix: key.KeyPrefix, KeyHash: key.KeyHash, KeySuffix: key.KeySuffix})
-		if err != nil {
-			return err
-		}
-		created = toAuthAPIKey(row)
-		return nil
+		created, _, err = insertPendingPersonal(ctx, queries, installationID, key)
+		return err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create pending personal credential: %w", err)
 	}
 	return created, nil
+}
+
+func lockInstallation(ctx context.Context, queries *sqlc.Queries, externalID string, installationID uuid.UUID) error {
+	installations, err := queries.GetServingInstallationsForProjection(ctx, sqlc.GetServingInstallationsForProjectionParams{InstallationIds: []uuid.UUID{installationID}, ExternalID: externalID})
+	if err != nil {
+		return err
+	}
+	if len(installations) != 1 {
+		return auth.ErrInstallationNotFound
+	}
+	return nil
+}
+
+func insertPendingPersonal(ctx context.Context, queries *sqlc.Queries, installationID uuid.UUID, key auth.CreateAPIKeyParams) (*auth.APIKey, uuid.UUID, error) {
+	subject, err := queries.InsertCredentialSubject(ctx)
+	if err != nil {
+		return nil, uuid.Nil, err
+	}
+	if err := queries.InsertCredentialSubjectInstallation(ctx, sqlc.InsertCredentialSubjectInstallationParams{SubjectID: subject.ID, InstallationID: installationID}); err != nil {
+		return nil, uuid.Nil, err
+	}
+	row, err := insertPersonalKey(ctx, queries, installationID, subject.ID, key)
+	if err != nil {
+		return nil, uuid.Nil, err
+	}
+	return row, subject.ID, nil
+}
+
+func insertPersonalKey(ctx context.Context, queries *sqlc.Queries, installationID, subjectID uuid.UUID, key auth.CreateAPIKeyParams) (*auth.APIKey, error) {
+	row, err := queries.InsertPersonalRoutingKey(ctx, sqlc.InsertPersonalRoutingKeyParams{InstallationID: installationID, SubjectID: subjectID, ExternalID: key.ExternalID, Name: key.Name, KeyPrefix: key.KeyPrefix, KeyHash: key.KeyHash, KeySuffix: key.KeySuffix})
+	if err != nil {
+		return nil, err
+	}
+	return toAuthAPIKey(row), nil
 }
 
 // Rotate replaces only a credential owned by the authenticated subject; its subject survives rotation.

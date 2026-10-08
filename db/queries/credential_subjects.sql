@@ -55,3 +55,19 @@ ON CONFLICT (installation_id) DO UPDATE SET
     assignment_generation = router.installation_profile_assignments.assignment_generation + 1,
     updated_at = clock_timestamp()
 WHERE router.installation_profile_assignments.profile_key IS DISTINCT FROM EXCLUDED.profile_key;
+
+-- Self-hosted issuance records the operator's email so a re-run finds the same subject.
+-- name: InsertCredentialSubjectIdentity :exec
+INSERT INTO router.credential_subject_identities(subject_id, installation_id, email)
+VALUES (@subject_id::uuid, @installation_id::uuid, @email::varchar);
+
+-- Resolves a live email identity to its subject within one installation.
+-- name: GetCredentialSubjectIdentityByEmail :one
+SELECT subject_id FROM router.credential_subject_identities
+WHERE installation_id = @installation_id::uuid AND email = @email::varchar AND revoked_at IS NULL;
+
+-- Lists a subject's live keys on one installation, oldest first.
+-- name: GetActivePersonalKeyIDsForSubject :many
+SELECT id FROM router.model_router_api_keys
+WHERE credential_subject_id = @subject_id::uuid AND installation_id = @installation_id::uuid AND deleted_at IS NULL
+ORDER BY created_at, id;

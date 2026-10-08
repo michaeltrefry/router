@@ -18,6 +18,10 @@ fake_bin="$work/bin"
 mkdir -p "$home" "$fake_bin"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 22' >"$fake_bin/curl"
 chmod +x "$fake_bin/curl"
+for opener in open xdg-open; do
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_bin/$opener"
+  chmod +x "$fake_bin/$opener"
+done
 test_path="$fake_bin:$PATH"
 
 run_hosted_install() {
