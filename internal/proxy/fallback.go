@@ -362,6 +362,7 @@ func (s *Service) resolveBindingsForDispatch(ctx context.Context, decision route
 		// avoid retrying on providers whose keys aren't actually wired.
 		return []catalog.ProviderBinding{primary}
 	}
+	available = s.withManagedPoolProvider(ctx, available, decision.Provider, decision.Model)
 	// Exclusions must hold during failover too, or a fallback binding could
 	// resurrect a provider the scorer already filtered out.
 	excluded := s.excludedProvidersForRequest(ctx)

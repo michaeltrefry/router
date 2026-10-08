@@ -116,6 +116,22 @@ func managedSubscriptionCanServe(ctx context.Context, provider, model string) bo
 	return eligible && managedSubscriptionEnrolled(ctx, poolProvider)
 }
 
+// withManagedPoolProvider returns keyed plus provider when this request's
+// enrolled pool can serve model there, so a pool-served binding is
+// dispatchable without a deployment key. It never adds a provider to keyed
+// itself: the pool is not a paid fallback credential.
+func (s *Service) withManagedPoolProvider(ctx context.Context, keyed map[string]struct{}, provider, model string) map[string]struct{} {
+	if _, ok := keyed[provider]; ok || !s.clients.Has(provider) || !managedSubscriptionCanServe(ctx, provider, model) {
+		return keyed
+	}
+	out := make(map[string]struct{}, len(keyed)+1)
+	for p := range keyed {
+		out[p] = struct{}{}
+	}
+	out[provider] = struct{}{}
+	return out
+}
+
 func managedSubscriptionEnrollmentUnavailable(ctx context.Context) bool {
 	unavailable, _ := ctx.Value(ManagedSubscriptionEnrollmentUnavailableContextKey{}).(bool)
 	return unavailable
