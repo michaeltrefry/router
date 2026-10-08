@@ -16,6 +16,7 @@ This page is the exhaustive reference; the [README](../README.md) has the
 - [Managed serving (`ROUTER_SERVING_*`)](#managed-serving-router_serving_)
 - [Routing](#routing)
 - [Plan-aware subscription routing](#plan-aware-subscription-routing)
+- [Self-hosted subscription accounts](#self-hosted-subscription-accounts)
 - [Provider and model exclusions](#provider-and-model-exclusions)
 - [Policy sidecars](#policy-sidecars)
 - [Task-domain classifier](#task-domain-classifier)
@@ -884,6 +885,47 @@ while another linked plan has headroom. Unknown or all-exhausted states restore
 normal eligibility. `subscription_routing_disabled` suppresses this feature even
 when the org flag is on. This setting does not enable subscription-account
 enrollment or change how quota is observed.
+
+## Self-hosted subscription accounts
+
+With `ROUTER_SUBSCRIPTION_POOLS_ENABLED=true` the router holds Claude and
+ChatGPT subscription refresh tokens server side, so any client routed with the
+owning key is served on them: a Claude Code worker that the router sends to a
+GPT model runs on the ChatGPT subscription, and headless workers need no
+subscription login of their own. Set `EXTERNAL_KEY_ENCRYPTION_KEY` too (see
+[BYOK encryption](#byok-encryption)); it also encrypts the stored refresh tokens.
+
+An account must be owned by a **personal router key**, one bound to a
+credential subject. The dashboard and `make seed` issue installation-shared
+keys, which cannot own accounts: enrollment with one fails with
+`503 subscription_owner_unavailable`. On a self-hosted router, issue a personal
+key on the admin installation with:
+
+```bash
+make personal-key EMAIL=you@example.com          # go run ./cmd/personalkey -email ...
+make personal-key EMAIL=you@example.com ROTATE=1 # replace it, keeping enrolled accounts
+```
+
+The command reads the same `DATABASE_URL` / `POSTGRES_*` settings as the
+router, prints the raw key once to stdout and stores only its hash. It refuses
+to run with `ROUTER_DEPLOYMENT_MODE=managed`, where the control plane issues
+personal keys, and when the database has no admin installation (run
+`make seed` first). The subject is created with its ownership projection
+complete and access enabled, which is what subscription management checks.
+Re-running for the same email refuses unless `ROTATE=1` is set; rotation revokes
+the previous key (a running router may accept it until its five-minute auth
+cache expires) and keeps the subject, so enrolled accounts stay attached.
+
+Then enroll the subscriptions with that key:
+
+```bash
+WEAVE_ROUTER_KEY=rk_... ./install/install.sh login claude --local
+WEAVE_ROUTER_KEY=rk_... ./install/install.sh login codex --local
+```
+
+Route clients with the same personal key. A router without
+`ROUTER_SUBSCRIPTION_POOLS_ENABLED=true` does not mount
+`/v1/subscriptions/accounts` and the installer reports that pools are off.
 
 ## Provider and model exclusions
 

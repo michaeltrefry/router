@@ -9,7 +9,7 @@
 #   (and .env.local if present). Start Postgres via `make db` or point
 #   DATABASE_URL at any Postgres you already have running.
 
-.PHONY: generate generate-statusline generate-inference-policy check-inference-policy inference-boundary generate-agent-guides check-agent-guides check-docs build test test-verbose test-statusline test-install smoke initdb migrate-up migrate-down migrate-create seed setup full-setup db dev check fmt vet precommit install-hooks help install-cc uninstall-cc up up-hmm down down-hmm logs
+.PHONY: generate generate-statusline generate-inference-policy check-inference-policy inference-boundary generate-agent-guides check-agent-guides check-docs build test test-verbose test-statusline test-install smoke initdb migrate-up migrate-down migrate-create seed personal-key setup full-setup db dev check fmt vet precommit install-hooks help install-cc uninstall-cc up up-hmm down down-hmm logs
 
 # Load DATABASE_URL from .env files (matches docker-compose defaults).
 SAFE_AGENT_GOALS := doctor check-plan check-changed smoke
@@ -105,6 +105,10 @@ migrate-create: ## Create a new migration (usage: make migrate-create NAME=add-f
 
 seed: ## Create a local dev installation + API key and print usage instructions
 	go run ./cmd/seed
+
+personal-key: ## Issue a personal router key for subscription sign-in (usage: make personal-key EMAIL=you@example.com [ROTATE=1])
+	@if [ -z "$(EMAIL)" ]; then echo "Usage: make personal-key EMAIL=you@example.com [ROTATE=1]"; exit 2; fi
+	go run ./cmd/personalkey -email "$(EMAIL)" $(if $(ROTATE),-rotate)
 
 setup: migrate-up seed ## Bootstrap (host DB): init DB, run migrations, seed an API key
 

@@ -3086,6 +3086,34 @@ models_fail() {
   exit 1
 }
 
+# subscriptions_fail is models_fail for /v1/subscriptions. A bare 404 there
+# means the router mounts no server-side subscription pools (not a missing
+# model-selection API), and subscription_owner_unavailable means the key is an
+# installation-shared one that cannot own accounts. $1 names the operation.
+subscriptions_fail() {
+  local what="$1" detail
+  detail="$(models_api_error)"
+  case "$models_http_status:$detail" in
+    404:)
+      err "This router does not have server-side subscription accounts enabled, so $what is not available here."
+      printf "  %sSelf-hosted? Set ROUTER_SUBSCRIPTION_POOLS_ENABLED=true and EXTERNAL_KEY_ENCRYPTION_KEY on the router, then restart it.%s\n" \
+        "$C_DIM" "$C_RESET" >&2
+      exit 1
+      ;;
+    404:*)
+      err "$what failed (HTTP 404): $detail"
+      exit 1
+      ;;
+    503:subscription_owner_unavailable)
+      err "$what needs a personal router key; this key is shared by the whole installation and cannot own subscriptions."
+      printf "  %sSelf-hosted? Issue one with 'make personal-key EMAIL=you@example.com', then re-run with WEAVE_ROUTER_KEY set to it.%s\n" \
+        "$C_DIM" "$C_RESET" >&2
+      exit 1
+      ;;
+  esac
+  models_fail "$what"
+}
+
 # models_render_list prints the [{model,provider,enabled}] payload as a
 # provider-grouped checklist. The API sorts by provider then model, which is
 # what group_by needs, and what keeps two runs comparable.
@@ -3325,7 +3353,7 @@ run_accounts() {
   case "$verb" in
     ""|list)
       [ -z "$operands" ] || { err "'accounts list' takes no arguments."; exit 2; }
-      models_api GET "/v1/subscriptions/accounts" || models_fail "listing subscription accounts"
+      models_api GET "/v1/subscriptions/accounts" || subscriptions_fail "listing subscription accounts"
       if [ "$models_json" = "true" ]; then
         printf '%s\n' "$models_http_body"
       else
@@ -3337,9 +3365,9 @@ run_accounts() {
       while IFS= read -r id; do
         [ -n "$id" ] || continue
         if [ "$verb" = "disable" ]; then
-          models_api PATCH "/v1/subscriptions/accounts/$id" '{"enabled":false}' || models_fail "disabling account '$id'"
+          models_api PATCH "/v1/subscriptions/accounts/$id" '{"enabled":false}' || subscriptions_fail "disabling account '$id'"
         else
-          models_api DELETE "/v1/subscriptions/accounts/$id" || models_fail "removing account '$id'"
+          models_api DELETE "/v1/subscriptions/accounts/$id" || subscriptions_fail "removing account '$id'"
         fi
         printf '%s\n' "Account $id $verb'd."
       done <<<"$operands"
@@ -3498,7 +3526,7 @@ run_login_claude() {
   ')"
   external_account_id="${account_uuid}:${organization_uuid}"
   body="$(jq -nc --arg provider claude --arg account "$external_account_id" --arg token "$refresh_token" --arg label "$display_name" '{provider:$provider,external_account_id:$account,refresh_token:$token} | if $label != "" then .display_name = $label else . end')"
-  models_api POST "/v1/subscriptions/accounts" "$body" || models_fail "enrolling Claude subscription"
+  models_api POST "/v1/subscriptions/accounts" "$body" || subscriptions_fail "enrolling Claude subscription"
   ok "Claude subscription enrolled."
 }
 
@@ -3544,7 +3572,7 @@ run_login_codex() {
     exit 1
   fi
   body="$(jq -nc --arg provider codex --arg account "$account_id" --arg token "$refresh_token" --arg label "$display_name" '{provider:$provider,external_account_id:$account,refresh_token:$token} | if $label != "" then .display_name = $label else . end')"
-  models_api POST "/v1/subscriptions/accounts" "$body" || models_fail "enrolling Codex subscription"
+  models_api POST "/v1/subscriptions/accounts" "$body" || subscriptions_fail "enrolling Codex subscription"
   ok "Codex subscription enrolled."
 }
 

@@ -55,7 +55,10 @@ case "$url" in
     [ "$want_status" = "true" ] && printf '200'
     ;;
   */v1/subscriptions/accounts)
-    if [ -n "$data_file" ]; then
+    if [ -n "${FAKE_ACCOUNTS_STATUS:-}" ]; then
+      printf '%s' "${FAKE_ACCOUNTS_BODY:-}" >"$out"
+      [ "$want_status" = "true" ] && printf '%s' "$FAKE_ACCOUNTS_STATUS"
+    elif [ -n "$data_file" ]; then
       jq -e '.refresh_token | startswith("refresh-")' "$data_file" >/dev/null
       jq -c . "$data_file" >>"$FAKE_ENROLLMENTS"
       jq '{id:"opaque-1",provider,external_account_id,display_name,enabled:true}' "$data_file" >"$out"
@@ -148,5 +151,27 @@ while IFS=$'\t' read -r logged_url _ logged_agent; do
       ;;
   esac
 done <"$FAKE_CURL_LOG"
+
+# A router without server-side pools does not mount /v1/subscriptions; the
+# failure must say so, not point at the unrelated model-selection API.
+if pools_off="$(env "${common_env[@]}" FAKE_ACCOUNTS_STATUS=404 bash "$installer" login codex --base-url https://router.example.test --non-interactive --quiet 2>&1)"; then
+  echo 'login succeeded against a router without subscription pools' >&2
+  exit 1
+fi
+grep -Fq 'ROUTER_SUBSCRIPTION_POOLS_ENABLED' <<<"$pools_off"
+if grep -Fq '/admin/v1/models' <<<"$pools_off"; then
+  echo 'login 404 still blames the model-selection API' >&2
+  exit 1
+fi
+accounts_off="$(env "${common_env[@]}" FAKE_ACCOUNTS_STATUS=404 bash "$installer" accounts --base-url https://router.example.test --quiet 2>&1 || true)"
+grep -Fq 'ROUTER_SUBSCRIPTION_POOLS_ENABLED' <<<"$accounts_off"
+
+# A shared installation key cannot own subscriptions; say which key is needed.
+if shared_key="$(env "${common_env[@]}" FAKE_ACCOUNTS_STATUS=503 FAKE_ACCOUNTS_BODY='{"error":"subscription_owner_unavailable"}' bash "$installer" login codex --base-url https://router.example.test --non-interactive --quiet 2>&1)"; then
+  echo 'login succeeded with a shared installation key' >&2
+  exit 1
+fi
+grep -Fq 'personal router key' <<<"$shared_key"
+grep -Fq 'make personal-key' <<<"$shared_key"
 
 echo "Subscription CLI regression tests passed"

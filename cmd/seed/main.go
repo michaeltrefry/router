@@ -91,11 +91,13 @@ func main() {
 
 	// One active key per installation (migration 0007). Soft-delete any
 	// existing key so re-running `make seed` rotates the local-dev token
-	// instead of erroring on the partial unique index.
+	// instead of erroring on the partial unique index. Personal keys own
+	// subscription accounts and are rotated only by `make personal-key`.
 	if _, err := tx.Exec(ctx, `
 		UPDATE model_router_api_keys
 		SET deleted_at = CURRENT_TIMESTAMP
 		WHERE installation_id = @installation_id::uuid
+		  AND credential_subject_id IS NULL
 		  AND deleted_at IS NULL`,
 		pgx.NamedArgs{"installation_id": installationID},
 	); err != nil {
