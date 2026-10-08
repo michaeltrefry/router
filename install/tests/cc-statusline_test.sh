@@ -419,6 +419,7 @@ make_command_install() { # make_command_install <root> <cache_home> [scope_args]
   for name in "$script_dir/../commands"/*.md; do
     body="$(cat "$name")"
     rendered="${body//\{\{SCOPE\}\}/$scope_args}"
+    rendered="${rendered//\{\{ROUTER_CLI\}\}/npx @weave-os/router}"
     printf '%s\n' "$rendered" >"$root/.claude/commands/$(basename "$name")"
     printf 'weave-router managed command: %s\n%s\n' "$(basename "$name" .md)" "$rendered" \
       >"$root/.claude/commands/$(basename "$name").weave-router"

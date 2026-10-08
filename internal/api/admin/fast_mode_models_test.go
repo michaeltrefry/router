@@ -47,13 +47,19 @@ func (r *fastModeInstallationRepo) UpdateFastModeModels(_ context.Context, exter
 	r.externalID = externalID
 	return nil
 }
-func (*fastModeInstallationRepo) UpdateExcludedModels(context.Context, string, string, []string) error {
+func (*fastModeInstallationRepo) UpdateExcludedModels(context.Context, string, string, []string, []auth.RoutableModel) error {
+	return errFastModeRepoNotUsed
+}
+func (*fastModeInstallationRepo) EditSelectionItem(context.Context, string, string, auth.SelectionItemEdit) error {
 	return errFastModeRepoNotUsed
 }
 func (*fastModeInstallationRepo) UpdateAllowedModels(context.Context, string, string, []string) error {
 	return errFastModeRepoNotUsed
 }
-func (*fastModeInstallationRepo) UpdateExcludedProviders(context.Context, string, string, []string) error {
+func (*fastModeInstallationRepo) UpdateExcludedProviders(context.Context, string, string, []string, []auth.RoutableModel) error {
+	return errFastModeRepoNotUsed
+}
+func (*fastModeInstallationRepo) UpdatePreferredModels(context.Context, string, string, []string) error {
 	return errFastModeRepoNotUsed
 }
 func (*fastModeInstallationRepo) UpdateRoutingPreference(context.Context, string, string, *float64) error {

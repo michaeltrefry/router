@@ -13,7 +13,7 @@ the Weave Router using the managed configuration already on disk.
 Run exactly:
 
 ```bash
-npx --package @weave-os/router -y -- weave-router on --codex{{SCOPE}}
+{{ROUTER_CLI}} on --codex{{SCOPE}}
 ```
 
 Then report the result and tell the user the change takes effect on their next

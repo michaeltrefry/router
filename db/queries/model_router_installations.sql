@@ -36,14 +36,23 @@ WHERE id = @id::uuid
 
 -- Replaces the per-installation model exclusion list, scoped to an external_id
 -- to prevent cross-tenant updates. Empty array means "no exclusion". Bumps
--- updated_at so dashboards see the change.
+-- updated_at so dashboards see the change. With guard_routable, the write only
+-- lands when some universe model stays enabled with its provider not excluded,
+-- checked in the same statement so a concurrent provider edit cannot race it;
+-- 0 rows then means "would leave nothing routable" or "not found".
 -- name: UpdateModelRouterInstallationExcludedModels :execrows
 UPDATE router.model_router_installations
 SET excluded_models = @excluded_models::text[],
     updated_at = NOW()
 WHERE id = @id::uuid
   AND external_id = @external_id::varchar
-  AND deleted_at IS NULL;
+  AND deleted_at IS NULL
+  AND (NOT @guard_routable::boolean OR EXISTS (
+    SELECT 1 FROM unnest(@universe_models::text[]) WITH ORDINALITY AS um(model, i)
+    JOIN unnest(@universe_providers::text[]) WITH ORDINALITY AS up(provider, i) ON up.i = um.i
+    WHERE NOT (um.model = ANY(@excluded_models::text[]))
+      AND NOT (up.provider = ANY(excluded_providers))
+  ));
 
 -- Replaces the per-installation positive model allowlist, scoped to an
 -- external_id to prevent cross-tenant updates. Empty array means "no
@@ -60,13 +69,106 @@ WHERE id = @id::uuid
 -- Replaces the per-installation provider exclusion list, scoped to an
 -- external_id to prevent cross-tenant updates. Empty array means "no
 -- exclusion". Bumps updated_at so dashboards see the change.
+-- Same guard_routable contract as UpdateModelRouterInstallationExcludedModels.
 -- name: UpdateModelRouterInstallationExcludedProviders :execrows
 UPDATE router.model_router_installations
 SET excluded_providers = @excluded_providers::text[],
     updated_at = NOW()
 WHERE id = @id::uuid
   AND external_id = @external_id::varchar
+  AND deleted_at IS NULL
+  AND (NOT @guard_routable::boolean OR EXISTS (
+    SELECT 1 FROM unnest(@universe_models::text[]) WITH ORDINALITY AS um(model, i)
+    JOIN unnest(@universe_providers::text[]) WITH ORDINALITY AS up(provider, i) ON up.i = um.i
+    WHERE NOT (um.model = ANY(excluded_models))
+      AND NOT (up.provider = ANY(@excluded_providers::text[]))
+  ));
+
+-- Replaces the per-installation model priority ranking, scoped to an
+-- external_id to prevent cross-tenant updates. Empty array means no preference.
+-- Bumps updated_at so dashboards see the change.
+-- name: UpdateModelRouterInstallationPreferredModels :execrows
+UPDATE router.model_router_installations
+SET preferred_models = @preferred_models::text[],
+    updated_at = NOW()
+WHERE id = @id::uuid
+  AND external_id = @external_id::varchar
   AND deleted_at IS NULL;
+
+-- Per-item edits of the model-selection lists. Each is one conditional UPDATE,
+-- so concurrent edits of the same list cannot lose one another. Stored entries
+-- outside @keep (stale ids no longer selectable) are dropped in the same write.
+-- An add lands only when the item is absent and a remove only when it is
+-- present; 0 rows otherwise, when not found, or when an exclusion add fails the
+-- guard_routable check described on UpdateModelRouterInstallationExcludedModels.
+
+-- name: AddModelRouterInstallationExcludedModel :execrows
+UPDATE router.model_router_installations
+SET excluded_models = array_append(ARRAY(SELECT v FROM unnest(excluded_models) WITH ORDINALITY AS t(v, ord) WHERE v = ANY(@keep::text[]) ORDER BY ord), @item::text),
+    updated_at = NOW()
+WHERE id = @id::uuid
+  AND external_id = @external_id::varchar
+  AND deleted_at IS NULL
+  AND NOT (@item::text = ANY(excluded_models))
+  AND (NOT @guard_routable::boolean OR EXISTS (
+    SELECT 1 FROM unnest(@universe_models::text[]) WITH ORDINALITY AS um(model, i)
+    JOIN unnest(@universe_providers::text[]) WITH ORDINALITY AS up(provider, i) ON up.i = um.i
+    WHERE um.model <> @item::text
+      AND NOT (um.model = ANY(excluded_models))
+      AND NOT (up.provider = ANY(excluded_providers))
+  ));
+
+-- name: RemoveModelRouterInstallationExcludedModel :execrows
+UPDATE router.model_router_installations
+SET excluded_models = array_remove(ARRAY(SELECT v FROM unnest(excluded_models) WITH ORDINALITY AS t(v, ord) WHERE v = ANY(@keep::text[]) ORDER BY ord), @item::text),
+    updated_at = NOW()
+WHERE id = @id::uuid
+  AND external_id = @external_id::varchar
+  AND deleted_at IS NULL
+  AND @item::text = ANY(excluded_models);
+
+-- name: AddModelRouterInstallationExcludedProvider :execrows
+UPDATE router.model_router_installations
+SET excluded_providers = array_append(ARRAY(SELECT v FROM unnest(excluded_providers) WITH ORDINALITY AS t(v, ord) WHERE v = ANY(@keep::text[]) ORDER BY ord), @item::text),
+    updated_at = NOW()
+WHERE id = @id::uuid
+  AND external_id = @external_id::varchar
+  AND deleted_at IS NULL
+  AND NOT (@item::text = ANY(excluded_providers))
+  AND (NOT @guard_routable::boolean OR EXISTS (
+    SELECT 1 FROM unnest(@universe_models::text[]) WITH ORDINALITY AS um(model, i)
+    JOIN unnest(@universe_providers::text[]) WITH ORDINALITY AS up(provider, i) ON up.i = um.i
+    WHERE up.provider <> @item::text
+      AND NOT (um.model = ANY(excluded_models))
+      AND NOT (up.provider = ANY(excluded_providers))
+  ));
+
+-- name: RemoveModelRouterInstallationExcludedProvider :execrows
+UPDATE router.model_router_installations
+SET excluded_providers = array_remove(ARRAY(SELECT v FROM unnest(excluded_providers) WITH ORDINALITY AS t(v, ord) WHERE v = ANY(@keep::text[]) ORDER BY ord), @item::text),
+    updated_at = NOW()
+WHERE id = @id::uuid
+  AND external_id = @external_id::varchar
+  AND deleted_at IS NULL
+  AND @item::text = ANY(excluded_providers);
+
+-- name: AddModelRouterInstallationPreferredModel :execrows
+UPDATE router.model_router_installations
+SET preferred_models = array_append(ARRAY(SELECT v FROM unnest(preferred_models) WITH ORDINALITY AS t(v, ord) WHERE v = ANY(@keep::text[]) ORDER BY ord), @item::text),
+    updated_at = NOW()
+WHERE id = @id::uuid
+  AND external_id = @external_id::varchar
+  AND deleted_at IS NULL
+  AND NOT (@item::text = ANY(preferred_models));
+
+-- name: RemoveModelRouterInstallationPreferredModel :execrows
+UPDATE router.model_router_installations
+SET preferred_models = array_remove(ARRAY(SELECT v FROM unnest(preferred_models) WITH ORDINALITY AS t(v, ord) WHERE v = ANY(@keep::text[]) ORDER BY ord), @item::text),
+    updated_at = NOW()
+WHERE id = @id::uuid
+  AND external_id = @external_id::varchar
+  AND deleted_at IS NULL
+  AND @item::text = ANY(preferred_models);
 
 -- Sets the routing preference quality weight (a normalized fraction in [0, 1]),
 -- scoped to an external_id to prevent cross-tenant updates. NULL clears the

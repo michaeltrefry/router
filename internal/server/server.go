@@ -57,6 +57,9 @@ const (
 	// analyticsTimeout bounds an export page. Keyset scans on a high-volume
 	// telemetry table warrant a batch-job budget, not an interactive one.
 	analyticsTimeout = 60 * time.Second
+
+	// modelSelectionDashboardPath is the dashboard page that owns model-selection writes.
+	modelSelectionDashboardPath = "/ui/settings/models"
 )
 
 // DeploymentMode gates whether the self-hoster admin dashboard and its
@@ -317,12 +320,27 @@ func RegisterWithFeatures(engine *gin.Engine, authSvc *auth.Service, proxySvc *p
 		mgmt.GET("/fast-mode-models", admin.GetFastModeModelsHandler(authSvc))
 		mgmt.PUT("/fast-mode-models", admin.UpdateFastModeModelsHandler(authSvc))
 		if deployedModels != nil {
-			mgmt.GET("/excluded-models", admin.GetExcludedModelsHandler(authSvc, deployedModels, proxySvc))
-			mgmt.PUT("/excluded-models", admin.UpdateExcludedModelsHandler(authSvc, deployedModels, proxySvc))
 			mgmt.GET("/allowed-models", admin.GetAllowedModelsHandler(authSvc, deployedModels))
 			mgmt.PUT("/allowed-models", admin.UpdateAllowedModelsHandler(authSvc, deployedModels, proxySvc))
-			mgmt.GET("/excluded-providers", admin.GetExcludedProvidersHandler(authSvc, deployedModels, proxySvc))
-			mgmt.PUT("/excluded-providers", admin.UpdateExcludedProvidersHandler(authSvc, deployedModels, proxySvc))
+			// Model selection: an installation's router key may READ it (the
+			// installer's `models` listing), but every write is dashboard-only
+			// so a leaked key cannot rewrite routing config.
+			selectionRead := engine.Group("/admin/v1", middleware.WithTimeout(adminTimeout), middleware.WithAdminOrAuth(authSvc, byokRequiresOptIn))
+			selectionRead.GET("/models", admin.GetModelsHandler(authSvc, proxySvc, proxySvc))
+			selectionRead.GET("/excluded-models", admin.GetExcludedModelsHandler(authSvc, deployedModels, proxySvc))
+			selectionRead.GET("/preferred-models", admin.GetPreferredModelsHandler(authSvc))
+			selectionRead.GET("/providers", admin.GetProvidersHandler(authSvc, deployedModels, proxySvc, proxySvc))
+			selectionRead.GET("/excluded-providers", admin.GetExcludedProvidersHandler(authSvc, deployedModels, proxySvc, proxySvc))
+			selectionWrite := engine.Group("/admin/v1", middleware.WithTimeout(adminTimeout), middleware.WithDashboardOnly(authSvc, modelSelectionDashboardPath))
+			selectionWrite.PUT("/excluded-models", admin.UpdateExcludedModelsHandler(authSvc, deployedModels, proxySvc, proxySvc))
+			selectionWrite.POST("/excluded-models", admin.AddExcludedModelHandler(authSvc, deployedModels, proxySvc, proxySvc))
+			selectionWrite.POST("/excluded-models/remove", admin.RemoveExcludedModelHandler(authSvc, deployedModels, proxySvc, proxySvc))
+			selectionWrite.PUT("/preferred-models", admin.UpdatePreferredModelsHandler(authSvc, proxySvc))
+			selectionWrite.POST("/preferred-models", admin.AddPreferredModelHandler(authSvc, proxySvc))
+			selectionWrite.POST("/preferred-models/remove", admin.RemovePreferredModelHandler(authSvc, proxySvc))
+			selectionWrite.PUT("/excluded-providers", admin.UpdateExcludedProvidersHandler(authSvc, deployedModels, proxySvc, proxySvc))
+			selectionWrite.POST("/excluded-providers", admin.AddExcludedProviderHandler(authSvc, deployedModels, proxySvc, proxySvc))
+			selectionWrite.POST("/excluded-providers/remove", admin.RemoveExcludedProviderHandler(authSvc, deployedModels, proxySvc, proxySvc))
 		}
 	}
 

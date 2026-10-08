@@ -349,3 +349,73 @@ func TestShippedMapping_ClaudeSubscriptionOnlyServesRealScorerPicks(t *testing.T
 		})
 	}
 }
+
+// Preferring a mapping target wins a routed turn against the real scorer: the
+// target's mapping source is ranked, the scorer picks it where it otherwise
+// would not, and the turn is served on the preferred target.
+func TestShippedMapping_PreferredTargetWinsRealScorerTurn(t *testing.T) {
+	const preferred, source = "claude-opus-5-5", "claude-opus-5"
+	turnCtx := func(quality *float64, prefer bool) context.Context {
+		ctx := routerKeyedCtx()
+		if quality != nil {
+			ctx = qualityBias(ctx, *quality)
+		}
+		if prefer {
+			ctx = context.WithValue(ctx, proxy.InstallationPreferredModelsContextKey{}, []string{preferred})
+		}
+		return ctx
+	}
+	high, mid := 1.0, 0.5
+
+	var vec []float32
+	var quality *float64
+	for _, q := range []*float64{nil, &high, &mid} {
+		t.Run("probe", func(t *testing.T) {
+			probe := newShippedStack(t)
+			require.NoError(t, probe.svc.ProxyMessages(turnCtx(q, true), []byte(localMainLoopBody), httptest.NewRecorder(), claudeSubscriptionRequest()))
+			requests, _ := probe.spy.routed()
+			require.Len(t, requests, 1)
+			withPreference := requests[0]
+			require.Contains(t, withPreference.PreferredModels, source, "the preferred target ranks its mapping source")
+			without := withPreference
+			without.PreferredModels = nil
+			for k := range probe.bundle.Centroids.K {
+				probe.embedder.set(probe.bundle.Centroids.Row(k))
+				base, err := probe.spy.inner.Route(context.Background(), without)
+				require.NoError(t, err)
+				pref, err := probe.spy.inner.Route(context.Background(), withPreference)
+				require.NoError(t, err)
+				if base.Model != source && pref.Model == source {
+					vec, quality = probe.bundle.Centroids.Row(k), q
+					return
+				}
+			}
+		})
+		if vec != nil {
+			break
+		}
+	}
+	require.NotNil(t, vec, "some v0.75 centroid and dial picks %s only when it is preferred", source)
+
+	t.Run("without the preference the turn is served elsewhere", func(t *testing.T) {
+		stack := newShippedStack(t)
+		stack.embedder.set(vec)
+		require.NoError(t, stack.svc.ProxyMessages(turnCtx(quality, false), []byte(localMainLoopBody), httptest.NewRecorder(), claudeSubscriptionRequest()))
+		_, decisions := stack.spy.routed()
+		require.Len(t, decisions, 1)
+		assert.NotEqual(t, source, decisions[0].Model)
+		assert.NotEqual(t, []string{preferred}, stack.anthropic.served())
+	})
+
+	t.Run("with the preference the turn is served on the preferred target", func(t *testing.T) {
+		stack := newShippedStack(t)
+		stack.embedder.set(vec)
+		rec := httptest.NewRecorder()
+		require.NoError(t, stack.svc.ProxyMessages(turnCtx(quality, true), []byte(localMainLoopBody), rec, claudeSubscriptionRequest()))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		_, decisions := stack.spy.routed()
+		require.Len(t, decisions, 1)
+		assert.Equal(t, source, decisions[0].Model)
+		assert.Equal(t, []string{preferred}, stack.anthropic.served())
+	})
+}

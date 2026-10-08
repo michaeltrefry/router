@@ -34,6 +34,8 @@ PLACEHOLDER_KEY = "smoke-fixture-key-unused-outside-replay"
 LOCAL_MODELS_FIXTURE = "./smoke/fixtures/local-models.yaml"
 LOCAL_MODELS_PATH = "/smoke/local-models.yaml"
 LOCAL_MODEL_KEY = "smoke-local-model-fixture-key"
+# Synthetic dashboard password: model-selection writes are dashboard-only.
+ADMIN_PASSWORD = "smoke-admin-fixture-password"
 COMMAND_TIMEOUT_SECONDS = 120
 BUILD_TIMEOUT_SECONDS = 1200
 BOOT_TIMEOUT_SECONDS = 180
@@ -47,6 +49,7 @@ CLIENT_ENVIRONMENTS = (
     "SMOKE_ROUTER_KEY",
     "SMOKE_BASE_URL",
     "SMOKE_OPENAI_ENABLED",
+    "SMOKE_ADMIN_PASSWORD",
     *MODEL_OVERRIDE_ENVIRONMENTS,
 )
 SMOKE_DEPLOYMENT_MODE: Literal["selfhosted"] = "selfhosted"
@@ -259,6 +262,7 @@ class SmokeRun:
             ),
             "ROUTER_LOCAL_MODELS_FILE": LOCAL_MODELS_PATH,
             "SMOKE_LOCAL_MODEL_KEY": LOCAL_MODEL_KEY,
+            "ROUTER_ADMIN_PASSWORD": ADMIN_PASSWORD,
         }
         lines = ["services:"]
         for service in ComposeService:
@@ -392,6 +396,7 @@ class SmokeRun:
         test_environment = self.environment | {
             "SMOKE_ROUTER_KEY": match.group(),
             "SMOKE_BASE_URL": base_url,
+            "SMOKE_ADMIN_PASSWORD": ADMIN_PASSWORD,
             "SMOKE_OPENAI_ENABLED": (
                 "1"
                 if self.mode == ProxyMode.REPLAY or os.environ.get("OPENAI_API_KEY")

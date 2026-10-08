@@ -13,7 +13,7 @@ routes through the Weave Router.
 Run exactly:
 
 ```bash
-npx --package @weave-os/router -y -- weave-router status --codex{{SCOPE}}
+{{ROUTER_CLI}} status --codex{{SCOPE}}
 ```
 
 Then summarize the result in one line. Do not change any configuration.

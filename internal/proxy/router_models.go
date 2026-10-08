@@ -108,9 +108,9 @@ func routerModelsMessage(routable, excluded, automaticExcluded map[string]struct
 		}
 	}
 
-	// The mutating subcommands stay on the skill (they need admin auth the
-	// chat key deliberately lacks), so the footer has to name the real path
-	// rather than imply this directive can change anything.
+	// The mutating subcommands stay on the skill (they call the admin
+	// model-selection API), so the footer has to name the real path rather
+	// than imply this directive can change anything.
 	footer := fmt.Sprintf(
 		"\n%d of %d routable here. Change the selection with `%srouter-models enable <id>` or `%srouter-models disable <id>`.",
 		enabled, len(routable), prefix, prefix)

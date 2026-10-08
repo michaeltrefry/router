@@ -29,6 +29,9 @@ type Config struct {
 	BaseURL string
 	// RouterKey is the rk_... key the orchestrator seeded. Required.
 	RouterKey string
+	// AdminPassword is the router's dashboard password, which model-selection
+	// writes require.
+	AdminPassword string
 	// PinModel is forced via x-weave-force-model so decisions land on Anthropic
 	// deterministically and cheaply (default claude-haiku-4-5).
 	PinModel string
@@ -66,6 +69,7 @@ func TestMain(m *testing.M) {
 	cfg = Config{
 		BaseURL:        envOr("SMOKE_BASE_URL", "http://localhost:8080"),
 		RouterKey:      os.Getenv("SMOKE_ROUTER_KEY"),
+		AdminPassword:  os.Getenv("SMOKE_ADMIN_PASSWORD"),
 		PinModel:       envOr("SMOKE_PIN_MODEL", "claude-haiku-4-5"),
 		OpenAIPinModel: envOr("SMOKE_OPENAI_PIN_MODEL", "gpt-5.4-nano"),
 		OpenAIEnabled:  envOr("SMOKE_OPENAI_ENABLED", "1") != "0",

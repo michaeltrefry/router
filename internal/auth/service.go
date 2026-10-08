@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -22,6 +23,10 @@ var ErrUnknownModel = errors.New("auth: unknown model id")
 
 // ErrModelNotFastCapable is returned when a fast-mode opt-in names a model without a fast tier.
 var ErrModelNotFastCapable = errors.New("auth: model has no fast tier")
+
+// ErrNoRoutableModels is returned when an exclusion change would leave the
+// installation no enabled model on a non-excluded provider.
+var ErrNoRoutableModels = errors.New("auth: change would leave no routable model")
 
 // ErrUnknownProvider is returned when a requested provider name is not in the caller-supplied allowed set.
 var ErrUnknownProvider = errors.New("auth: unknown provider")
@@ -594,8 +599,10 @@ func (s *Service) DeleteExternalAPIKey(ctx context.Context, installationID, id s
 }
 
 // SetInstallationExcludedModels replaces the per-installation model exclusion list.
-// allowed is the set of valid model IDs; passing nil skips validation.
-func (s *Service) SetInstallationExcludedModels(ctx context.Context, externalID, installationID string, models []string, allowed map[string]struct{}) ([]string, error) {
+// allowed is the set of valid model IDs; passing nil skips validation. A
+// non-nil universe rejects, with ErrNoRoutableModels, a list that leaves no
+// universe model enabled on a non-excluded provider.
+func (s *Service) SetInstallationExcludedModels(ctx context.Context, externalID, installationID string, models []string, allowed map[string]struct{}, universe []RoutableModel) ([]string, error) {
 	if models == nil {
 		models = []string{}
 	}
@@ -616,7 +623,7 @@ func (s *Service) SetInstallationExcludedModels(ctx context.Context, externalID,
 		seen[m] = struct{}{}
 		out = append(out, m)
 	}
-	if err := s.installations.UpdateExcludedModels(ctx, externalID, installationID, out); err != nil {
+	if err := s.installations.UpdateExcludedModels(ctx, externalID, installationID, out, universe); err != nil {
 		return nil, err
 	}
 	s.invalidateInstallation(installationID)
@@ -687,7 +694,8 @@ func (s *Service) SetInstallationAllowedModels(ctx context.Context, externalID, 
 
 // SetInstallationExcludedProviders replaces the per-installation provider exclusion list.
 // allowed is the set of valid provider names; passing nil skips validation.
-func (s *Service) SetInstallationExcludedProviders(ctx context.Context, externalID, installationID string, providerNames []string, allowed map[string]struct{}) ([]string, error) {
+// universe has the SetInstallationExcludedModels contract.
+func (s *Service) SetInstallationExcludedProviders(ctx context.Context, externalID, installationID string, providerNames []string, allowed map[string]struct{}, universe []RoutableModel) ([]string, error) {
 	if providerNames == nil {
 		providerNames = []string{}
 	}
@@ -708,7 +716,66 @@ func (s *Service) SetInstallationExcludedProviders(ctx context.Context, external
 		seen[p] = struct{}{}
 		out = append(out, p)
 	}
-	if err := s.installations.UpdateExcludedProviders(ctx, externalID, installationID, out); err != nil {
+	if err := s.installations.UpdateExcludedProviders(ctx, externalID, installationID, out, universe); err != nil {
+		return nil, err
+	}
+	s.invalidateInstallation(installationID)
+	return out, nil
+}
+
+// EditInstallationSelection adds or removes one item of a selection list and
+// returns the list as stored. Only an added item is validated, against
+// edit.Keep; stored entries outside edit.Keep are dropped, not rejected.
+func (s *Service) EditInstallationSelection(ctx context.Context, externalID, installationID string, edit SelectionItemEdit) ([]string, error) {
+	if edit.Add && !slices.Contains(edit.Keep, edit.Item) {
+		if edit.List == SelectionExcludedProviders {
+			return nil, fmt.Errorf("%w: %q", ErrUnknownProvider, edit.Item)
+		}
+		return nil, fmt.Errorf("%w: %q", ErrUnknownModel, edit.Item)
+	}
+	if err := s.installations.EditSelectionItem(ctx, externalID, installationID, edit); err != nil {
+		return nil, err
+	}
+	s.invalidateInstallation(installationID)
+	installation, err := s.installations.Get(ctx, externalID, installationID)
+	if err != nil {
+		return nil, err
+	}
+	var stored []string
+	switch edit.List {
+	case SelectionExcludedModels:
+		stored = installation.ExcludedModels
+	case SelectionExcludedProviders:
+		stored = installation.ExcludedProviders
+	case SelectionPreferredModels:
+		stored = installation.PreferredModels
+	}
+	return append([]string{}, stored...), nil
+}
+
+// SetInstallationPreferredModels replaces the per-installation model priority
+// ranking. allowed is the set of valid model IDs; passing nil skips validation.
+func (s *Service) SetInstallationPreferredModels(ctx context.Context, externalID, installationID string, models []string, allowed map[string]struct{}) ([]string, error) {
+	if models == nil {
+		models = []string{}
+	}
+	if allowed != nil {
+		for _, m := range models {
+			if _, ok := allowed[m]; !ok {
+				return nil, fmt.Errorf("%w: %q", ErrUnknownModel, m)
+			}
+		}
+	}
+	seen := make(map[string]struct{}, len(models))
+	out := make([]string, 0, len(models))
+	for _, m := range models {
+		if _, dup := seen[m]; dup {
+			continue
+		}
+		seen[m] = struct{}{}
+		out = append(out, m)
+	}
+	if err := s.installations.UpdatePreferredModels(ctx, externalID, installationID, out); err != nil {
 		return nil, err
 	}
 	s.invalidateInstallation(installationID)
