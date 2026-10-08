@@ -157,12 +157,17 @@ func TestVerificationSelfHostedPersonalKeyEnrollsAndServesBothSubscriptions(t *t
 	engine.GET("/validate", middleware.WithAuth(authService, false), admin.ValidateHandler)
 	v1 := engine.Group("/v1", middleware.WithAuth(authService, false))
 	subscriptionsapi.Register(v1, authService)
-	var proxyErrors []error
-	var winners []*proxy.ManagedSubscriptionUsage
+	type handled struct {
+		err    error
+		winner *proxy.ManagedSubscriptionUsage
+	}
+	// The client can finish reading the body before the handler returns, so
+	// results are handed over on a channel rather than read from shared state.
+	results := make(chan handled, 2)
 	engine.POST("/v1/messages", middleware.WithAuth(authService, false), func(c *gin.Context) {
 		body, _ := io.ReadAll(c.Request.Body)
-		proxyErrors = append(proxyErrors, proxyService.ProxyMessages(c.Request.Context(), body, c.Writer, c.Request))
-		winners = append(winners, c.Request.Context().Value(proxy.ManagedSubscriptionUsageContextKey{}).(*proxy.ManagedSubscriptionUsage))
+		err := proxyService.ProxyMessages(c.Request.Context(), body, c.Writer, c.Request)
+		results <- handled{err: err, winner: c.Request.Context().Value(proxy.ManagedSubscriptionUsageContextKey{}).(*proxy.ManagedSubscriptionUsage)}
 	})
 	server := httptest.NewServer(engine)
 	defer server.Close()
@@ -201,20 +206,22 @@ func TestVerificationSelfHostedPersonalKeyEnrollsAndServesBothSubscriptions(t *t
 	turn := map[string]any{"model": "auto", "max_tokens": 256, "messages": []map[string]any{{"role": "user", "content": "synthetic worker turn"}}}
 	routes.set(router.Decision{Provider: providers.ProviderAnthropic, Model: "claude-sonnet-4-6", Reason: "test"})
 	status, body = call(http.MethodPost, "/v1/messages", issued.RawToken, turn)
-	require.NoError(t, proxyErrors[len(proxyErrors)-1])
+	result := <-results
+	require.NoError(t, result.err)
 	require.Equal(t, http.StatusOK, status, body)
 	require.Contains(t, body, "claude subscription answer")
 	require.Equal(t, []string{"Bearer synthetic-claude-access|"}, anthropicBearers, "the Claude pick is served on the enrolled Claude subscription, not the API key")
-	require.True(t, winners[len(winners)-1].Served)
-	require.Equal(t, auth.SubscriptionTierPersonal, winners[len(winners)-1].SubscriptionTier)
+	require.True(t, result.winner.Served)
+	require.Equal(t, auth.SubscriptionTierPersonal, result.winner.SubscriptionTier)
 
 	routes.set(router.Decision{Provider: providers.ProviderOpenAI, Model: "gpt-5.6-sol", Reason: "test"})
 	status, body = call(http.MethodPost, "/v1/messages", issued.RawToken, turn)
-	require.NoError(t, proxyErrors[len(proxyErrors)-1])
+	result = <-results
+	require.NoError(t, result.err)
 	require.Equal(t, http.StatusOK, status, body)
 	require.Contains(t, body, "codex subscription answer")
 	require.Equal(t, []string{"Bearer synthetic-codex-access"}, openAIBearers, "a GPT pick for a Claude Code turn is served on the enrolled ChatGPT subscription")
-	require.True(t, winners[len(winners)-1].Served)
+	require.True(t, result.winner.Served)
 
 	rotated, err := authService.IssueSelfHostedPersonalKey(ctx, auth.IssuePersonalKeyParams{Email: email, Rotate: true})
 	require.NoError(t, err)
