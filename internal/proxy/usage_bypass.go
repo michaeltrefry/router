@@ -592,7 +592,6 @@ func (s *Service) bypassToAnthropic(
 	}
 
 	log.Info("ProxyMessages usage-bypass complete",
-		"request_id", requestID,
 		"external_id", externalID,
 		"requested_model", feats.Model,
 		"decision_model", decision.Model,
