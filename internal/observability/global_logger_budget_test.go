@@ -174,7 +174,9 @@ var postBindPrefixes = []string{
 }
 
 // TestNoReservedLogKeyShadowing fails when a log call passes a key already
-// bound to that logger, which would overwrite the bound value.
+// bound to that logger, which would overwrite the bound value. It matches
+// literal keys on Debug/Info/Warn/Error(+Context) calls only; .With, LogAttrs
+// and slog.Attr forms are not checked.
 func TestNoReservedLogKeyShadowing(t *testing.T) {
 	root := repoRoot(t)
 

@@ -3407,6 +3407,7 @@ func (s *Service) repinOffRefusingModel(ctx context.Context, sessionKey [session
 		return
 	}
 	log.Info("safety refusal — re-pinned session off refusing model",
+		"pin_session_key", shortSessionKey(sessionKey),
 		"refusal_category", category,
 		"from_model", served.Model,
 		"to_model", fbModel,
