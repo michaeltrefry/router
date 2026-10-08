@@ -6240,7 +6240,8 @@ func (s *Service) requestUsesNonDeploymentCreds(ctx context.Context, headers htt
 }
 
 // enabledProvidersForRequest returns providers with resolvable credentials
-// for this request (deployment key, BYOK, or client-supplied header).
+// for this request (deployment key, BYOK, client-supplied header, or an
+// enrolled server-side subscription pool).
 // surfaceProvider is the inbound wire-format's natural provider. A
 // client-supplied bearer header is treated as creds for that surface only —
 // never a licence to enable other OpenAI-compat upstreams sharing the same
@@ -6302,6 +6303,18 @@ func (s *Service) enabledProvidersForRequest(ctx context.Context, surfaceProvide
 	}
 	if codexSubscriptionFromContext(ctx) != nil {
 		out[providers.ProviderOpenAI] = struct{}{}
+	}
+	// A router key enrolled in a server-side subscription pool serves through
+	// the leased account, so the pool enrolls its lane even with no key at all.
+	// Gemini ingress dispatches only to Google, so a pool lane there could only
+	// steer the turn onto an unsupported cross-format pick.
+	if surfaceProvider != providers.ProviderGoogle {
+		if managedSubscriptionEnrolled(ctx, subscriptions.ProviderClaude) {
+			out[providers.ProviderAnthropic] = struct{}{}
+		}
+		if managedSubscriptionEnrolled(ctx, subscriptions.ProviderCodex) {
+			out[providers.ProviderOpenAI] = struct{}{}
+		}
 	}
 	// Client-supplied headers are only consulted when NOT authed via a
 	// router key. A router-key-authed request carrying an inbound bearer

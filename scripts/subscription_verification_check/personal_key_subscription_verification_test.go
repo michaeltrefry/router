@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,7 @@ import (
 	"weave-os/router/internal/providers/openai"
 	"weave-os/router/internal/proxy"
 	"weave-os/router/internal/router"
+	"weave-os/router/internal/router/cluster"
 	"weave-os/router/internal/server/middleware"
 	"weave-os/router/internal/subscriptions"
 )
@@ -43,16 +45,22 @@ func (r *switchableRouter) set(decision router.Decision) {
 	r.decision = decision
 }
 
-func (r *switchableRouter) Route(context.Context, router.Request) (router.Decision, error) {
+// Route refuses a decision whose provider the request did not enable, as the
+// cluster scorer does.
+func (r *switchableRouter) Route(_ context.Context, req router.Request) (router.Decision, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, enabled := req.EnabledProviders[r.decision.Provider]; !enabled {
+		return router.Decision{}, fmt.Errorf("provider %s not enabled for request: %w", r.decision.Provider, cluster.ErrNoEligibleProvider)
+	}
 	return r.decision, nil
 }
 
 // A self-hosted personal key, issued the way `make personal-key` issues it,
 // enrolls both subscriptions over the installer's API and then serves a Claude
 // pick and a GPT pick from a Claude Code-style /v1/messages turn on those
-// subscriptions, with no client OAuth credential on the request.
+// subscriptions, with no client OAuth credential on the request and no vendor
+// API key on the deployment.
 func TestVerificationSelfHostedPersonalKeyEnrollsAndServesBothSubscriptions(t *testing.T) {
 	dsn := os.Getenv("ROUTER_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -150,7 +158,7 @@ func TestVerificationSelfHostedPersonalKeyEnrollsAndServesBothSubscriptions(t *t
 		providers.ProviderOpenAI:    openAIClient,
 	}, nil, false, nil, nil, false, providers.ProviderAnthropic, "claude-sonnet-4-6", nil).
 		WithManagedSubscriptions(runtime).
-		WithDeploymentKeyedProviders(map[string]struct{}{providers.ProviderAnthropic: {}, providers.ProviderOpenAI: {}})
+		WithDeploymentKeyedProviders(map[string]struct{}{})
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
@@ -214,7 +222,7 @@ func TestVerificationSelfHostedPersonalKeyEnrollsAndServesBothSubscriptions(t *t
 	require.True(t, result.winner.Served)
 	require.Equal(t, auth.SubscriptionTierPersonal, result.winner.SubscriptionTier)
 
-	routes.set(router.Decision{Provider: providers.ProviderOpenAI, Model: "gpt-5.6-sol", Reason: "test"})
+	routes.set(router.Decision{Provider: providers.ProviderOpenAI, Model: "gpt-6.1-sol", Reason: "test"})
 	status, body = call(http.MethodPost, "/v1/messages", issued.RawToken, turn)
 	result = <-results
 	require.NoError(t, result.err)
@@ -222,6 +230,13 @@ func TestVerificationSelfHostedPersonalKeyEnrollsAndServesBothSubscriptions(t *t
 	require.Contains(t, body, "codex subscription answer")
 	require.Equal(t, []string{"Bearer synthetic-codex-access"}, openAIBearers, "a GPT pick for a Claude Code turn is served on the enrolled ChatGPT subscription")
 	require.True(t, result.winner.Served)
+
+	_, _ = call(http.MethodPost, "/v1/messages", sharedToken, turn)
+	result = <-results
+	require.ErrorIs(t, result.err, cluster.ErrNoEligibleProvider, "a shared key enrolls no pool, so a keyless deployment still has no vendor for it")
+	require.False(t, result.winner.Served)
+	require.Len(t, openAIBearers, 1)
+	require.Len(t, anthropicBearers, 1)
 
 	rotated, err := authService.IssueSelfHostedPersonalKey(ctx, auth.IssuePersonalKeyParams{Email: email, Rotate: true})
 	require.NoError(t, err)

@@ -398,3 +398,61 @@ func TestEnabledProvidersForRequest_LocalModelKeepsSubscriptionEnrollment(t *tes
 	assert.Contains(t, got, providers.ProviderAnthropic, "the subscription bearer must still enroll Anthropic")
 	assert.Contains(t, got, local, "the local model stays available alongside it")
 }
+
+// A router key enrolled in a server-side subscription pool enrolls that pool's
+// provider on a deployment with no vendor key, so the scorer can pick it.
+func TestEnabledProvidersForRequest_ManagedPoolEnrollsItsProvider(t *testing.T) {
+	local := providers.LocalProviderName("test-local")
+	s := &Service{
+		clients: dispatch.NewClients(map[string]providers.Client{
+			providers.ProviderAnthropic: nil,
+			providers.ProviderOpenAI:    nil,
+			local:                       nil,
+		}),
+		deploymentKeyedProviders:     map[string]struct{}{local: {}},
+		passthroughEligibleProviders: map[string]struct{}{providers.ProviderAnthropic: {}, providers.ProviderOpenAI: {}},
+	}
+	routerKeyed := func(pools ...auth.SubscriptionProvider) context.Context {
+		ctx := context.WithValue(context.Background(), InstallationIDContextKey{}, testInstallationID)
+		if len(pools) == 0 {
+			return ctx
+		}
+		enrolled := map[auth.SubscriptionProvider]struct{}{}
+		for _, p := range pools {
+			enrolled[p] = struct{}{}
+		}
+		return context.WithValue(ctx, ManagedSubscriptionProvidersContextKey{}, enrolled)
+	}
+
+	t.Run("Claude pool enrolls Anthropic only", func(t *testing.T) {
+		got := s.enabledProvidersForRequest(routerKeyed(auth.SubscriptionProviderClaude), providers.ProviderAnthropic, http.Header{})
+		assert.Equal(t, map[string]struct{}{local: {}, providers.ProviderAnthropic: {}}, got)
+	})
+
+	t.Run("Codex pool enrolls OpenAI only", func(t *testing.T) {
+		got := s.enabledProvidersForRequest(routerKeyed(auth.SubscriptionProviderCodex), providers.ProviderAnthropic, http.Header{})
+		assert.Equal(t, map[string]struct{}{local: {}, providers.ProviderOpenAI: {}}, got)
+	})
+
+	t.Run("a key without enrollment is unchanged", func(t *testing.T) {
+		got := s.enabledProvidersForRequest(routerKeyed(), providers.ProviderAnthropic, http.Header{})
+		assert.Equal(t, map[string]struct{}{local: {}}, got)
+	})
+
+	t.Run("subscription routing disabled ignores the pool", func(t *testing.T) {
+		ctx := context.WithValue(routerKeyed(auth.SubscriptionProviderClaude), InstallationSubscriptionRoutingDisabledContextKey{}, true)
+		got := s.enabledProvidersForRequest(ctx, providers.ProviderAnthropic, http.Header{})
+		assert.Equal(t, map[string]struct{}{local: {}}, got)
+	})
+
+	t.Run("an excluded provider trumps the pool", func(t *testing.T) {
+		ctx := context.WithValue(routerKeyed(auth.SubscriptionProviderClaude), InstallationExcludedProvidersContextKey{}, []string{providers.ProviderAnthropic})
+		got := s.enabledProvidersForRequest(ctx, providers.ProviderAnthropic, http.Header{})
+		assert.Equal(t, map[string]struct{}{local: {}}, got)
+	})
+
+	t.Run("Gemini ingress does not enroll a pool it cannot dispatch to", func(t *testing.T) {
+		got := s.enabledProvidersForRequest(routerKeyed(auth.SubscriptionProviderClaude, auth.SubscriptionProviderCodex), providers.ProviderGoogle, http.Header{})
+		assert.Equal(t, map[string]struct{}{local: {}}, got)
+	})
+}
