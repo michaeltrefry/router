@@ -3426,7 +3426,9 @@ open_return_url_if_verified() {
 
 open_oauth_url() {
   local url="$1"
-  if command -v open >/dev/null 2>&1; then
+  if [ "$non_interactive" = "true" ]; then
+    :
+  elif command -v open >/dev/null 2>&1; then
     open "$url" >/dev/null 2>&1 || true
   elif command -v xdg-open >/dev/null 2>&1; then
     xdg-open "$url" >/dev/null 2>&1 || true
@@ -3495,11 +3497,11 @@ run_login_claude() {
   expected_state="$(openssl rand 32 | oauth_base64url)"
   authorize_endpoint="${WEAVE_ANTHROPIC_OAUTH_AUTHORIZE:-https://claude.ai/oauth/authorize}"
   authorize_url="$authorize_endpoint?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=$(jq -nr '"https://console.anthropic.com/oauth/code/callback"|@uri')&scope=$(jq -nr '"org:create_api_key user:profile user:inference"|@uri')&code_challenge=$challenge&code_challenge_method=S256&state=$expected_state"
-  open_oauth_url "$authorize_url"
   if [ "$non_interactive" = "true" ] || [ ! -r /dev/tty ]; then
     err "Claude login requires an interactive terminal to paste the authorization code."
     exit 1
   fi
+  open_oauth_url "$authorize_url"
   printf 'Paste the Claude authorization code: ' >/dev/tty
   read -r pasted_code </dev/tty
   auth_code="${pasted_code%%#*}"

@@ -919,8 +919,10 @@ cache expires) and keeps the subject, so enrolled accounts stay attached.
 Then enroll the subscriptions with that key:
 
 ```bash
-WEAVE_ROUTER_KEY=rk_... ./install/install.sh login claude --local
-WEAVE_ROUTER_KEY=rk_... ./install/install.sh login codex --local
+read -rs WEAVE_ROUTER_KEY && export WEAVE_ROUTER_KEY   # paste the key; keeps it out of shell history
+curl -i -H "X-Weave-Router-Key: $WEAVE_ROUTER_KEY" http://localhost:8080/validate
+./install/install.sh login claude --local
+./install/install.sh login codex --local
 ```
 
 Route clients with the same personal key. A router without

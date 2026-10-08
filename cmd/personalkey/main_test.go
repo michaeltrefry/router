@@ -46,6 +46,7 @@ func TestRunPrintsRawKeyOnceToStdout(t *testing.T) {
 	require.Equal(t, 0, code, stderr)
 	assert.Equal(t, []auth.IssuePersonalKeyParams{{Email: "operator@example.test"}}, fake.params)
 	assert.Contains(t, stdout, "Personal router key (shown once")
+	assert.Equal(t, 1, strings.Count(stdout, "rk_synthetic_personal_token"))
 	assert.Contains(t, stdout, "login claude --local")
 	assert.Contains(t, stdout, "login codex --local")
 	assert.NotContains(t, stderr, "rk_synthetic_personal_token")

@@ -108,7 +108,7 @@ seed: ## Create a local dev installation + API key and print usage instructions
 
 personal-key: ## Issue a personal router key for subscription sign-in (usage: make personal-key EMAIL=you@example.com [ROTATE=1])
 	@if [ -z "$(EMAIL)" ]; then echo "Usage: make personal-key EMAIL=you@example.com [ROTATE=1]"; exit 2; fi
-	go run ./cmd/personalkey -email "$(EMAIL)" $(if $(ROTATE),-rotate)
+	go run ./cmd/personalkey -email "$(EMAIL)" $(if $(filter 1 true yes,$(ROTATE)),-rotate)
 
 setup: migrate-up seed ## Bootstrap (host DB): init DB, run migrations, seed an API key
 

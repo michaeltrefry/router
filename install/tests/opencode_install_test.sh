@@ -24,6 +24,12 @@ fi
 exit 0
 FAKE_OPENCODE
 chmod +x "$fake_bin/opencode"
+browser_log="$work/browser.log"
+: >"$browser_log"
+for opener in open xdg-open; do
+  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' \"\$*\" >>\"$browser_log\"" >"$fake_bin/$opener"
+  chmod +x "$fake_bin/$opener"
+done
 test_path="$fake_bin:$PATH"
 
 fail() {
@@ -127,6 +133,10 @@ printf '%s\n' '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:9/"}}' >"$claude_s
 login_output="$(HOME="$home" XDG_CONFIG_HOME="$home/xdg" PATH="$test_path" NO_COLOR=1 \
   bash "$installer" login claude --dir "$install_dir" --non-interactive --quiet 2>&1 || true)"
 grep -Fq "Claude login requires an interactive terminal" <<<"$login_output" || fail "managed login did not reuse the OpenCode key for the matching Claude endpoint"
+if grep -Fq "oauth/authorize" <<<"$login_output"; then
+  fail "non-interactive Claude login offered an authorize URL it can never complete"
+fi
+[ ! -s "$browser_log" ] || fail "non-interactive Claude login launched a browser: $(cat "$browser_log")"
 rm -rf "$claude_settings_dir"
 [ "$(jq -r '.model' "$config")" = "weave/auto" ] || fail "install did not activate weave/auto"
 [ "$(jq -r '.direct_model' "$parked")" = "anthropic/claude-sonnet-4-5" ] || fail "install did not park the previous model"

@@ -91,10 +91,13 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		fmt.Fprintln(stdout, "The replaced key is revoked; a running router may accept it until its auth cache expires (up to 5 minutes).")
 		fmt.Fprintln(stdout)
 	}
-	fmt.Fprintf(stdout, "Check it:\n  curl -i -H 'X-Weave-Router-Key: %s' %s/validate\n\n", issued.RawToken, baseURL)
+	fmt.Fprintln(stdout, "Export it without putting it in shell history (run this, paste the key above, press Enter):")
+	fmt.Fprintln(stdout, "  read -rs WEAVE_ROUTER_KEY && export WEAVE_ROUTER_KEY")
+	fmt.Fprintln(stdout)
+	fmt.Fprintf(stdout, "Check it:\n  curl -i -H \"X-Weave-Router-Key: $WEAVE_ROUTER_KEY\" %s/validate\n\n", baseURL)
 	fmt.Fprintln(stdout, "Enroll subscriptions (router needs ROUTER_SUBSCRIPTION_POOLS_ENABLED=true and EXTERNAL_KEY_ENCRYPTION_KEY):")
-	fmt.Fprintf(stdout, "  WEAVE_ROUTER_KEY=%s ./install/install.sh login claude --local\n", issued.RawToken)
-	fmt.Fprintf(stdout, "  WEAVE_ROUTER_KEY=%s ./install/install.sh login codex --local\n", issued.RawToken)
+	fmt.Fprintln(stdout, "  ./install/install.sh login claude --local")
+	fmt.Fprintln(stdout, "  ./install/install.sh login codex --local")
 	return 0
 }
 

@@ -72,12 +72,20 @@ case "$url" in
 esac
 FAKE_CURL
 chmod +x "$work/bin/curl"
-printf '#!/usr/bin/env bash\nexit 0\n' >"$work/bin/open"
-chmod +x "$work/bin/open"
+browser_log="$work/browser.log"
+: >"$browser_log"
+for opener in open xdg-open; do
+  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' \"\$*\" >>\"$browser_log\"" >"$work/bin/$opener"
+  chmod +x "$work/bin/$opener"
+done
 
 common_env=(HOME="$work/home" PATH="$work/bin:$PATH" WEAVE_ROUTER_KEY="rk_test_secret" NO_COLOR=1)
 env "${common_env[@]}" bash "$installer" login codex --base-url https://router.example.test --non-interactive --quiet \
   | grep -Fq 'Codex subscription enrolled.'
+if [ -s "$browser_log" ]; then
+  echo "non-interactive login launched a browser: $(cat "$browser_log")" >&2
+  exit 1
+fi
 
 # Login is interactive for OAuth, but it does not install a client config and
 # therefore must not ask the unrelated user-vs-project scope question. Run it
@@ -126,6 +134,7 @@ if b"Codex subscription enrolled." not in output:
 if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
     raise SystemExit("interactive login failed")
 PY
+grep -Fq '/codex/device' "$browser_log" || { echo 'interactive login did not open the device URL' >&2; exit 1; }
 
 env "${common_env[@]}" python3 "$script_dir/claude_login_test.py" "$installer"
 
