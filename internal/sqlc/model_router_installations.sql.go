@@ -11,6 +11,169 @@ import (
 	"github.com/google/uuid"
 )
 
+const addModelRouterInstallationExcludedModel = `-- name: AddModelRouterInstallationExcludedModel :execrows
+
+UPDATE router.model_router_installations
+SET excluded_models = array_append(ARRAY(SELECT v FROM unnest(excluded_models) WITH ORDINALITY AS t(v, ord) WHERE v = ANY($1::text[]) ORDER BY ord), $2::text),
+    updated_at = NOW()
+WHERE id = $3::uuid
+  AND external_id = $4::varchar
+  AND deleted_at IS NULL
+  AND NOT ($2::text = ANY(excluded_models))
+  AND (NOT $5::boolean OR EXISTS (
+    SELECT 1 FROM unnest($6::text[]) WITH ORDINALITY AS um(model, i)
+    JOIN unnest($7::text[]) WITH ORDINALITY AS up(provider, i) ON up.i = um.i
+    WHERE um.model <> $2::text
+      AND NOT (um.model = ANY(excluded_models))
+      AND NOT (up.provider = ANY(excluded_providers))
+  ))
+`
+
+type AddModelRouterInstallationExcludedModelParams struct {
+	Keep              []string
+	Item              string
+	ID                uuid.UUID
+	ExternalID        string
+	GuardRoutable     bool
+	UniverseModels    []string
+	UniverseProviders []string
+}
+
+// Per-item edits of the model-selection lists. Each is one conditional UPDATE,
+// so concurrent edits of the same list cannot lose one another. Stored entries
+// outside @keep (stale ids no longer selectable) are dropped in the same write.
+// An add lands only when the item is absent and a remove only when it is
+// present; 0 rows otherwise, when not found, or when an exclusion add fails the
+// guard_routable check described on UpdateModelRouterInstallationExcludedModels.
+//
+//	UPDATE router.model_router_installations
+//	SET excluded_models = array_append(ARRAY(SELECT v FROM unnest(excluded_models) WITH ORDINALITY AS t(v, ord) WHERE v = ANY($1::text[]) ORDER BY ord), $2::text),
+//	    updated_at = NOW()
+//	WHERE id = $3::uuid
+//	  AND external_id = $4::varchar
+//	  AND deleted_at IS NULL
+//	  AND NOT ($2::text = ANY(excluded_models))
+//	  AND (NOT $5::boolean OR EXISTS (
+//	    SELECT 1 FROM unnest($6::text[]) WITH ORDINALITY AS um(model, i)
+//	    JOIN unnest($7::text[]) WITH ORDINALITY AS up(provider, i) ON up.i = um.i
+//	    WHERE um.model <> $2::text
+//	      AND NOT (um.model = ANY(excluded_models))
+//	      AND NOT (up.provider = ANY(excluded_providers))
+//	  ))
+func (q *Queries) AddModelRouterInstallationExcludedModel(ctx context.Context, arg AddModelRouterInstallationExcludedModelParams) (int64, error) {
+	result, err := q.db.Exec(ctx, addModelRouterInstallationExcludedModel,
+		arg.Keep,
+		arg.Item,
+		arg.ID,
+		arg.ExternalID,
+		arg.GuardRoutable,
+		arg.UniverseModels,
+		arg.UniverseProviders,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const addModelRouterInstallationExcludedProvider = `-- name: AddModelRouterInstallationExcludedProvider :execrows
+UPDATE router.model_router_installations
+SET excluded_providers = array_append(ARRAY(SELECT v FROM unnest(excluded_providers) WITH ORDINALITY AS t(v, ord) WHERE v = ANY($1::text[]) ORDER BY ord), $2::text),
+    updated_at = NOW()
+WHERE id = $3::uuid
+  AND external_id = $4::varchar
+  AND deleted_at IS NULL
+  AND NOT ($2::text = ANY(excluded_providers))
+  AND (NOT $5::boolean OR EXISTS (
+    SELECT 1 FROM unnest($6::text[]) WITH ORDINALITY AS um(model, i)
+    JOIN unnest($7::text[]) WITH ORDINALITY AS up(provider, i) ON up.i = um.i
+    WHERE up.provider <> $2::text
+      AND NOT (um.model = ANY(excluded_models))
+      AND NOT (up.provider = ANY(excluded_providers))
+  ))
+`
+
+type AddModelRouterInstallationExcludedProviderParams struct {
+	Keep              []string
+	Item              string
+	ID                uuid.UUID
+	ExternalID        string
+	GuardRoutable     bool
+	UniverseModels    []string
+	UniverseProviders []string
+}
+
+// AddModelRouterInstallationExcludedProvider
+//
+//	UPDATE router.model_router_installations
+//	SET excluded_providers = array_append(ARRAY(SELECT v FROM unnest(excluded_providers) WITH ORDINALITY AS t(v, ord) WHERE v = ANY($1::text[]) ORDER BY ord), $2::text),
+//	    updated_at = NOW()
+//	WHERE id = $3::uuid
+//	  AND external_id = $4::varchar
+//	  AND deleted_at IS NULL
+//	  AND NOT ($2::text = ANY(excluded_providers))
+//	  AND (NOT $5::boolean OR EXISTS (
+//	    SELECT 1 FROM unnest($6::text[]) WITH ORDINALITY AS um(model, i)
+//	    JOIN unnest($7::text[]) WITH ORDINALITY AS up(provider, i) ON up.i = um.i
+//	    WHERE up.provider <> $2::text
+//	      AND NOT (um.model = ANY(excluded_models))
+//	      AND NOT (up.provider = ANY(excluded_providers))
+//	  ))
+func (q *Queries) AddModelRouterInstallationExcludedProvider(ctx context.Context, arg AddModelRouterInstallationExcludedProviderParams) (int64, error) {
+	result, err := q.db.Exec(ctx, addModelRouterInstallationExcludedProvider,
+		arg.Keep,
+		arg.Item,
+		arg.ID,
+		arg.ExternalID,
+		arg.GuardRoutable,
+		arg.UniverseModels,
+		arg.UniverseProviders,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const addModelRouterInstallationPreferredModel = `-- name: AddModelRouterInstallationPreferredModel :execrows
+UPDATE router.model_router_installations
+SET preferred_models = array_append(ARRAY(SELECT v FROM unnest(preferred_models) WITH ORDINALITY AS t(v, ord) WHERE v = ANY($1::text[]) ORDER BY ord), $2::text),
+    updated_at = NOW()
+WHERE id = $3::uuid
+  AND external_id = $4::varchar
+  AND deleted_at IS NULL
+  AND NOT ($2::text = ANY(preferred_models))
+`
+
+type AddModelRouterInstallationPreferredModelParams struct {
+	Keep       []string
+	Item       string
+	ID         uuid.UUID
+	ExternalID string
+}
+
+// AddModelRouterInstallationPreferredModel
+//
+//	UPDATE router.model_router_installations
+//	SET preferred_models = array_append(ARRAY(SELECT v FROM unnest(preferred_models) WITH ORDINALITY AS t(v, ord) WHERE v = ANY($1::text[]) ORDER BY ord), $2::text),
+//	    updated_at = NOW()
+//	WHERE id = $3::uuid
+//	  AND external_id = $4::varchar
+//	  AND deleted_at IS NULL
+//	  AND NOT ($2::text = ANY(preferred_models))
+func (q *Queries) AddModelRouterInstallationPreferredModel(ctx context.Context, arg AddModelRouterInstallationPreferredModelParams) (int64, error) {
+	result, err := q.db.Exec(ctx, addModelRouterInstallationPreferredModel,
+		arg.Keep,
+		arg.Item,
+		arg.ID,
+		arg.ExternalID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const createModelRouterInstallation = `-- name: CreateModelRouterInstallation :one
 INSERT INTO router.model_router_installations (
     external_id,
@@ -246,6 +409,123 @@ func (q *Queries) MarkModelRouterInstallationFirstRequestServed(ctx context.Cont
 	return err
 }
 
+const removeModelRouterInstallationExcludedModel = `-- name: RemoveModelRouterInstallationExcludedModel :execrows
+UPDATE router.model_router_installations
+SET excluded_models = array_remove(ARRAY(SELECT v FROM unnest(excluded_models) WITH ORDINALITY AS t(v, ord) WHERE v = ANY($1::text[]) ORDER BY ord), $2::text),
+    updated_at = NOW()
+WHERE id = $3::uuid
+  AND external_id = $4::varchar
+  AND deleted_at IS NULL
+  AND $2::text = ANY(excluded_models)
+`
+
+type RemoveModelRouterInstallationExcludedModelParams struct {
+	Keep       []string
+	Item       string
+	ID         uuid.UUID
+	ExternalID string
+}
+
+// RemoveModelRouterInstallationExcludedModel
+//
+//	UPDATE router.model_router_installations
+//	SET excluded_models = array_remove(ARRAY(SELECT v FROM unnest(excluded_models) WITH ORDINALITY AS t(v, ord) WHERE v = ANY($1::text[]) ORDER BY ord), $2::text),
+//	    updated_at = NOW()
+//	WHERE id = $3::uuid
+//	  AND external_id = $4::varchar
+//	  AND deleted_at IS NULL
+//	  AND $2::text = ANY(excluded_models)
+func (q *Queries) RemoveModelRouterInstallationExcludedModel(ctx context.Context, arg RemoveModelRouterInstallationExcludedModelParams) (int64, error) {
+	result, err := q.db.Exec(ctx, removeModelRouterInstallationExcludedModel,
+		arg.Keep,
+		arg.Item,
+		arg.ID,
+		arg.ExternalID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const removeModelRouterInstallationExcludedProvider = `-- name: RemoveModelRouterInstallationExcludedProvider :execrows
+UPDATE router.model_router_installations
+SET excluded_providers = array_remove(ARRAY(SELECT v FROM unnest(excluded_providers) WITH ORDINALITY AS t(v, ord) WHERE v = ANY($1::text[]) ORDER BY ord), $2::text),
+    updated_at = NOW()
+WHERE id = $3::uuid
+  AND external_id = $4::varchar
+  AND deleted_at IS NULL
+  AND $2::text = ANY(excluded_providers)
+`
+
+type RemoveModelRouterInstallationExcludedProviderParams struct {
+	Keep       []string
+	Item       string
+	ID         uuid.UUID
+	ExternalID string
+}
+
+// RemoveModelRouterInstallationExcludedProvider
+//
+//	UPDATE router.model_router_installations
+//	SET excluded_providers = array_remove(ARRAY(SELECT v FROM unnest(excluded_providers) WITH ORDINALITY AS t(v, ord) WHERE v = ANY($1::text[]) ORDER BY ord), $2::text),
+//	    updated_at = NOW()
+//	WHERE id = $3::uuid
+//	  AND external_id = $4::varchar
+//	  AND deleted_at IS NULL
+//	  AND $2::text = ANY(excluded_providers)
+func (q *Queries) RemoveModelRouterInstallationExcludedProvider(ctx context.Context, arg RemoveModelRouterInstallationExcludedProviderParams) (int64, error) {
+	result, err := q.db.Exec(ctx, removeModelRouterInstallationExcludedProvider,
+		arg.Keep,
+		arg.Item,
+		arg.ID,
+		arg.ExternalID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const removeModelRouterInstallationPreferredModel = `-- name: RemoveModelRouterInstallationPreferredModel :execrows
+UPDATE router.model_router_installations
+SET preferred_models = array_remove(ARRAY(SELECT v FROM unnest(preferred_models) WITH ORDINALITY AS t(v, ord) WHERE v = ANY($1::text[]) ORDER BY ord), $2::text),
+    updated_at = NOW()
+WHERE id = $3::uuid
+  AND external_id = $4::varchar
+  AND deleted_at IS NULL
+  AND $2::text = ANY(preferred_models)
+`
+
+type RemoveModelRouterInstallationPreferredModelParams struct {
+	Keep       []string
+	Item       string
+	ID         uuid.UUID
+	ExternalID string
+}
+
+// RemoveModelRouterInstallationPreferredModel
+//
+//	UPDATE router.model_router_installations
+//	SET preferred_models = array_remove(ARRAY(SELECT v FROM unnest(preferred_models) WITH ORDINALITY AS t(v, ord) WHERE v = ANY($1::text[]) ORDER BY ord), $2::text),
+//	    updated_at = NOW()
+//	WHERE id = $3::uuid
+//	  AND external_id = $4::varchar
+//	  AND deleted_at IS NULL
+//	  AND $2::text = ANY(preferred_models)
+func (q *Queries) RemoveModelRouterInstallationPreferredModel(ctx context.Context, arg RemoveModelRouterInstallationPreferredModelParams) (int64, error) {
+	result, err := q.db.Exec(ctx, removeModelRouterInstallationPreferredModel,
+		arg.Keep,
+		arg.Item,
+		arg.ID,
+		arg.ExternalID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const softDeleteModelRouterInstallation = `-- name: SoftDeleteModelRouterInstallation :exec
 UPDATE router.model_router_installations
 SET deleted_at = NOW()
@@ -344,17 +624,29 @@ SET excluded_models = $1::text[],
 WHERE id = $2::uuid
   AND external_id = $3::varchar
   AND deleted_at IS NULL
+  AND (NOT $4::boolean OR EXISTS (
+    SELECT 1 FROM unnest($5::text[]) WITH ORDINALITY AS um(model, i)
+    JOIN unnest($6::text[]) WITH ORDINALITY AS up(provider, i) ON up.i = um.i
+    WHERE NOT (um.model = ANY($1::text[]))
+      AND NOT (up.provider = ANY(excluded_providers))
+  ))
 `
 
 type UpdateModelRouterInstallationExcludedModelsParams struct {
-	ExcludedModels []string
-	ID             uuid.UUID
-	ExternalID     string
+	ExcludedModels    []string
+	ID                uuid.UUID
+	ExternalID        string
+	GuardRoutable     bool
+	UniverseModels    []string
+	UniverseProviders []string
 }
 
 // Replaces the per-installation model exclusion list, scoped to an external_id
 // to prevent cross-tenant updates. Empty array means "no exclusion". Bumps
-// updated_at so dashboards see the change.
+// updated_at so dashboards see the change. With guard_routable, the write only
+// lands when some universe model stays enabled with its provider not excluded,
+// checked in the same statement so a concurrent provider edit cannot race it;
+// 0 rows then means "would leave nothing routable" or "not found".
 //
 //	UPDATE router.model_router_installations
 //	SET excluded_models = $1::text[],
@@ -362,8 +654,21 @@ type UpdateModelRouterInstallationExcludedModelsParams struct {
 //	WHERE id = $2::uuid
 //	  AND external_id = $3::varchar
 //	  AND deleted_at IS NULL
+//	  AND (NOT $4::boolean OR EXISTS (
+//	    SELECT 1 FROM unnest($5::text[]) WITH ORDINALITY AS um(model, i)
+//	    JOIN unnest($6::text[]) WITH ORDINALITY AS up(provider, i) ON up.i = um.i
+//	    WHERE NOT (um.model = ANY($1::text[]))
+//	      AND NOT (up.provider = ANY(excluded_providers))
+//	  ))
 func (q *Queries) UpdateModelRouterInstallationExcludedModels(ctx context.Context, arg UpdateModelRouterInstallationExcludedModelsParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateModelRouterInstallationExcludedModels, arg.ExcludedModels, arg.ID, arg.ExternalID)
+	result, err := q.db.Exec(ctx, updateModelRouterInstallationExcludedModels,
+		arg.ExcludedModels,
+		arg.ID,
+		arg.ExternalID,
+		arg.GuardRoutable,
+		arg.UniverseModels,
+		arg.UniverseProviders,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -377,17 +682,27 @@ SET excluded_providers = $1::text[],
 WHERE id = $2::uuid
   AND external_id = $3::varchar
   AND deleted_at IS NULL
+  AND (NOT $4::boolean OR EXISTS (
+    SELECT 1 FROM unnest($5::text[]) WITH ORDINALITY AS um(model, i)
+    JOIN unnest($6::text[]) WITH ORDINALITY AS up(provider, i) ON up.i = um.i
+    WHERE NOT (um.model = ANY(excluded_models))
+      AND NOT (up.provider = ANY($1::text[]))
+  ))
 `
 
 type UpdateModelRouterInstallationExcludedProvidersParams struct {
 	ExcludedProviders []string
 	ID                uuid.UUID
 	ExternalID        string
+	GuardRoutable     bool
+	UniverseModels    []string
+	UniverseProviders []string
 }
 
 // Replaces the per-installation provider exclusion list, scoped to an
 // external_id to prevent cross-tenant updates. Empty array means "no
 // exclusion". Bumps updated_at so dashboards see the change.
+// Same guard_routable contract as UpdateModelRouterInstallationExcludedModels.
 //
 //	UPDATE router.model_router_installations
 //	SET excluded_providers = $1::text[],
@@ -395,8 +710,21 @@ type UpdateModelRouterInstallationExcludedProvidersParams struct {
 //	WHERE id = $2::uuid
 //	  AND external_id = $3::varchar
 //	  AND deleted_at IS NULL
+//	  AND (NOT $4::boolean OR EXISTS (
+//	    SELECT 1 FROM unnest($5::text[]) WITH ORDINALITY AS um(model, i)
+//	    JOIN unnest($6::text[]) WITH ORDINALITY AS up(provider, i) ON up.i = um.i
+//	    WHERE NOT (um.model = ANY(excluded_models))
+//	      AND NOT (up.provider = ANY($1::text[]))
+//	  ))
 func (q *Queries) UpdateModelRouterInstallationExcludedProviders(ctx context.Context, arg UpdateModelRouterInstallationExcludedProvidersParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateModelRouterInstallationExcludedProviders, arg.ExcludedProviders, arg.ID, arg.ExternalID)
+	result, err := q.db.Exec(ctx, updateModelRouterInstallationExcludedProviders,
+		arg.ExcludedProviders,
+		arg.ID,
+		arg.ExternalID,
+		arg.GuardRoutable,
+		arg.UniverseModels,
+		arg.UniverseProviders,
+	)
 	if err != nil {
 		return 0, err
 	}

@@ -24,7 +24,7 @@ type excludedModelsInstallationRepo struct {
 	excluded []string
 }
 
-func (r *excludedModelsInstallationRepo) UpdateExcludedModels(_ context.Context, _, _ string, models []string) error {
+func (r *excludedModelsInstallationRepo) UpdateExcludedModels(_ context.Context, _, _ string, models []string, _ []auth.RoutableModel) error {
 	r.excluded = append([]string{}, models...)
 	return nil
 }
@@ -56,7 +56,7 @@ func excludedModelsEngine(repo *excludedModelsInstallationRepo, installation *au
 	inject := func(c *gin.Context) { c.Set("router_installation", installation) }
 	engine := gin.New()
 	engine.GET("/admin/v1/excluded-models", inject, admin.GetExcludedModelsHandler(authSvc, nil, nil))
-	engine.PUT("/admin/v1/excluded-models", inject, admin.UpdateExcludedModelsHandler(authSvc, nil, nil))
+	engine.PUT("/admin/v1/excluded-models", inject, admin.UpdateExcludedModelsHandler(authSvc, nil, nil, nil))
 	return engine
 }
 

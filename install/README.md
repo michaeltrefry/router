@@ -345,11 +345,14 @@ gets a 404 from the admin API on a managed router and degrades to the plain
 catalog, which is why it has to print "this router does not report which of
 them your installation has enabled". The installation's exclusions are on the
 request, so the router marks each row `[x]`/`[ ]` instead. Anything with
-arguments (`enable`, `disable`, `prefer`, `providers`) still goes to the skill:
-those hit `/admin/v1/*`, which requires an admin session and rejects the `rk_`
-data-plane key a chat request carries — deliberately, so a leaked key cannot
-rewrite routing config. The registry still lists it as `local-toggle` because
-that column names the adapter its mutating path needs.
+arguments (`enable`, `disable`, `prefer`, `providers`) still goes to the skill,
+which runs the installer the user installed from. On a self-hosted router the
+`/admin/v1` model-selection reads accept the router key, so `models` and
+`models providers` list the installation's selection; every write is
+dashboard-only and answers the `rk_` key with a 403 naming the dashboard page,
+which the installer prints — deliberately, so a leaked key cannot rewrite
+routing config. The registry still lists it as `local-toggle` because that
+column names the adapter its mutating path needs.
 
 `$router-session` used to be in that group and no longer is. It reported
 `$CODEX_SESSION_ID` from a script, which cost a model turn plus a tool exec and

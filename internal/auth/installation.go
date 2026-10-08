@@ -120,9 +120,38 @@ type CreateInstallationParams struct {
 	CreatedBy  *string
 }
 
+// RoutableModel is a model an installation can route to and the provider serving it.
+type RoutableModel struct {
+	Model    string
+	Provider string
+}
+
+// SelectionList names an installation list that can be edited one item at a time.
+type SelectionList int
+
+// Selection lists editable through EditSelectionItem.
+const (
+	SelectionExcludedModels SelectionList = iota + 1
+	SelectionExcludedProviders
+	SelectionPreferredModels
+)
+
+// SelectionItemEdit is one add or remove on a selection list.
+type SelectionItemEdit struct {
+	List SelectionList
+	Item string
+	Add  bool
+	// Keep is every id still selectable; stored entries outside it are dropped
+	// by the same write rather than failing it.
+	Keep []string
+	// Universe, when non-nil on an exclusion add, rejects the add with
+	// ErrNoRoutableModels when it would leave no model routable.
+	Universe []RoutableModel
+}
+
 type InstallationRepository interface {
 	Create(ctx context.Context, params CreateInstallationParams) (*Installation, error)
-	// Get has no caller today; kept for a future admin detail view.
+	// Get reads one live installation, bypassing the API-key cache.
 	Get(ctx context.Context, externalID, id string) (*Installation, error)
 	ListForExternalID(ctx context.Context, externalID string) ([]*Installation, error)
 	SoftDelete(ctx context.Context, externalID, id string) error
@@ -132,14 +161,20 @@ type InstallationRepository interface {
 	// An empty (or nil) slice clears the list.
 	UpdateFastModeModels(ctx context.Context, externalID, id string, models []string) error
 	// UpdateExcludedModels replaces the per-installation exclusion list.
-	// An empty (or nil) slice clears the list.
-	UpdateExcludedModels(ctx context.Context, externalID, id string, models []string) error
+	// An empty (or nil) slice clears the list. A non-nil universe makes the
+	// write fail with ErrNoRoutableModels, atomically, when it would leave no
+	// universe model enabled on a non-excluded provider.
+	UpdateExcludedModels(ctx context.Context, externalID, id string, models []string, universe []RoutableModel) error
 	// UpdateAllowedModels replaces the positive model allowlist.
 	// Empty (or nil) means no restriction — NOT "no models routable".
 	UpdateAllowedModels(ctx context.Context, externalID, id string, models []string) error
 	// UpdateExcludedProviders replaces the per-installation provider
-	// exclusion list. An empty (or nil) slice clears the list.
-	UpdateExcludedProviders(ctx context.Context, externalID, id string, providerNames []string) error
+	// exclusion list. An empty (or nil) slice clears the list. universe has
+	// the UpdateExcludedModels contract.
+	UpdateExcludedProviders(ctx context.Context, externalID, id string, providerNames []string, universe []RoutableModel) error
+	// EditSelectionItem atomically adds or removes one item of a selection
+	// list. Adding a present item or removing an absent one is a no-op.
+	EditSelectionItem(ctx context.Context, externalID, id string, edit SelectionItemEdit) error
 	// UpdatePreferredModels replaces the per-installation model priority
 	// ranking. An empty (or nil) slice clears the ranking.
 	UpdatePreferredModels(ctx context.Context, externalID, id string, models []string) error

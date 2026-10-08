@@ -817,12 +817,18 @@ Keep the signing key identical on gateway and workers of the same environment.
 ## Model-selection API
 
 Self-hosted deployments expose installation-scoped model selection under
-`/admin/v1`; managed deployments mount none of it. Authenticate with an admin
-dashboard cookie or a routing router key (`X-Weave-Router-Key`, or an `rk_`
-bearer token), installation-shared or personal. A router key changes only its
-own installation's settings, the same installation the dashboard edits, and
-cannot reach key or provider-credential management, which stays cookie-only.
-This is the API behind `install.sh models` and the `/router-models` command.
+`/admin/v1`; managed deployments mount none of it. This is the API behind
+`install.sh models` and the `/router-models` command.
+
+Reads accept an admin dashboard cookie or a routing router key
+(`X-Weave-Router-Key`, or an `rk_` bearer token), installation-shared or
+personal; a router key reads only its own installation, the one the dashboard
+edits. Every write (`PUT`, and the per-item `POST` routes) is dashboard-only,
+like key and provider-credential management, so a leaked router key cannot
+rewrite routing config. A valid router key on a write gets `403` with an
+`error` naming the dashboard page, `http(s)://<router>/ui/settings/models`,
+which `install.sh models enable|disable|prefer` prints as is. Any other
+credential gets `401`.
 
 | Resource | Read | Replace | Add one | Remove one |
 |----------|------|---------|---------|------------|
@@ -844,9 +850,14 @@ Preferred-model responses are `{preferred: [...]}` in priority order.
 
 Replace bodies are `{excluded: [...]}` or `{preferred: [...]}`. Per-item
 requests use `{model: "..."}` or `{provider: "..."}`; this avoids path escaping
-for model IDs that include `/`. Item operations are idempotent; an unknown ID
-returns 400. An active `ROUTER_EXCLUDED_MODELS` or `ROUTER_EXCLUDED_PROVIDERS`
-environment override makes the corresponding exclusion writes return 403.
+for model IDs that include `/`. Each item operation is one atomic, idempotent
+update: only the added ID is validated (an unknown one returns 400), removing
+an ID that is no longer selectable succeeds, and stored IDs that are no longer
+selectable are dropped by the same write. An exclusion write, replace or item,
+that would leave no routable model enabled on a non-excluded provider returns
+400 and changes nothing; the check reads both lists in the same statement. An
+active `ROUTER_EXCLUDED_MODELS` or `ROUTER_EXCLUDED_PROVIDERS` environment
+override makes the corresponding exclusion writes return 403.
 
 **Disabling** a model or provider writes the installation's `excluded_models` /
 `excluded_providers`, the lists the dashboard checkboxes edit, so both views

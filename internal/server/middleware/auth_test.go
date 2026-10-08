@@ -159,7 +159,11 @@ func (fakeInstallationRepository) MarkFirstRequestServed(ctx context.Context, id
 	return nil
 }
 
-func (fakeInstallationRepository) UpdateExcludedModels(ctx context.Context, externalID, id string, models []string) error {
+func (fakeInstallationRepository) UpdateExcludedModels(ctx context.Context, externalID, id string, models []string, universe []auth.RoutableModel) error {
+	return errors.New("not used")
+}
+
+func (fakeInstallationRepository) EditSelectionItem(ctx context.Context, externalID, id string, edit auth.SelectionItemEdit) error {
 	return errors.New("not used")
 }
 
@@ -171,7 +175,7 @@ func (fakeInstallationRepository) UpdateAllowedModels(ctx context.Context, exter
 	return errors.New("not used")
 }
 
-func (fakeInstallationRepository) UpdateExcludedProviders(ctx context.Context, externalID, id string, providerNames []string) error {
+func (fakeInstallationRepository) UpdateExcludedProviders(ctx context.Context, externalID, id string, providerNames []string, universe []auth.RoutableModel) error {
 	return errors.New("not used")
 }
 

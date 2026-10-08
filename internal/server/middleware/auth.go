@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"weave-os/router/internal/policyregistry"
 	"weave-os/router/internal/requestcontext"
 
@@ -70,6 +72,34 @@ func WithAdminOnly(svc *auth.Service) gin.HandlerFunc {
 		c.Set(ctxKeyAdminPrincipal, principal)
 		c.Next()
 	}
+}
+
+// WithDashboardOnly is WithAdminOnly for a mutation whose reads accept a router
+// key: a caller presenting a valid rk_ key gets a 403 naming the dashboard page
+// at dashboardPath, so a CLI can say where the change belongs.
+func WithDashboardOnly(svc *auth.Service, dashboardPath string) gin.HandlerFunc {
+	adminOnly := WithAdminOnly(svc)
+	return func(c *gin.Context) {
+		if tryAdminCookie(c, svc) == nil {
+			if token := extractToken(c); token != "" {
+				if _, _, _, err := svc.VerifyPlatformAPIKey(c.Request.Context(), token); err == nil {
+					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": fmt.Sprintf(
+						"Router keys can read the model selection but not change it. Change it in the router dashboard: %s",
+						dashboardURL(c, dashboardPath))})
+					return
+				}
+			}
+		}
+		adminOnly(c)
+	}
+}
+
+func dashboardURL(c *gin.Context, path string) string {
+	scheme := "http"
+	if c.Request.TLS != nil || strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	return scheme + "://" + c.Request.Host + path
 }
 
 // withAPIKey is the bearer-only auth path shared by WithAuth and the fall-through branch of WithAdminOrAuth.

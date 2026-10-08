@@ -1,12 +1,10 @@
 package admin
 
 import (
-	"errors"
 	"net/http"
 	"sort"
 
 	"weave-os/router/internal/auth"
-	"weave-os/router/internal/observability"
 	"weave-os/router/internal/proxy"
 
 	"github.com/gin-gonic/gin"
@@ -75,10 +73,10 @@ func GetExcludedProvidersHandler(authSvc *auth.Service, models DeployedModelsSou
 }
 
 // UpdateExcludedProvidersHandler replaces the installation's exclusion list.
-// 400 on unknown providers; 403 if the env override is active.
+// 400 on unknown providers or a list that leaves nothing routable; 403 if the
+// env override is active.
 func UpdateExcludedProvidersHandler(authSvc *auth.Service, models DeployedModelsSource, routable RoutableModelsSource, override ProviderExclusionOverrideSource) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		log := observability.FromGin(c)
 		installation, ok := resolveInstallation(c, authSvc)
 		if !ok {
 			return
@@ -102,14 +100,8 @@ func UpdateExcludedProvidersHandler(authSvc *auth.Service, models DeployedModels
 			allowed[p] = struct{}{}
 		}
 
-		stored, err := authSvc.SetInstallationExcludedProviders(c.Request.Context(), installation.ExternalID, installation.ID, req.Excluded, allowed)
-		if err != nil {
-			if errors.Is(err, auth.ErrUnknownProvider) {
-				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
-			log.Error("Failed to update excluded providers", "err", err, "installation_id", installation.ID)
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to update excluded providers."})
+		stored, err := authSvc.SetInstallationExcludedProviders(c.Request.Context(), installation.ExternalID, installation.ID, req.Excluded, allowed, routableUniverse(models, routable))
+		if !respondProviderSelectionError(c, err) {
 			return
 		}
 

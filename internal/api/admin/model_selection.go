@@ -12,6 +12,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const noRoutableModelsMessage = "That change would leave no model the router can route to. Keep at least one model enabled on an enabled provider."
+
 type modelStatusDTO struct {
 	Model    string `json:"model"`
 	Provider string `json:"provider"`
@@ -133,18 +135,18 @@ func UpdatePreferredModelsHandler(authSvc *auth.Service, routable RoutableModels
 }
 
 // AddExcludedModelHandler adds one model to the installation exclusion list.
-func AddExcludedModelHandler(authSvc *auth.Service, override ExclusionOverrideSource) gin.HandlerFunc {
-	return updateExcludedModelItemHandler(authSvc, override, true)
+func AddExcludedModelHandler(authSvc *auth.Service, models DeployedModelsSource, routable RoutableModelsSource, override ExclusionOverrideSource) gin.HandlerFunc {
+	return updateExcludedModelItemHandler(authSvc, models, routable, override, true)
 }
 
 // RemoveExcludedModelHandler removes one model from the installation exclusion list.
-func RemoveExcludedModelHandler(authSvc *auth.Service, override ExclusionOverrideSource) gin.HandlerFunc {
-	return updateExcludedModelItemHandler(authSvc, override, false)
+func RemoveExcludedModelHandler(authSvc *auth.Service, models DeployedModelsSource, routable RoutableModelsSource, override ExclusionOverrideSource) gin.HandlerFunc {
+	return updateExcludedModelItemHandler(authSvc, models, routable, override, false)
 }
 
 // updateExcludedModelItemHandler edits the same list, validated against the
 // same catalog, as the dashboard's PUT /excluded-models, so the two agree.
-func updateExcludedModelItemHandler(authSvc *auth.Service, override ExclusionOverrideSource, add bool) gin.HandlerFunc {
+func updateExcludedModelItemHandler(authSvc *auth.Service, models DeployedModelsSource, routable RoutableModelsSource, override ExclusionOverrideSource, add bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		installation, ok := resolveInstallation(c, authSvc)
 		if !ok {
@@ -161,17 +163,13 @@ func updateExcludedModelItemHandler(authSvc *auth.Service, override ExclusionOve
 		}
 
 		available := fullCatalogDTO()
-		allowed := make(map[string]struct{}, len(available))
-		for _, m := range available {
-			allowed[m.Model] = struct{}{}
-		}
-		stored, err := authSvc.SetInstallationExcludedModels(
-			c.Request.Context(),
-			installation.ExternalID,
-			installation.ID,
-			updateListItem(installation.ExcludedModels, req.Model, add),
-			allowed,
-		)
+		stored, err := authSvc.EditInstallationSelection(c.Request.Context(), installation.ExternalID, installation.ID, auth.SelectionItemEdit{
+			List:     auth.SelectionExcludedModels,
+			Item:     req.Model,
+			Add:      add,
+			Keep:     listingModels(available),
+			Universe: routableUniverse(models, routable),
+		})
 		if !respondModelSelectionError(c, err, "Failed to update excluded models.") {
 			return
 		}
@@ -206,13 +204,12 @@ func updatePreferredModelItemHandler(authSvc *auth.Service, routable RoutableMod
 			return
 		}
 
-		stored, err := authSvc.SetInstallationPreferredModels(
-			c.Request.Context(),
-			installation.ExternalID,
-			installation.ID,
-			updateListItem(installation.PreferredModels, req.Model, add),
-			selectableModelSet(routable),
-		)
+		stored, err := authSvc.EditInstallationSelection(c.Request.Context(), installation.ExternalID, installation.ID, auth.SelectionItemEdit{
+			List: auth.SelectionPreferredModels,
+			Item: req.Model,
+			Add:  add,
+			Keep: listingModels(selectableModelsDTO(routable)),
+		})
 		if !respondModelSelectionError(c, err, "Failed to update preferred models.") {
 			return
 		}
@@ -247,13 +244,13 @@ func updateExcludedProviderItemHandler(authSvc *auth.Service, models DeployedMod
 		}
 
 		available := selectableProviders(models, routable)
-		stored, err := authSvc.SetInstallationExcludedProviders(
-			c.Request.Context(),
-			installation.ExternalID,
-			installation.ID,
-			updateListItem(installation.ExcludedProviders, req.Provider, add),
-			stringsSet(available),
-		)
+		stored, err := authSvc.EditInstallationSelection(c.Request.Context(), installation.ExternalID, installation.ID, auth.SelectionItemEdit{
+			List:     auth.SelectionExcludedProviders,
+			Item:     req.Provider,
+			Add:      add,
+			Keep:     available,
+			Universe: routableUniverse(models, routable),
+		})
 		if !respondProviderSelectionError(c, err) {
 			return
 		}
@@ -305,6 +302,35 @@ func selectableModelsDTO(routable RoutableModelsSource) []deployedModelDTO {
 	return out
 }
 
+// routableUniverse is the set the zero-routable guard checks an exclusion
+// change against: each selectable model paired with every selectable provider
+// that serves it, so excluding one provider leaves a model its other providers
+// serve. Selectable providers are the scorer's plus local ones; a model none of
+// them serves is never picked automatically, so it keeps nothing routable.
+// Without the scorer's deployment there is nothing to judge against and the
+// guard is off (nil).
+func routableUniverse(models DeployedModelsSource, routable RoutableModelsSource) []auth.RoutableModel {
+	if models == nil {
+		return nil
+	}
+	providerSet := stringsSet(selectableProviders(models, routable))
+	out := []auth.RoutableModel{}
+	for _, row := range selectableModelsDTO(routable) {
+		for _, b := range catalog.EnumerateBindings(row.Model, providerSet) {
+			out = append(out, auth.RoutableModel{Model: row.Model, Provider: b.Provider})
+		}
+	}
+	return out
+}
+
+func listingModels(rows []deployedModelDTO) []string {
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.Model)
+	}
+	return out
+}
+
 func selectableModelSet(routable RoutableModelsSource) map[string]struct{} {
 	out := make(map[string]struct{})
 	for _, row := range selectableModelsDTO(routable) {
@@ -343,32 +369,16 @@ func stringsSet(values []string) map[string]struct{} {
 	return out
 }
 
-// updateListItem adds or removes value, preserving order; adding an existing
-// value or removing a missing one leaves the list unchanged.
-func updateListItem(values []string, value string, add bool) []string {
-	out := make([]string, 0, len(values)+1)
-	present := false
-	for _, existing := range values {
-		if existing == value {
-			present = true
-			if !add {
-				continue
-			}
-		}
-		out = append(out, existing)
-	}
-	if add && !present {
-		out = append(out, value)
-	}
-	return out
-}
-
 func respondModelSelectionError(c *gin.Context, err error, failureMessage string) bool {
 	if err == nil {
 		return true
 	}
 	if errors.Is(err, auth.ErrUnknownModel) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return false
+	}
+	if errors.Is(err, auth.ErrNoRoutableModels) {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": noRoutableModelsMessage})
 		return false
 	}
 	observability.FromGin(c).Error(failureMessage, "err", err)
@@ -382,6 +392,10 @@ func respondProviderSelectionError(c *gin.Context, err error) bool {
 	}
 	if errors.Is(err, auth.ErrUnknownProvider) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return false
+	}
+	if errors.Is(err, auth.ErrNoRoutableModels) {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": noRoutableModelsMessage})
 		return false
 	}
 	observability.FromGin(c).Error("Failed to update excluded providers", "err", err)

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -162,6 +163,7 @@ type fakeInstallationRepository struct {
 	showModelSelectionReasoningByID map[string]bool
 	flagOverridesByID               map[string]flags.Overrides
 	fastModeModelsByID              map[string][]string
+	edits                           []auth.SelectionItemEdit
 	// firstRequestServedIDs counts MarkFirstRequestServed calls per installation.
 	firstRequestServedIDs map[string]int
 	mu                    sync.Mutex
@@ -174,8 +176,42 @@ type fakeInstallationRepository struct {
 func (*fakeInstallationRepository) Create(ctx context.Context, params auth.CreateInstallationParams) (*auth.Installation, error) {
 	return nil, errors.New("not used")
 }
-func (*fakeInstallationRepository) Get(ctx context.Context, externalID, id string) (*auth.Installation, error) {
-	return nil, errors.New("not used")
+func (f *fakeInstallationRepository) Get(ctx context.Context, externalID, id string) (*auth.Installation, error) {
+	return &auth.Installation{
+		ID:                id,
+		ExternalID:        externalID,
+		ExcludedModels:    f.excludedModelsByID[id],
+		ExcludedProviders: f.excludedProvidersByID[id],
+		PreferredModels:   f.preferredModelsByID[id],
+	}, nil
+}
+
+// EditSelectionItem records the edit and applies it to the matching list.
+func (f *fakeInstallationRepository) EditSelectionItem(ctx context.Context, externalID, id string, edit auth.SelectionItemEdit) error {
+	if f.updateErr != nil {
+		return f.updateErr
+	}
+	f.edits = append(f.edits, edit)
+	lists := map[auth.SelectionList]*map[string][]string{
+		auth.SelectionExcludedModels:    &f.excludedModelsByID,
+		auth.SelectionExcludedProviders: &f.excludedProvidersByID,
+		auth.SelectionPreferredModels:   &f.preferredModelsByID,
+	}
+	byID := lists[edit.List]
+	if *byID == nil {
+		*byID = map[string][]string{}
+	}
+	out := []string{}
+	for _, v := range (*byID)[id] {
+		if slices.Contains(edit.Keep, v) && v != edit.Item {
+			out = append(out, v)
+		}
+	}
+	if edit.Add {
+		out = append(out, edit.Item)
+	}
+	(*byID)[id] = out
+	return nil
 }
 func (*fakeInstallationRepository) ListForExternalID(ctx context.Context, externalID string) ([]*auth.Installation, error) {
 	return nil, errors.New("not used")
@@ -199,7 +235,7 @@ func (f *fakeInstallationRepository) firstRequestServedCount(id string) int {
 	defer f.mu.Unlock()
 	return f.firstRequestServedIDs[id]
 }
-func (f *fakeInstallationRepository) UpdateExcludedModels(ctx context.Context, externalID, id string, models []string) error {
+func (f *fakeInstallationRepository) UpdateExcludedModels(ctx context.Context, externalID, id string, models []string, _ []auth.RoutableModel) error {
 	if f.updateErr != nil {
 		return f.updateErr
 	}
@@ -237,7 +273,7 @@ func (f *fakeInstallationRepository) UpdateAllowedModels(ctx context.Context, ex
 	f.allowedModelsExternalByID[id] = externalID
 	return nil
 }
-func (f *fakeInstallationRepository) UpdateExcludedProviders(ctx context.Context, externalID, id string, providerNames []string) error {
+func (f *fakeInstallationRepository) UpdateExcludedProviders(ctx context.Context, externalID, id string, providerNames []string, _ []auth.RoutableModel) error {
 	if f.updateErr != nil {
 		return f.updateErr
 	}
@@ -975,7 +1011,7 @@ func TestService_SetInstallationExcludedModels(t *testing.T) {
 	allowed := map[string]struct{}{"gpt-4o": {}, "claude-opus-4-7": {}}
 
 	t.Run("persists deduped list scoped by external_id", func(t *testing.T) {
-		out, err := svc.SetInstallationExcludedModels(context.Background(), "ext-1", "inst-1", []string{"gpt-4o", "gpt-4o", "claude-opus-4-7"}, allowed)
+		out, err := svc.SetInstallationExcludedModels(context.Background(), "ext-1", "inst-1", []string{"gpt-4o", "gpt-4o", "claude-opus-4-7"}, allowed, nil)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"gpt-4o", "claude-opus-4-7"}, out, "duplicates collapsed; order preserved")
 		assert.Equal(t, []string{"gpt-4o", "claude-opus-4-7"}, installRepo.excludedModelsByID["inst-1"])
@@ -984,19 +1020,19 @@ func TestService_SetInstallationExcludedModels(t *testing.T) {
 	})
 
 	t.Run("rejects unknown model with ErrUnknownModel", func(t *testing.T) {
-		_, err := svc.SetInstallationExcludedModels(context.Background(), "ext-1", "inst-1", []string{"gemini-nope"}, allowed)
+		_, err := svc.SetInstallationExcludedModels(context.Background(), "ext-1", "inst-1", []string{"gemini-nope"}, allowed, nil)
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, auth.ErrUnknownModel))
 	})
 
 	t.Run("nil allowed skips validation", func(t *testing.T) {
-		out, err := svc.SetInstallationExcludedModels(context.Background(), "ext-2", "inst-2", []string{"anything-goes"}, nil)
+		out, err := svc.SetInstallationExcludedModels(context.Background(), "ext-2", "inst-2", []string{"anything-goes"}, nil, nil)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"anything-goes"}, out)
 	})
 
 	t.Run("nil models persists empty slice", func(t *testing.T) {
-		out, err := svc.SetInstallationExcludedModels(context.Background(), "ext-3", "inst-3", nil, allowed)
+		out, err := svc.SetInstallationExcludedModels(context.Background(), "ext-3", "inst-3", nil, allowed, nil)
 		require.NoError(t, err)
 		assert.Equal(t, []string{}, out)
 		assert.Equal(t, []string{}, installRepo.excludedModelsByID["inst-3"])
@@ -1010,7 +1046,7 @@ func TestService_SetInstallationExcludedProviders(t *testing.T) {
 	allowed := map[string]struct{}{"anthropic": {}, "fireworks": {}}
 
 	t.Run("persists deduped list scoped by external_id", func(t *testing.T) {
-		out, err := svc.SetInstallationExcludedProviders(context.Background(), "ext-1", "inst-1", []string{"fireworks", "fireworks", "anthropic"}, allowed)
+		out, err := svc.SetInstallationExcludedProviders(context.Background(), "ext-1", "inst-1", []string{"fireworks", "fireworks", "anthropic"}, allowed, nil)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"fireworks", "anthropic"}, out, "duplicates collapsed; order preserved")
 		assert.Equal(t, []string{"fireworks", "anthropic"}, installRepo.excludedProvidersByID["inst-1"])
@@ -1019,22 +1055,77 @@ func TestService_SetInstallationExcludedProviders(t *testing.T) {
 	})
 
 	t.Run("rejects unknown provider with ErrUnknownProvider", func(t *testing.T) {
-		_, err := svc.SetInstallationExcludedProviders(context.Background(), "ext-1", "inst-1", []string{"acme-cloud"}, allowed)
+		_, err := svc.SetInstallationExcludedProviders(context.Background(), "ext-1", "inst-1", []string{"acme-cloud"}, allowed, nil)
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, auth.ErrUnknownProvider))
 	})
 
 	t.Run("nil allowed skips validation", func(t *testing.T) {
-		out, err := svc.SetInstallationExcludedProviders(context.Background(), "ext-2", "inst-2", []string{"anything-goes"}, nil)
+		out, err := svc.SetInstallationExcludedProviders(context.Background(), "ext-2", "inst-2", []string{"anything-goes"}, nil, nil)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"anything-goes"}, out)
 	})
 
 	t.Run("nil providers persists empty slice", func(t *testing.T) {
-		out, err := svc.SetInstallationExcludedProviders(context.Background(), "ext-3", "inst-3", nil, allowed)
+		out, err := svc.SetInstallationExcludedProviders(context.Background(), "ext-3", "inst-3", nil, allowed, nil)
 		require.NoError(t, err)
 		assert.Equal(t, []string{}, out)
 		assert.Equal(t, []string{}, installRepo.excludedProvidersByID["inst-3"])
+	})
+}
+
+func TestService_EditInstallationSelection(t *testing.T) {
+	ctx := context.Background()
+	newSvc := func() (*auth.Service, *fakeInstallationRepository) {
+		repo := &fakeInstallationRepository{}
+		return auth.NewService(repo, &fakeAPIKeyRepository{byHash: map[string]fakeKeyRow{}}, nil, nil, auth.NoOpAPIKeyCache{}, nil, frozenClock()), repo
+	}
+
+	t.Run("validates only the added item, not stale stored entries", func(t *testing.T) {
+		svc, repo := newSvc()
+		repo.preferredModelsByID = map[string][]string{"inst-1": {"retired-model", "gpt-4o"}}
+		out, err := svc.EditInstallationSelection(ctx, "ext-1", "inst-1", auth.SelectionItemEdit{
+			List: auth.SelectionPreferredModels, Item: "claude-opus-4-7", Add: true,
+			Keep: []string{"gpt-4o", "claude-opus-4-7"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"gpt-4o", "claude-opus-4-7"}, out, "the stored list is returned as written")
+	})
+
+	t.Run("rejects an unknown added model without writing", func(t *testing.T) {
+		svc, repo := newSvc()
+		_, err := svc.EditInstallationSelection(ctx, "ext-1", "inst-1", auth.SelectionItemEdit{
+			List: auth.SelectionExcludedModels, Item: "gemini-nope", Add: true, Keep: []string{"gpt-4o"},
+		})
+		require.ErrorIs(t, err, auth.ErrUnknownModel)
+		assert.Empty(t, repo.edits)
+	})
+
+	t.Run("rejects an unknown added provider with ErrUnknownProvider", func(t *testing.T) {
+		svc, _ := newSvc()
+		_, err := svc.EditInstallationSelection(ctx, "ext-1", "inst-1", auth.SelectionItemEdit{
+			List: auth.SelectionExcludedProviders, Item: "acme-cloud", Add: true, Keep: []string{"anthropic"},
+		})
+		require.ErrorIs(t, err, auth.ErrUnknownProvider)
+	})
+
+	t.Run("removing an id that is no longer selectable still succeeds", func(t *testing.T) {
+		svc, repo := newSvc()
+		repo.excludedModelsByID = map[string][]string{"inst-1": {"retired-model"}}
+		out, err := svc.EditInstallationSelection(ctx, "ext-1", "inst-1", auth.SelectionItemEdit{
+			List: auth.SelectionExcludedModels, Item: "retired-model", Keep: []string{"gpt-4o"},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, out)
+	})
+
+	t.Run("surfaces the repo's guard refusal", func(t *testing.T) {
+		svc, repo := newSvc()
+		repo.updateErr = auth.ErrNoRoutableModels
+		_, err := svc.EditInstallationSelection(ctx, "ext-1", "inst-1", auth.SelectionItemEdit{
+			List: auth.SelectionExcludedModels, Item: "gpt-4o", Add: true, Keep: []string{"gpt-4o"},
+		})
+		require.ErrorIs(t, err, auth.ErrNoRoutableModels)
 	})
 }
 
@@ -1162,11 +1253,11 @@ func TestService_SetInstallation_NotFoundDoesNotInvalidate(t *testing.T) {
 		call func(context.Context, *auth.Service) error
 	}{
 		{"ExcludedModels", func(ctx context.Context, svc *auth.Service) error {
-			_, err := svc.SetInstallationExcludedModels(ctx, "ext-1", "missing-inst", []string{"opus"}, nil)
+			_, err := svc.SetInstallationExcludedModels(ctx, "ext-1", "missing-inst", []string{"opus"}, nil, nil)
 			return err
 		}},
 		{"ExcludedProviders", func(ctx context.Context, svc *auth.Service) error {
-			_, err := svc.SetInstallationExcludedProviders(ctx, "ext-1", "missing-inst", []string{"openai"}, nil)
+			_, err := svc.SetInstallationExcludedProviders(ctx, "ext-1", "missing-inst", []string{"openai"}, nil, nil)
 			return err
 		}},
 		{"RoutingPreference", func(ctx context.Context, svc *auth.Service) error {
@@ -1239,7 +1330,7 @@ func TestService_WriteHooksInvalidateAndNotify(t *testing.T) {
 
 	t.Run("SetInstallationExcludedModels", func(t *testing.T) {
 		svc, cache, nf := makeSvc()
-		_, err := svc.SetInstallationExcludedModels(context.Background(), "ext-1", installID, []string{"gpt-4o"}, nil)
+		_, err := svc.SetInstallationExcludedModels(context.Background(), "ext-1", installID, []string{"gpt-4o"}, nil, nil)
 		require.NoError(t, err)
 		assert.Equal(t, []string{installID}, cache.invalidationSnapshot(),
 			"excluded-model writes must call cache.InvalidateInstallation so the next request sees the new list")

@@ -1,12 +1,10 @@
 package admin
 
 import (
-	"errors"
 	"net/http"
 	"sort"
 
 	"weave-os/router/internal/auth"
-	"weave-os/router/internal/observability"
 	"weave-os/router/internal/proxy"
 	"weave-os/router/internal/router/catalog"
 	"weave-os/router/internal/router/cluster"
@@ -88,10 +86,10 @@ func GetExcludedModelsHandler(authSvc *auth.Service, _ DeployedModelsSource, ove
 }
 
 // UpdateExcludedModelsHandler replaces the installation's exclusion list.
-// 400 on unknown model IDs; 403 if the env override is active.
-func UpdateExcludedModelsHandler(authSvc *auth.Service, _ DeployedModelsSource, override ExclusionOverrideSource) gin.HandlerFunc {
+// 400 on unknown model IDs or a list that leaves nothing routable; 403 if the
+// env override is active.
+func UpdateExcludedModelsHandler(authSvc *auth.Service, models DeployedModelsSource, routable RoutableModelsSource, override ExclusionOverrideSource) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		log := observability.FromGin(c)
 		installation, ok := resolveInstallation(c, authSvc)
 		if !ok {
 			return
@@ -114,14 +112,8 @@ func UpdateExcludedModelsHandler(authSvc *auth.Service, _ DeployedModelsSource, 
 			allowed[e.Model] = struct{}{}
 		}
 
-		stored, err := authSvc.SetInstallationExcludedModels(c.Request.Context(), installation.ExternalID, installation.ID, req.Excluded, allowed)
-		if err != nil {
-			if errors.Is(err, auth.ErrUnknownModel) {
-				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
-			log.Error("Failed to update excluded models", "err", err, "installation_id", installation.ID)
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to update excluded models."})
+		stored, err := authSvc.SetInstallationExcludedModels(c.Request.Context(), installation.ExternalID, installation.ID, req.Excluded, allowed, routableUniverse(models, routable))
+		if !respondModelSelectionError(c, err, "Failed to update excluded models.") {
 			return
 		}
 

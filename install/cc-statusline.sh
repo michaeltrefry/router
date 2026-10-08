@@ -173,11 +173,14 @@ weave_installed_command_names() {
 }
 
 # weave_render_command prints $1 with the installer's {{SCOPE}} placeholder
-# replaced by $2, matching how install_slash_commands writes the same file.
+# replaced by $2 and {{ROUTER_CLI}} by the published package, matching how
+# install_slash_commands writes the same file for a published install. A
+# wrapper rendered for a checkout never matches, so it is never refreshed.
 # Trailing newlines are stripped on both sides of every comparison below.
 weave_render_command() {
   local body
   body="$(cat "$1" 2>/dev/null)" || return 1
+  body="${body//\{\{ROUTER_CLI\}\}/npx @weave-os/router}"
   printf '%s' "${body//\{\{SCOPE\}\}/$2}"
 }
 

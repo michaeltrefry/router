@@ -16,10 +16,11 @@ var routerModelsTokens = [...]string{
 //
 // Bare only. Listing is a read the router can answer from the request it is
 // already holding. Mutating the selection (`enable`/`disable`/`prefer`/
-// `providers`) is a write to the /admin/v1 model-selection API, which only a
-// self-hosted router mounts; anything with arguments falls through to the
-// skill, which shells out to the installer so that boundary, and the
-// managed-router refusal, live in one place.
+// `providers`) is a write to the /admin/v1 model-selection API, which is
+// dashboard-only: it refuses the rk_ key a chat request carries so a leaked
+// key cannot rewrite routing config. Anything with arguments falls through to
+// the skill, which shells out to the installer so that refusal, and the
+// managed-router one, are reported in one place.
 func (env *RequestEnvelope) ExtractRouterModelsCommand() bool {
 	return env.extractLeadingCommand(parseRouterModelsCommand)
 }

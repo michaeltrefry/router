@@ -25,6 +25,8 @@ mkdir -p "$fake_bin"
 # router it impersonates:
 #   full    — serves the model-selection API
 #   managed — 404s /admin/v1/* (the Weave-hosted router) but serves the catalog
+#   dashboard — serves the reads but refuses every write with the 403 a
+#               self-hosted router gives a router key (writes are dashboard-only)
 #   down    — connection failure
 # Requests are appended to $REQUEST_LOG as "METHOD PATH BODY".
 cat >"$fake_bin/curl" <<'FAKE_CURL'
@@ -78,6 +80,10 @@ esac
 
 if [ "${ROUTER_MODE:-full}" = "managed" ]; then
   emit 404 '{"error":"404 page not found"}'
+fi
+
+if [ "${ROUTER_MODE:-full}" = "dashboard" ] && [ "$method" != "GET" ]; then
+  emit 403 '{"error":"Router keys can read the model selection but not change it. Change it in the router dashboard: http://127.0.0.1:8080/ui/settings/models"}'
 fi
 
 case "$path" in
@@ -273,6 +279,26 @@ check "an unknown model id fails" "$rc" "1"
 contains "an unknown model id surfaces the router's message" "$out" "unknown model"
 check "an unknown model id stops before the remaining ids" \
   "$(grep -c '^POST ' "$REQUEST_LOG")" "1"
+
+# ---------- a router that keeps writes in its dashboard ----------
+
+ROUTER_MODE="dashboard"
+run_models "$home" -- --claude
+check "list with a router key still exits 0" "$rc" "0"
+contains "list with a router key renders the selection" "$out" "[x] claude-opus-5"
+contains "list points at the dashboard for changes" "$out" "http://127.0.0.1:8080/ui/settings/models"
+for mutation in "disable gpt-5.6" "enable gpt-5.6" "providers disable openai" "prefer claude-opus-5"; do
+  # shellcheck disable=SC2086
+  run_models "$home" -- $mutation --claude
+  check "'models $mutation' refused by the router fails" "$rc" "1"
+  contains "'models $mutation' prints the router's dashboard message" "$out" \
+    "Change it in the router dashboard: http://127.0.0.1:8080/ui/settings/models"
+  case "$out" in
+    *rotate-key*) no "'models $mutation' does not blame the key" "no rotate-key advice" "$out" ;;
+    *)            ok "'models $mutation' does not blame the key" ;;
+  esac
+done
+ROUTER_MODE="full"
 
 # ---------- a router without the model-selection API ----------
 
@@ -551,8 +577,44 @@ for wrapper in router-models models; do
     no "$wrapper.md is shipped" "a file at $file" "missing"
     continue
   fi
-  bad="$(grep -o 'npx @weave-os/router models[^`]*' "$file" | grep -cv -- '--claude' || true)"
+  bad="$(grep -o '{{ROUTER_CLI}} models[^`]*' "$file" | grep -cv -- '--claude' || true)"
   check "every $wrapper.md command line names a client" "$bad" "0"
+done
+
+# The installed commands run the installer the user installed from: a --local
+# install from this checkout runs its install.sh, any other the published
+# package. A real install into an isolated HOME, with browser openers stubbed
+# and the network probes failing fast.
+install_bin="$work/install-bin"
+mkdir -p "$install_bin"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 22' >"$install_bin/curl"
+for opener in open xdg-open; do
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$install_bin/$opener"
+done
+chmod +x "$install_bin"/*
+checkout_installer="$(cd "$(dirname "$installer")" && pwd)/install.sh"
+for flavor in local published; do
+  home="$work/cmd-$flavor"; mkdir -p "$home"
+  if [ "$flavor" = "local" ]; then
+    where=(--local --base-url http://127.0.0.1:9)
+    cli="bash $(printf '%q' "$checkout_installer")"
+  else
+    where=(--base-url http://127.0.0.1:9)
+    cli="npx @weave-os/router"
+  fi
+  HOME="$home" XDG_CACHE_HOME="$home/.cache" PATH="$install_bin:$PATH" BROWSER=true \
+    WEAVE_ROUTER_KEY="rk_cmd" NO_COLOR=1 \
+    bash "$installer" --claude --scope user --quiet "${where[@]}" </dev/null >"$work/out" 2>&1
+  check "a $flavor install exits 0" "$?" "0"
+  for wrapper in router-models models router-off router-on router-status; do
+    file="$home/.claude/commands/$wrapper.md"
+    check "the $flavor $wrapper.md has no template token left" \
+      "$(grep -c '{{' "$file" 2>/dev/null)" "0"
+    check "the $flavor $wrapper.md may run its installer" \
+      "$(grep -c "^allowed-tools: Bash($cli:\*)\$" "$file" 2>/dev/null)" "1"
+  done
+  contains "the $flavor router-models.md lists through its installer" \
+    "$(cat "$home/.claude/commands/router-models.md" 2>/dev/null)" "\`$cli models --claude\`"
 done
 
 # The alias must stay a copy of the primary wrapper, or the two drift.

@@ -120,6 +120,9 @@ scope_explicit="false"
 install_dir=""
 base_url=""
 base_url_explicit="false"
+# Set by --local; with a checkout's install.sh it also makes the installed
+# commands and skills re-run that checkout (see router_cli).
+local_install="false"
 email=""
 email_explicit="false"
 return_url=""
@@ -1464,6 +1467,7 @@ while [ $# -gt 0 ]; do
       # Shorthand for local dev: localhost:8080 (matches `wv mr` / `make dev` default PORT).
       base_url="http://localhost:8080"
       base_url_explicit="true"
+      local_install="true"
       shift
       ;;
     --non-interactive)
@@ -1865,6 +1869,23 @@ fi
 if ! script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"; then
   script_dir=""
 fi
+
+# router_cli CLIENT prints the command the installed slash commands and skills
+# run to re-enter this installer (the {{ROUTER_CLI}} template token). A --local
+# install run from a router checkout points them at that checkout's install.sh,
+# so installer behaviour that is not published yet reaches them; every other
+# install keeps the published package. CLIENT is claude or codex: the Codex
+# skills name the package's weave-router bin explicitly.
+router_cli() {
+  if [ "$local_install" = "true" ] && [ -n "$script_dir" ] \
+     && [ -f "$script_dir/install.sh" ] && [ -f "$script_dir/../go.mod" ]; then
+    printf 'bash %q' "$script_dir/install.sh"
+  elif [ "$1" = "codex" ]; then
+    printf 'npx --package %s -y -- weave-router' "$npm_package_name"
+  else
+    printf 'npx %s' "$npm_package_name"
+  fi
+}
 
 # ---------- directive registry (embedded) ----------
 #
@@ -3060,8 +3081,10 @@ models_fail() {
       err "Could not reach the router at $base_url. Is it running?"
       ;;
     401|403)
-      # 403 with a message is the ROUTER_EXCLUDED_MODELS/PROVIDERS env pin,
-      # which is actionable on its own; a bare 401/403 is a key problem.
+      # A 403 with a message is actionable on its own: a self-hosted router
+      # keeps model-selection writes in its dashboard and names the page, or
+      # the ROUTER_EXCLUDED_MODELS/PROVIDERS env pin is active. A bare 401/403
+      # is a key problem.
       if [ -n "$detail" ]; then
         err "$detail"
       else
@@ -3205,8 +3228,9 @@ models_list() {
   fi
   models_render_list "$models_http_body"
   models_print_preferred
-  printf "\n%sEnable a model:%s  npx $npm_package_name models enable <id> --%s\n" "$C_DIM" "$C_RESET" "$target"
-  printf "%sDisable a model:%s npx $npm_package_name models disable <id> --%s\n" "$C_DIM" "$C_RESET" "$target"
+  # Writes are dashboard-only on a self-hosted router: the router key this
+  # listing used can read the selection but not change it.
+  printf "\n%sChange the selection in the router dashboard:%s %s/ui/settings/models\n" "$C_DIM" "$C_RESET" "$base_url"
 }
 
 models_providers_list() {
@@ -3989,6 +4013,7 @@ EOF
     scope_args=" --scope project"
   fi
 
+  local cli; cli="$(router_cli claude)"
   for cmd in $cmds; do
     src="$commands_src_dir/$cmd.md"
     dst="$dst_dir/$cmd.md"
@@ -3997,6 +4022,7 @@ EOF
     # cp-equivalent for the others since the token is absent).
     local body; body="$(cat "$src")"
     body="${body//\{\{SCOPE\}\}/$scope_args}"
+    body="${body//\{\{ROUTER_CLI\}\}/$cli}"
     ownership_file="$dst.weave-router"
     if [ "$scope" = "project" ] || [ -n "$install_dir" ]; then
       refuse_if_symlink "$dst"
@@ -4145,6 +4171,7 @@ install_codex_prompt_skills() {
     elif [ "$scope" = project ]; then scope_args=" --scope project"; fi
     body="$(<"$skill_src")"
     body="${body//\{\{SCOPE\}\}/$scope_args}"
+    body="${body//\{\{ROUTER_CLI\}\}/$(router_cli codex)}"
     printf '%s\n' "$body" >"$dst_file"
     # Prompt skills emit their directive through a script Codex execs; toggles
     # shell out to the installer's own verbs and ship none.
@@ -5389,11 +5416,14 @@ weave_installed_command_names() {
 }
 
 # weave_render_command prints $1 with the installer's {{SCOPE}} placeholder
-# replaced by $2, matching how install_slash_commands writes the same file.
+# replaced by $2 and {{ROUTER_CLI}} by the published package, matching how
+# install_slash_commands writes the same file for a published install. A
+# wrapper rendered for a checkout never matches, so it is never refreshed.
 # Trailing newlines are stripped on both sides of every comparison below.
 weave_render_command() {
   local body
   body="$(cat "$1" 2>/dev/null)" || return 1
+  body="${body//\{\{ROUTER_CLI\}\}/npx @weave-os/router}"
   printf '%s' "${body//\{\{SCOPE\}\}/$2}"
 }
 

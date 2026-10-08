@@ -4,6 +4,9 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
 
 	"weave-os/router/internal/auth"
 	"weave-os/router/internal/flags"
@@ -11,6 +14,7 @@ import (
 	"weave-os/router/internal/sqlc"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // Repository aggregates all repositories backed by the same DBTX.
@@ -146,7 +150,7 @@ func (r *installationRepo) UpdateFastModeModels(ctx context.Context, externalID,
 	return nil
 }
 
-func (r *installationRepo) UpdateExcludedModels(ctx context.Context, externalID, id string, models []string) error {
+func (r *installationRepo) UpdateExcludedModels(ctx context.Context, externalID, id string, models []string, universe []auth.RoutableModel) error {
 	parsed, err := uuid.Parse(id)
 	if err != nil {
 		return err
@@ -154,17 +158,21 @@ func (r *installationRepo) UpdateExcludedModels(ctx context.Context, externalID,
 	if models == nil {
 		models = []string{}
 	}
+	universeModels, universeProviders := splitUniverse(universe)
 	q := dbbudget.Queries(r.tx)
 	rows, err := q.UpdateModelRouterInstallationExcludedModels(ctx, sqlc.UpdateModelRouterInstallationExcludedModelsParams{
-		ID:             parsed,
-		ExternalID:     externalID,
-		ExcludedModels: models,
+		ID:                parsed,
+		ExternalID:        externalID,
+		ExcludedModels:    models,
+		GuardRoutable:     universe != nil,
+		UniverseModels:    universeModels,
+		UniverseProviders: universeProviders,
 	})
 	if err != nil {
 		return err
 	}
 	if rows == 0 {
-		return auth.ErrInstallationNotFound
+		return r.classifyGuardedNoop(ctx, externalID, id, universe != nil)
 	}
 	return nil
 }
@@ -192,7 +200,7 @@ func (r *installationRepo) UpdateAllowedModels(ctx context.Context, externalID, 
 	return nil
 }
 
-func (r *installationRepo) UpdateExcludedProviders(ctx context.Context, externalID, id string, providerNames []string) error {
+func (r *installationRepo) UpdateExcludedProviders(ctx context.Context, externalID, id string, providerNames []string, universe []auth.RoutableModel) error {
 	parsed, err := uuid.Parse(id)
 	if err != nil {
 		return err
@@ -200,19 +208,125 @@ func (r *installationRepo) UpdateExcludedProviders(ctx context.Context, external
 	if providerNames == nil {
 		providerNames = []string{}
 	}
+	universeModels, universeProviders := splitUniverse(universe)
 	q := dbbudget.Queries(r.tx)
 	rows, err := q.UpdateModelRouterInstallationExcludedProviders(ctx, sqlc.UpdateModelRouterInstallationExcludedProvidersParams{
 		ID:                parsed,
 		ExternalID:        externalID,
 		ExcludedProviders: providerNames,
+		GuardRoutable:     universe != nil,
+		UniverseModels:    universeModels,
+		UniverseProviders: universeProviders,
 	})
 	if err != nil {
 		return err
 	}
 	if rows == 0 {
-		return auth.ErrInstallationNotFound
+		return r.classifyGuardedNoop(ctx, externalID, id, universe != nil)
 	}
 	return nil
+}
+
+// EditSelectionItem runs the list's conditional add/remove. 0 rows is
+// ambiguous, so a follow-up read classifies it; the write itself was atomic.
+func (r *installationRepo) EditSelectionItem(ctx context.Context, externalID, id string, edit auth.SelectionItemEdit) error {
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		return err
+	}
+	keep := edit.Keep
+	if keep == nil {
+		keep = []string{}
+	}
+	universeModels, universeProviders := splitUniverse(edit.Universe)
+	guard := edit.Universe != nil
+	q := dbbudget.Queries(r.tx)
+	var rows int64
+	switch {
+	case edit.List == auth.SelectionExcludedModels && edit.Add:
+		rows, err = q.AddModelRouterInstallationExcludedModel(ctx, sqlc.AddModelRouterInstallationExcludedModelParams{
+			ID: parsed, ExternalID: externalID, Item: edit.Item, Keep: keep,
+			GuardRoutable: guard, UniverseModels: universeModels, UniverseProviders: universeProviders,
+		})
+	case edit.List == auth.SelectionExcludedModels:
+		rows, err = q.RemoveModelRouterInstallationExcludedModel(ctx, sqlc.RemoveModelRouterInstallationExcludedModelParams{
+			ID: parsed, ExternalID: externalID, Item: edit.Item, Keep: keep,
+		})
+	case edit.List == auth.SelectionExcludedProviders && edit.Add:
+		rows, err = q.AddModelRouterInstallationExcludedProvider(ctx, sqlc.AddModelRouterInstallationExcludedProviderParams{
+			ID: parsed, ExternalID: externalID, Item: edit.Item, Keep: keep,
+			GuardRoutable: guard, UniverseModels: universeModels, UniverseProviders: universeProviders,
+		})
+	case edit.List == auth.SelectionExcludedProviders:
+		rows, err = q.RemoveModelRouterInstallationExcludedProvider(ctx, sqlc.RemoveModelRouterInstallationExcludedProviderParams{
+			ID: parsed, ExternalID: externalID, Item: edit.Item, Keep: keep,
+		})
+	case edit.List == auth.SelectionPreferredModels && edit.Add:
+		rows, err = q.AddModelRouterInstallationPreferredModel(ctx, sqlc.AddModelRouterInstallationPreferredModelParams{
+			ID: parsed, ExternalID: externalID, Item: edit.Item, Keep: keep,
+		})
+	case edit.List == auth.SelectionPreferredModels:
+		rows, err = q.RemoveModelRouterInstallationPreferredModel(ctx, sqlc.RemoveModelRouterInstallationPreferredModelParams{
+			ID: parsed, ExternalID: externalID, Item: edit.Item, Keep: keep,
+		})
+	default:
+		return fmt.Errorf("postgres: unknown selection list %d", edit.List)
+	}
+	if err != nil {
+		return err
+	}
+	if rows > 0 {
+		return nil
+	}
+	installation, err := r.Get(ctx, externalID, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return auth.ErrInstallationNotFound
+		}
+		return err
+	}
+	present := slices.Contains(selectionList(installation, edit.List), edit.Item)
+	if edit.Add && !present && guard && edit.List != auth.SelectionPreferredModels {
+		return auth.ErrNoRoutableModels
+	}
+	return nil
+}
+
+// classifyGuardedNoop explains a 0-row guarded replace: the installation is
+// gone, or the guard refused the write.
+func (r *installationRepo) classifyGuardedNoop(ctx context.Context, externalID, id string, guarded bool) error {
+	if !guarded {
+		return auth.ErrInstallationNotFound
+	}
+	if _, err := r.Get(ctx, externalID, id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return auth.ErrInstallationNotFound
+		}
+		return err
+	}
+	return auth.ErrNoRoutableModels
+}
+
+func selectionList(installation *auth.Installation, list auth.SelectionList) []string {
+	switch list {
+	case auth.SelectionExcludedModels:
+		return installation.ExcludedModels
+	case auth.SelectionExcludedProviders:
+		return installation.ExcludedProviders
+	case auth.SelectionPreferredModels:
+		return installation.PreferredModels
+	}
+	return nil
+}
+
+func splitUniverse(universe []auth.RoutableModel) (models, providerNames []string) {
+	models = make([]string, 0, len(universe))
+	providerNames = make([]string, 0, len(universe))
+	for _, m := range universe {
+		models = append(models, m.Model)
+		providerNames = append(providerNames, m.Provider)
+	}
+	return models, providerNames
 }
 
 func (r *installationRepo) UpdatePreferredModels(ctx context.Context, externalID, id string, models []string) error {
@@ -223,7 +337,7 @@ func (r *installationRepo) UpdatePreferredModels(ctx context.Context, externalID
 	if models == nil {
 		models = []string{}
 	}
-	q := sqlc.New(r.tx)
+	q := dbbudget.Queries(r.tx)
 	rows, err := q.UpdateModelRouterInstallationPreferredModels(ctx, sqlc.UpdateModelRouterInstallationPreferredModelsParams{
 		ID:              parsed,
 		ExternalID:      externalID,

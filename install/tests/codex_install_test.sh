@@ -117,6 +117,15 @@ grep -Fq 'base_url = "http://localhost:8080/v1"' "$config" \
 if grep -Fq 'X-Weave-Router-Strategy' "$config"; then
   fail "Codex --local forced the optional HMM strategy"
 fi
+# A --local install from this checkout points its skills at the checkout's
+# installer; the hosted reinstall below points them back at the package.
+models_skill="$home/.codex/skills/router-models/SKILL.md"
+checkout_installer="$(cd "$(dirname "$installer")" && pwd)/install.sh"
+grep -Fxq "bash $(printf '%q' "$checkout_installer") models --codex" "$models_skill" \
+  || fail "Codex --local router-models skill does not run the checkout's installer"
+if grep -Fq '{{' "$models_skill"; then
+  fail "Codex router-models skill kept a template token"
+fi
 run_install
 grep -Fq 'base_url = "http://127.0.0.1:9/v1"' "$config" \
   || fail "Codex custom --base-url was not preserved"
@@ -127,6 +136,8 @@ run_hosted_install
 if grep -Fq 'X-Weave-Router-Strategy' "$config"; then
   fail "public-hosted Codex reinstall pinned a routing strategy"
 fi
+grep -Fxq 'npx --package @weave-os/router -y -- weave-router models --codex' "$models_skill" \
+  || fail "Codex router-models skill does not run the published package"
 
 # The stale wrappers must no longer suggest unsupported `/prompts:*` aliases.
 for command in force-model unforce-model router-feedback fm ufm rf; do
