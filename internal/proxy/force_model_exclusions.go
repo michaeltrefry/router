@@ -50,7 +50,7 @@ func (s *Service) forcedModelBinding(ctx context.Context, model, provider string
 		return gatewayForcedBinding(model, gateways, s.customBindingsForRequest(ctx))
 	}
 	excluded := s.policyExcludedProviders(ctx)
-	bindings := s.servableBindings(model, provider)
+	bindings := s.servableBindings(ctx, model, provider)
 	if len(excluded) == 0 {
 		for _, binding := range bindings {
 			if binding == provider {
@@ -101,10 +101,11 @@ func gatewayForcedBinding(
 }
 
 // servableBindings returns the catalog bindings for model that hold a
-// deployment key, in catalog preference order, or [provider] for passthrough
-// IDs. Unkeyed bindings are excluded — they can't be dispatched to, so
-// shouldn't count as an escape hatch.
-func (s *Service) servableBindings(model, provider string) []string {
+// deployment key or that the request's enrolled subscription pool serves, in
+// catalog preference order, or [provider] for passthrough IDs. Other bindings
+// are excluded — they can't be dispatched to, so shouldn't count as an escape
+// hatch.
+func (s *Service) servableBindings(ctx context.Context, model, provider string) []string {
 	m, ok := catalog.ByID(model)
 	if !ok || len(m.Providers) == 0 {
 		return []string{provider}
@@ -112,7 +113,7 @@ func (s *Service) servableBindings(model, provider string) []string {
 	out := make([]string, 0, len(m.Providers))
 	for _, b := range m.Providers {
 		if s.deploymentKeyedProviders != nil {
-			if _, keyed := s.deploymentKeyedProviders[b.Provider]; !keyed {
+			if _, keyed := s.deploymentKeyedProviders[b.Provider]; !keyed && !managedSubscriptionCanServe(ctx, b.Provider, model) {
 				continue
 			}
 		}

@@ -179,6 +179,11 @@ func (s *Service) dispatchPlanned(ctx context.Context, in failoverInputs, plan i
 			} else {
 				// The lease ran under the rotation deadline; dispatch must not inherit it.
 				credentialCtx = context.WithValue(attemptCtx, CredentialsContextKey{}, requestcontext.CredentialsFromContext(credentialCtx))
+				log.Info("Managed subscription account leased",
+					"provider", decision.Provider,
+					"model", decision.Model,
+					"account_id_prefix", lease.AccountID[:min(8, len(lease.AccountID))],
+					"account_attempt", account)
 			}
 			managedBinding = managedBinding || managedAttempt
 			if usage, _ := ctx.Value(ManagedSubscriptionUsageContextKey{}).(*ManagedSubscriptionUsage); usage != nil && managedAttempt {
