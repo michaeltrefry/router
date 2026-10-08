@@ -221,6 +221,9 @@ func (fb *subscriptionLocalFallback) logServing(ctx context.Context, res turnLoo
 // session-pin and HMM usage, and the policy outcome, keep the original pick
 // and the next turn tries the subscription again.
 func (fb *subscriptionLocalFallback) served(res *turnLoopResult) {
-	res.SubstitutedFrom = fb.original
+	// A mapped selection keeps the router's own pick, not the mapped target.
+	if res.SubstitutionReason != reasonModelMapping {
+		res.SubstitutedFrom = fb.original
+	}
 	res.SubstitutionReason = reasonSubscriptionLocalFallback
 }

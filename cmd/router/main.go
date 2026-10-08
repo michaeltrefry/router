@@ -533,6 +533,12 @@ func main() {
 		panic(err)
 	}
 	logger.Info("Routing via cluster scorer", "embedder", defaultEmbedderID)
+	if multi, ok := rtr.(*cluster.Multiversion); ok {
+		if err := validateModelMappingSelectable(localModels.modelMapping, multi.Default, multi.DefaultDeployedModels()); err != nil {
+			logger.Error("Invalid local models configuration; refusing to boot", "err", err)
+			panic(err)
+		}
+	}
 
 	cache := auth.NewLRUAPIKeyCache(10000, 50000, 5*time.Minute, 60*time.Second)
 	userCache := auth.NewLRUUserCache(50000, 10*time.Minute)
@@ -1318,7 +1324,9 @@ func main() {
 		WithSubAgentOverride(subAgentProvider, subAgentModel).
 		WithLocalTurnRoute(localModels.turnRoute).
 		WithMidTierSubstitute(localModels.midTier).
+		WithSubstitutionRules(localModels.substitutionRules).
 		WithSubscriptionLocalFallback(localModels.subscriptionFallback).
+		WithModelMapping(localModels.modelMapping).
 		WithPlannerEnabled(plannerEnabled).
 		WithScoreToolResultTurns(scoreToolResultTurns).
 		WithCyberRefusalRepin(cyberRefusalRepin).

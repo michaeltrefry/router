@@ -39,6 +39,11 @@ func ClientIdentityFromHeaders(h http.Header) ClientIdentity {
 		Eval:        eval,
 		RolloutID:   NormalizeRolloutID(h.Get(RolloutIDHeader)),
 	}
+	if id.ClientApp == ClientAppCodex && h.Get(codexSubAgentHeader) == codexSpawnedSubAgent {
+		if thread := requestcontext.NormalizeClientIdentifier(h.Get(codexThreadHeader)); thread != id.SessionID {
+			id.CodexSpawnThreadID = thread
+		}
+	}
 	if id.ClientApp == ClientAppOpencode {
 		id.OpenCodeSubagent = requestcontext.IsOpenCodeSubagent(h)
 		if id.SessionID == "" {

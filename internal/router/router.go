@@ -87,6 +87,17 @@ type Overrides struct {
 	ForceEffort string
 }
 
+// ContextFit is one request's context-window requirement.
+type ContextFit struct {
+	// OverflowTokens is the full-body input estimate, tool definitions included.
+	OverflowTokens int
+	// SignatureSavings is the tokens a model that strips Anthropic thinking
+	// signatures does not receive.
+	SignatureSavings int
+	// OutputReserve is the output room the model must also have.
+	OutputReserve int
+}
+
 type Request struct {
 	TaskDomain *taskdomain.Input
 	// ClassifierPrediction is set only after release-bound durable classification.
@@ -114,6 +125,10 @@ type Request struct {
 	// with a typed error rather than silently ignoring.
 	ForceCluster         string
 	EstimatedInputTokens int
+	// ContextFit is the context-window requirement the ingress pre-filter
+	// applied to the scored roster, so a model outside it (a mapping target,
+	// a local model) is held to the same requirement. Zero means not computed.
+	ContextFit ContextFit
 	// OrganizationID and InstallationID are opaque external identifiers used
 	// to correlate policy decisions with rollout and privacy state.
 	OrganizationID string

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -253,9 +255,13 @@ type turnLoopResult struct {
 	// SubstitutedFrom is the router's own pick when a local model replaced it
 	// in Decision; zero otherwise.
 	SubstitutedFrom router.Decision
-	// SubstitutionReason names what replaced SubstitutedFrom: the mid-tier
-	// substitute or the subscription local fallback.
+	// SubstitutionReason names what replaced SubstitutedFrom: the model
+	// mapping, a substitution rule, the mid-tier substitute or the
+	// subscription local fallback.
 	SubstitutionReason string
+	// MappedDecision is the model mapping's target for this turn, kept when
+	// a later rule replaces it in Decision; zero when no mapping applied.
+	MappedDecision router.Decision
 	// LocalTurnRouted marks a decision the local turn route made.
 	LocalTurnRouted bool
 	// PlannerDecision holds the planner's verdict and EV math when the planner ran.
@@ -398,8 +404,30 @@ func (a authorityCacheShadow) EVRan() bool {
 func (r turnLoopResult) modelSwitched() bool {
 	// Compare serving identities: a same-model effort change reshapes the
 	// prompt-cache prefix and invalidates thinking-block signatures.
-	transition := r.PriorServedModel != "" && r.PriorServedModel != r.Decision.ServedIdentity()
+	transition := r.PriorServedModel != "" && r.PriorServedModel != r.recordedSelection().ServedIdentity()
 	return transition || r.SessionEverSwitched || r.StripThinkingBlocks
+}
+
+// recordedSelection is the decision session state records for this turn and
+// so the one PriorServedModel is compared against: the router's own pick when
+// the model mapping or a substitution rule serves another model in its place
+// every turn, else Decision. A subscription fallback or local-failure rescue
+// is not included, since its next turn returns to the original.
+func (r turnLoopResult) recordedSelection() router.Decision {
+	switch r.SubstitutionReason {
+	case reasonModelMapping, reasonMidTierSubstitute, reasonSubstitutionRule:
+		return r.SubstitutedFrom
+	}
+	return r.Decision
+}
+
+// priorServed reports whether model continues the session's last served
+// model; the turn's own Decision is judged by its recordedSelection.
+func (r turnLoopResult) priorServed(model string) bool {
+	if model == r.Decision.Model {
+		model = r.recordedSelection().Model
+	}
+	return baseModelOf(r.PriorServedModel) == model
 }
 
 func isHMMDecision(dec router.Decision) bool {
@@ -715,13 +743,29 @@ func (s *Service) runTurnLoop(
 	reqHeaders http.Header,
 	req router.Request,
 ) (res turnLoopResult, routeErr error) {
+	entryCtx, entryReq := ctx, req
 	defer func() {
 		if routeErr == nil {
 			routeErr = policyPinServed(ctx, res)
 			if routeErr == nil {
-				s.substituteMidTier(ctx, &res, req)
+				s.applyServingRules(ctx, &res, req)
 				logAuthoritativeUpgrade(ctx, res)
 			}
+		}
+		if routeErr != nil {
+			return
+		}
+		// A mapping-admitted model the mapping did not retarget has no
+		// credential on this request: route again as if it were never admitted.
+		// routeServable already rescored the planner's fresh pick; this catches
+		// decisions from other branches, e.g. a session pin.
+		if admitted := unservedMappingAdmission(entryCtx, res); admitted != nil {
+			observability.FromContext(ctx).Info("Model mapping could not serve a subscription-admitted selection; routing without mapping-admitted models",
+				"selected_model", res.Decision.Model,
+				"excluded_models", strings.Join(slices.Sorted(maps.Keys(admitted)), ","),
+			)
+			entryReq.ExcludedModels = mergeExcludedModels(entryReq.ExcludedModels, admitted)
+			res, routeErr = s.runTurnLoop(withMappingAdmitted(entryCtx, nil), env, feats, apiKeyID, installationID, subAgentHint, reqHeaders, entryReq)
 		}
 	}()
 	log := observability.FromContext(ctx)
@@ -1708,13 +1752,34 @@ func (s *Service) runTurnLoop(
 		// we pick the next-best model instead of silently downgrading the user's
 		// directive. Fall back to the unconstrained scorer if no in-tier model
 		// survives the request's other filters.
+		// A pick admitted only for its mapping that the mapping cannot retarget
+		// has no credential on this request. Score again without the admitted
+		// models before the planner, a handover or a pin write builds on it.
+		routeServable := func(r router.Request) (router.Decision, error) {
+			dec, err := s.routeFor(ctx, r)
+			if err != nil {
+				return dec, err
+			}
+			probe := res
+			probe.Decision = dec
+			admitted := s.unmappableAdmission(ctx, probe, r)
+			if admitted == nil {
+				return dec, nil
+			}
+			log.Info("Model mapping cannot serve a subscription-admitted pick; routing without mapping-admitted models",
+				"selected_model", dec.Model,
+				"excluded_models", strings.Join(slices.Sorted(maps.Keys(admitted)), ","),
+			)
+			r.ExcludedModels = mergeExcludedModels(r.ExcludedModels, admitted)
+			return s.routeFor(ctx, r)
+		}
 		var fresh router.Decision
 		routed := false
 		if forcedTierFloor != catalog.TierUnknown {
 			if constrained, ok := s.restrictToTier(req.ExcludedModels, forcedTierFloor); ok {
 				tierReq := req
 				tierReq.ExcludedModels = constrained
-				if dec, derr := s.routeFor(ctx, tierReq); derr == nil {
+				if dec, derr := routeServable(tierReq); derr == nil {
 					fresh, routed = dec, true
 					log.Info("user-forced model evicted; rerouted to next-best in same tier",
 						"forced_tier", forcedTierFloor.String(),
@@ -1730,7 +1795,7 @@ func (s *Service) runTurnLoop(
 			}
 		}
 		if !routed {
-			dec, err := s.routeFor(ctx, req)
+			dec, err := routeServable(req)
 			if err != nil {
 				// Deadline != correctness failure: all candidates were dispatchable; only
 				// ranking is lost. Contract violations still fail closed via isPolicyDeadlineErr.

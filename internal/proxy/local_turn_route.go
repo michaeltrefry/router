@@ -88,24 +88,50 @@ func (s *Service) localTurnTarget(tt turntype.TurnType, req router.Request) (pro
 // request fits its context window, carries no images it cannot read, and
 // carries no tools when it is rated low for tool or agentic use.
 func localModelServes(provider, model string, req router.Request) bool {
-	if !automaticPinEligible(sessionpin.Pin{Provider: provider, Model: model}, req) {
-		return false
+	return automaticServingIneligibility(provider, model, req) == ""
+}
+
+// automaticServingIneligibility names why a model the router serves on its
+// own behalf may not take req, or returns "" when it may. The context check
+// uses the full-body estimate and output reserve the ingress pre-filter
+// applied to the scored roster, since text alone omits tool definitions.
+func automaticServingIneligibility(provider, model string, req router.Request) string {
+	if provider == "" || model == "" {
+		return "unconfigured"
 	}
-	if req.EstimatedInputTokens > catalog.ContextWindowForBinding(model, provider) {
-		return false
+	if _, excluded := req.ExcludedModels[model]; excluded {
+		return "request_excluded"
+	}
+	if req.EnabledProviders != nil {
+		if _, enabled := req.EnabledProviders[provider]; !enabled {
+			return "provider_not_enabled"
+		}
+	}
+	if !pinServesImages(sessionpin.Pin{Provider: provider, Model: model}, req) {
+		return "not_image_capable"
+	}
+	if automaticallyDisabled(req, model) {
+		return "automatic_routing_disabled"
+	}
+	fit := req.ContextFit
+	if req.EstimatedInputTokens > catalog.ContextWindowForBinding(model, provider) ||
+		!siblingFitsContext(model, provider, fit.OverflowTokens, fit.SignatureSavings, fit.OutputReserve) {
+		return "context_window_exceeded"
 	}
 	if entry, known := catalog.ByID(model); known && req.HasTools &&
 		(entry.ToolUseQuality == catalog.ToolUseLow || entry.AgenticUse == catalog.AgenticLow) {
-		return false
+		return "low_tool_rating"
 	}
-	return true
+	return ""
 }
 
 // codexSubAgentHeader carries the kind of Codex thread a request comes from;
-// codexSpawnedSubAgent marks a sub-agent the model spawned.
+// codexSpawnedSubAgent marks a sub-agent the model spawned. codexThreadHeader
+// names the thread; a main thread's equals its Session-Id.
 const (
 	codexSubAgentHeader  = "x-openai-subagent"
 	codexSpawnedSubAgent = "collab_spawn"
+	codexThreadHeader    = "Thread-Id"
 )
 
 // codexLocalSubAgentTurn reports whether a Codex spawned sub-agent turn on

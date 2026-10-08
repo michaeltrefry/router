@@ -403,15 +403,22 @@ func rescueDecisionFor(failed router.Decision, model, provider, reason string) r
 	out.Provider = provider
 	out.Effort = ""
 	out.Reason = reason
-	if failed.Metadata != nil {
-		md := *failed.Metadata
-		md.SelectedArmID = ""
-		md.SelectedRosterArmID = ""
-		md.SelectedUpstreamID = ""
-		md.BindingIndex = 0
-		out.Metadata = &md
-	}
+	out.Metadata = withoutArmSelection(failed.Metadata)
 	return out
+}
+
+// withoutArmSelection copies md with its arm selection cleared, for a
+// decision retargeted onto another model; nil stays nil.
+func withoutArmSelection(md *router.RoutingMetadata) *router.RoutingMetadata {
+	if md == nil {
+		return nil
+	}
+	out := *md
+	out.SelectedArmID = ""
+	out.SelectedRosterArmID = ""
+	out.SelectedUpstreamID = ""
+	out.BindingIndex = 0
+	return &out
 }
 
 // keyedProvidersExcluding returns the deployment-keyed providers minus the

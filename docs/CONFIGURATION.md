@@ -253,6 +253,136 @@ cannot read, or carries tools and the model is rated `tool_use: low` or
 precedence over `ROUTER_HARD_PIN_*` and `ROUTER_SUBAGENT_*` for the turns it
 serves.
 
+#### Model mapping
+
+An optional top-level `model_mapping` block serves the router's automatic
+selection of one catalog model on another, for example a trained scorer's
+roster model on the current release of the same family. It needs no `models`
+entries:
+
+```yaml
+model_mapping:
+  claude-opus-5: claude-opus-5-5
+  claude-sonnet-5: claude-sonnet-5-5
+```
+
+Both sides must be built-in catalog models (a local model is not a valid
+target), and a target must not itself be mapped; the router fails to boot with
+`model mapping: source must be a catalog model`, `model mapping: target must be
+a catalog model` or `model mapping: target must not itself be mapped`
+otherwise. A source retired from automatic routing (an untiered catalog row such
+as `claude-fable-5` or `gpt-5.5`) takes its target's tier, so the scorer and the
+HMM and RL policies can select it again; a source with its own tier keeps it.
+Every source must then be a candidate of the active cluster scorer
+(`ROUTER_CLUSTER_VERSION`, after its roster is filtered to the deployment's
+providers), or the router fails to boot with `model mapping: source is never
+selected by the active cluster scorer`. The target keeps the selection's provider when it is bound there,
+else uses the target's primary provider, and is authorized as a deployment
+override. A turn whose target the request may not use is served on the
+router's own pick instead: the installation excluded the target or its
+provider, the target is outside an allowed-models list, the target's provider
+has no registered client in this deployment (boot does not require one), or the
+target fails the same request checks as a local model serving on the router's
+behalf. Those checks reject a target whose provider is not enrolled for the
+request (for example an OpenAI target on a Claude Code request with no OpenAI
+key or Codex subscription), a target the request's own exclusions remove, a request whose full body (tool definitions included) plus output
+reserve exceeds the target's context window, images the target cannot read,
+tools on a target rated low for tool or agentic use, and a target disabled for
+automatic routing. Each skip logs `Model mapping skipped; serving the trained
+model` with `reason` (`excluded` for the installation's exclusions,
+`not_allowed`, `provider_excluded`, `no_dispatch_client`, `request_excluded`
+for the request's own exclusions, `provider_not_enabled`, `not_image_capable`,
+`context_window_exceeded`, `low_tool_rating` or `automatic_routing_disabled`),
+`original_model` and `mapped_model`.
+
+When a Codex subscription is the only OpenAI credential, an OpenAI source the
+subscription cannot serve (such as `gpt-5.4-mini` or `gpt-5.5`) stays
+selectable when its target can be served on the subscription (such as
+`gpt-6-luna` or `gpt-6.1-sol`). If such a turn would still be dispatched on the
+source itself (its mapping was skipped as above, or the turn is not mapped), it
+is never sent: the router logs `Model mapping could not serve a
+subscription-admitted selection; routing without mapping-admitted models` and
+routes the turn again with those sources excluded, exactly as without the
+mapping. With nothing else eligible the turn fails with the usual
+no-eligible-provider error.
+
+Mapping has the same scope as mid-tier substitution: an explicit
+`/force-model`, hard-pinned or local-turn-routed utility turns, classifier and
+compaction turns, usage-bypass or caller-model passthrough turns, and turns
+under an honoured `x-weave-policy-pin` are dispatched unmapped. The session
+pin, planner state and HMM history keep the router's own pick, and the turn's
+policy outcome reports that pick and is excluded from training
+(`training_exclusion_reason: model_mapping`).
+
+Mapping runs first, then the substitution rules (matched on the mapped model),
+then mid-tier substitution, which still judges the tier of the router's own
+pick: a `claude-sonnet-5` selection is mapped to
+`claude-sonnet-5-5` and, with `mid_tier_substitute` on, served on the local
+model; if that local model fails before output, the turn falls back to
+`claude-sonnet-5-5`.
+
+A mapped turn's completion line carries `decision_model` (the served model),
+`substituted_from_model` / `substituted_from_provider` (the router's pick),
+`substitution_reason: model_mapping` and `mapped_model`; a mapped then
+substituted turn carries `substitution_reason: mid_tier_substitute` and the
+mapped model in `mapped_model`. The routing marker reads
+`→ <mapped model> · mapped from <original model>`, or
+`→ <local model> (local) · substitute for <mapped model> (mapped from <original model>)`
+when the mapped turn was then substituted. Because the session records the
+router's pick, a later turn with the same pick is not a model switch: it shows
+no marker and keeps the transcript's signed thinking blocks.
+
+#### Substitution rules
+
+An optional top-level `substitution_rules` list serves the router's automatic
+selection on a configured local model when the model the turn lands on
+matches a pattern:
+
+```yaml
+substitution_rules:
+  - match: gpt-*-luna
+    model: qwen3.8-flash-next
+  - match: gpt-*-terra
+    model: qwen3.8-flash-next
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `match` | yes | A catalog model ID or a glob over model IDs (Go `path.Match`: `*`, `?`, `[...]`). It must name at least one built-in catalog model. |
+| `model` | yes | `id` of an entry under `models`; any tier. |
+
+The router fails to boot with `substitution rule N: substitution rule: model
+must name a configured local model`, `... match is not a valid glob pattern`
+or `... match names no catalog model` otherwise.
+
+Serving rules run in one order after every routing step: `model_mapping`
+first, then `substitution_rules` in the order listed, then
+`mid_tier_substitute`, which is the last rule. The first matching rule wins
+and later rules are not tried. A pattern rule matches the final model, after
+mapping; `mid_tier_substitute` matches the tier of the router's own pick. With
+the shipped mapping `gpt-5.4-mini: gpt-6-luna`, a `gpt-5.4-mini` selection
+becomes `gpt-6-luna` and the `gpt-*-luna` rule serves it locally.
+
+Rules have the same scope as mid-tier substitution (an explicit
+`/force-model`, hard-pinned or local-turn-routed utility turns, classifier and
+compaction turns, usage-bypass or caller-model passthrough turns, and turns
+under an honoured `x-weave-policy-pin` are never substituted) and the same
+local-model checks. When the matched rule's local model cannot carry the turn,
+the turn is served on the matched model (the mapped model when mapped, else the
+router's pick) and logs `Local substitute skipped; serving the matched model`
+with `reason`, `matched_model` and `substitute_model`. When the local model
+fails before output, the local failure fallback serves the turn on that same
+matched model.
+
+A substituted turn logs `Local substitute served turn` with
+`substitution_reason: substitution_rule`. As with mid-tier substitution, the
+session pin, planner state, HMM history and policy outcome keep the router's
+own pick (`training_exclusion_reason: substitution_rule`), so a later turn with
+the same pick is not a model switch. The routing marker reads
+`→ <id> (local) · substitute for <model>`, or
+`→ <id> (local) · substitute for <mapped model> (mapped from <original model>)`
+for a mapped turn.
+
 #### Mid-tier substitution
 
 An optional top-level `mid_tier_substitute` block serves turns the router
@@ -288,8 +418,13 @@ starts once routing engages. A bypass attempt that fails with a retryable
 error is rerouted through the scorer, and a mid-tier pick on that reroute is
 substituted.
 
-A substituted turn logs `Mid-tier substitute served turn` with the original and
-substitute models, its completion line carries `substituted_from_model` and
+Mid-tier substitution is the last serving rule: `substitution_rules` are tried
+first, and a pattern rule that matches the turn takes it even when the
+selection is mid tier.
+
+A substituted turn logs `Local substitute served turn` with
+`substitution_reason: mid_tier_substitute` and the original and substitute
+models, its completion line carries `substituted_from_model` and
 `substituted_from_provider` next to `decision_model`, and its routing marker
 reads `→ <substitute> (local) · substitute for <original model>`. Its policy outcome reports the
 original model as the selection and is excluded from training
@@ -351,13 +486,14 @@ badge naming the model that answered.
 
 #### Local failure fallback
 
-When a turn that turn-type routing or mid-tier substitution put on a local
-model fails before anything reached the client (connection refused, a 5xx, a
+When a turn that turn-type routing, a substitution rule or mid-tier
+substitution put on a local model fails before anything reached the client (connection refused, a 5xx, a
 response-header timeout, or any other error before the first byte), the router
 serves the same turn on the target it would have had without the local rule:
 
-- a mid-tier substituted turn goes to the router's original pick (the model
-  named in `substituted_from_model`), with no second routing pass;
+- a turn a substitution rule or mid-tier substitution served goes to the
+  router's original pick (the model named in `substituted_from_model`), or to
+  its mapped model when `model_mapping` applied, with no second routing pass;
 - a turn-type routed turn is routed again with local rules disabled, only
   after the local model has failed: a title or probe turn lands on its utility
   hard pin, a sub-agent turn on `ROUTER_SUBAGENT_*` or the scorer, a Codex
@@ -389,8 +525,8 @@ subscription is already read spent with no paid key goes to the subscription
 fallback model without contacting the vendor, as on any other turn.
 
 A rescued turn logs `Local model failed before output; serving the turn on its
-normal route` with `local_model`, `local_source` (`local_turn_route` or
-`mid_tier_substitute`), `fallback_model` and the failure's status. Its
+normal route` with `local_model`, `local_source` (`local_turn_route`,
+`substitution_rule` or `mid_tier_substitute`), `fallback_model` and the failure's status. Its
 completion line carries `local_failure_fallback=true` and the serving model as
 `decision_model`; the span carries `dispatch.local_failure_fallback`. The
 marker is the one the normal route would show, followed by
@@ -795,6 +931,16 @@ with nowhere to go (HTTP 503 from the scorer), so exclude deliberately.
 pin applies to parent and child agent threads that share the same client-session
 identity, regardless of their first prompt or active routing strategy. Clients
 that send no session identity can only be pinned at the current thread scope.
+Codex spawned sub-agents (`x-openai-subagent: collab_spawn`) on `/v1/responses`
+are the exception:
+they share their parent's `session-id` but send their own `thread-id`, and the
+force pin is keyed on that thread. A force in the main thread (whose `thread-id`
+equals its `session-id`) therefore holds only the main thread, and its spawned
+sub-agents keep normal routing, including the local turn route. A force issued
+inside a sub-agent pins only that sub-agent. Codex review, compaction and other
+threads keep the session-wide pin. Session pins, caching and `client_session_id`
+remain keyed on the session. An `x-weave-force-model` header still forces the
+request that carries it, sub-agent or not.
 Codex handles its own `/model` locally and never sends the command itself; on
 an opted-in install (`X-Weave-Codex-Native-Model-Pin: 1`) the router instead
 keys off the `<model_switch>` developer fragment Codex records when the user

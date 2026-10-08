@@ -1,0 +1,658 @@
+package proxy_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"weave-os/router/internal/observability"
+	"weave-os/router/internal/providers"
+	"weave-os/router/internal/proxy"
+	"weave-os/router/internal/router"
+	"weave-os/router/internal/router/catalog"
+	"weave-os/router/internal/router/handover"
+	"weave-os/router/internal/router/sessionpin"
+	"weave-os/router/internal/translate"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+var opus5Decision = router.Decision{Provider: providers.ProviderAnthropic, Model: "claude-opus-5", Reason: "cluster"}
+
+var testMappingPolicyPin = router.PolicyPin{
+	ArtifactSHA256: strings.Repeat("a", 64),
+	RosterSHA256:   strings.Repeat("b", 64),
+}
+
+var defaultTestMapping = proxy.ModelMapping{
+	"claude-opus-5":   "claude-opus-5-5",
+	"claude-sonnet-5": "claude-sonnet-5-5",
+}
+
+// upstreamModel decodes the model the upstream request body named.
+func upstreamModel(t *testing.T, body []byte) string {
+	t.Helper()
+	var envelope struct {
+		Model string `json:"model"`
+	}
+	require.NoError(t, json.Unmarshal(body, &envelope))
+	return envelope.Model
+}
+
+func TestModelMapping_ScorerPickDispatchesToMappedModel(t *testing.T) {
+	f := newMidTierFixture(t, "test-map-opus", opus5Decision, false, nil)
+	f.svc.WithModelMapping(defaultTestMapping)
+	var logs bytes.Buffer
+	ctx := observability.WithLogger(authedCtx(uuid.New().String()), slog.New(slog.NewJSONHandler(&logs, nil)))
+
+	rec := f.serve(t, ctx, pinTestBody, nil)
+
+	require.Len(t, f.anthropic.proxyBodies, 1)
+	assert.Equal(t, "claude-opus-5-5", upstreamModel(t, f.anthropic.proxyBodies[0]))
+	assert.Equal(t, "claude-opus-5-5", rec.Header().Get(proxy.HeaderRouterModel))
+	line := completionLine(t, &logs)
+	assert.Equal(t, "claude-opus-5-5", line["decision_model"])
+	assert.Equal(t, "claude-opus-5", line["substituted_from_model"])
+	assert.Equal(t, "model_mapping", line["substitution_reason"])
+	assert.Contains(t, line["routing_marker"], "→ claude-opus-5-5 · mapped from claude-opus-5")
+}
+
+func TestModelMapping_UnmappedDispatches(t *testing.T) {
+	policyPinned := opus5Decision
+	policyPinned.Metadata = &router.RoutingMetadata{PolicyPinHonoured: true}
+	cases := map[string]struct {
+		body     string
+		headers  http.Header
+		decision router.Decision
+		ctx      func(context.Context) context.Context
+		want     string
+	}{
+		"user-forced model": {body: pinTestBody, headers: http.Header{"X-Weave-Force-Model": []string{"claude-opus-5"}}, want: "claude-opus-5"},
+		"classifier turn":   {body: classifierBody, want: "claude-opus-5"},
+		// Compaction is hard-pinned to the deployment's utility model.
+		"compaction turn": {body: compactionBody, want: "claude-haiku-4-5"},
+		"honoured policy pin": {
+			body:     pinTestBody,
+			decision: policyPinned,
+			ctx: func(ctx context.Context) context.Context {
+				return router.WithPolicyPinRequest(ctx, router.PolicyPinRequest{Pin: testMappingPolicyPin, Authorized: true})
+			},
+			want: "claude-opus-5",
+		},
+	}
+	mapping := proxy.ModelMapping{"claude-opus-5": "claude-opus-5-5", "claude-haiku-4-5": "claude-sonnet-5-5"}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			decision := opus5Decision
+			if tc.decision.Model != "" {
+				decision = tc.decision
+			}
+			f := newMidTierFixture(t, "test-map-unmapped", decision, false, nil)
+			f.svc.WithModelMapping(mapping)
+			ctx := authedCtx(uuid.New().String())
+			if tc.ctx != nil {
+				ctx = tc.ctx(ctx)
+			}
+
+			rec := f.serve(t, ctx, tc.body, tc.headers)
+
+			require.Len(t, f.anthropic.proxyBodies, 1)
+			assert.Equal(t, tc.want, upstreamModel(t, f.anthropic.proxyBodies[0]))
+			assert.Equal(t, tc.want, rec.Header().Get(proxy.HeaderRouterModel))
+		})
+	}
+}
+
+// The session pin keeps the scorer's own pick, so the trained model stays the
+// session's selection and every turn is mapped again.
+func TestModelMapping_PinKeepsTrainedDecision(t *testing.T) {
+	f := newMidTierFixture(t, "test-map-pin", opus5Decision, false, nil)
+	f.svc.WithModelMapping(defaultTestMapping)
+	f.store.persistUpserts = true
+	withUsageResponses(f)
+	ctx := authedCtx(uuid.New().String())
+
+	f.serve(t, ctx, pinTestBody, nil)
+	rec := f.serve(t, ctx, midTierToolResultBody, nil)
+
+	assert.Equal(t, "claude-opus-5-5", rec.Header().Get(proxy.HeaderRouterModel))
+	require.Len(t, f.anthropic.proxyBodies, 2)
+	assert.Equal(t, "claude-opus-5-5", upstreamModel(t, f.anthropic.proxyBodies[1]))
+	f.store.mu.Lock()
+	defer f.store.mu.Unlock()
+	require.NotEmpty(t, f.store.upserts)
+	for _, pin := range f.store.upserts {
+		assert.Equal(t, "claude-opus-5", pin.Model, "the session pin names the scorer's pick, never the mapped model")
+	}
+	for _, usage := range f.store.usages {
+		assert.Equal(t, "claude-opus-5", usage.ServedModel)
+	}
+}
+
+// Mapping runs before the mid-tier substitute, which still judges the tier of
+// the scorer's pick: a mapped sonnet decision is served locally, and the
+// session keeps the scorer's pick.
+func TestModelMapping_MappedMidTierPickIsSubstituted(t *testing.T) {
+	f := newMidTierFixture(t, "test-map-mid", sonnet5Decision, true, nil)
+	f.svc.WithModelMapping(defaultTestMapping)
+	var logs bytes.Buffer
+	ctx := observability.WithLogger(authedCtx(uuid.New().String()), slog.New(slog.NewJSONHandler(&logs, nil)))
+
+	rec := f.serve(t, ctx, pinTestBody, nil)
+
+	require.Len(t, f.local.proxyBodies, 1)
+	assert.Empty(t, f.anthropic.proxyBodies)
+	assert.Equal(t, f.model, rec.Header().Get(proxy.HeaderRouterModel))
+	line := completionLine(t, &logs)
+	assert.Equal(t, "claude-sonnet-5", line["substituted_from_model"])
+	assert.Equal(t, "claude-sonnet-5-5", line["mapped_model"])
+	assert.Equal(t, "mid_tier_substitute", line["substitution_reason"])
+	assert.Contains(t, line["routing_marker"], "→ "+f.model+" (local) · substitute for claude-sonnet-5-5 (mapped from claude-sonnet-5)")
+}
+
+// A failed substitute for a mapped pick falls back to the mapped model, not
+// to the scorer's unmapped pick.
+func TestModelMapping_SubstituteFailureFallsBackToMappedModel(t *testing.T) {
+	f := newMidTierFixture(t, "test-map-mid-fail", sonnet5Decision, true, nil)
+	f.svc.WithModelMapping(defaultTestMapping)
+	f.local.proxyErr = &providers.UpstreamErrorResponse{Status: http.StatusBadGateway, Body: []byte(`{"error":"down"}`)}
+
+	rec := f.serve(t, authedCtx(uuid.New().String()), pinTestBody, nil)
+
+	require.Len(t, f.anthropic.proxyBodies, 1)
+	assert.Equal(t, "claude-sonnet-5-5", upstreamModel(t, f.anthropic.proxyBodies[0]))
+	assert.Equal(t, "claude-sonnet-5-5", rec.Header().Get(proxy.HeaderRouterModel))
+}
+
+// A subscription refusal of the mapped model is served by the subscription
+// fallback, and the turn is still recorded under the scorer's pick.
+func TestModelMapping_SubscriptionFallbackKeepsTrainedDecision(t *testing.T) {
+	f := newSubscriptionFallbackFixture(t, "test-map-sub-fb", providers.ProviderAnthropic, "claude-opus-5", false, true, nil)
+	f.svc.WithModelMapping(defaultTestMapping)
+	f.upstream.subErr = claudeLimit429
+	var logs bytes.Buffer
+	ctx := observability.WithLogger(claudeSubscriptionCtx(), slog.New(slog.NewJSONHandler(&logs, nil)))
+
+	_, err := f.messages(t, ctx, pinTestBody)
+
+	require.NoError(t, err)
+	require.Len(t, f.local.proxyBodies, 1)
+	line := completionLine(t, &logs)
+	assert.Contains(t, line["routing_marker"], "fallback after claude-opus-5-5 subscription limit")
+	assert.Equal(t, "claude-opus-5", line["substituted_from_model"])
+	assert.Equal(t, "claude-opus-5-5", line["mapped_model"])
+}
+
+// mappedThinkingBody continues a tool loop whose last assistant turn carries a
+// signed thinking block.
+const mappedThinkingBody = `{
+	"model":"claude-opus-4-7",
+	"system":"sys",
+	"max_tokens":512,
+	"thinking":{"type":"adaptive"},
+	"tools":[{"name":"R","description":"read","input_schema":{"type":"object"}}],
+	"messages":[
+		{"role":"user","content":"original prompt"},
+		{"role":"assistant","content":[{"type":"thinking","thinking":"prior thought","signature":"prior-turn-signature"},{"type":"tool_use","id":"t1","name":"R","input":{}}]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}
+	]
+}`
+
+// Session state records the router's own pick for a mapped or substituted
+// turn, so a repeat of the same pick is not a model switch: no routing marker
+// and, on the mapped Anthropic model, the signed thinking block is kept.
+func TestServingRules_RepeatTurnIsNotASwitch(t *testing.T) {
+	cases := map[string]struct {
+		decision   router.Decision
+		mapping    proxy.ModelMapping
+		substitute bool
+		wantModel  string // empty: the local substitute
+	}{
+		"mapped":                  {decision: opus5Decision, mapping: defaultTestMapping, wantModel: "claude-opus-5-5"},
+		"substituted":             {decision: sonnet5Decision, substitute: true},
+		"mapped then substituted": {decision: sonnet5Decision, mapping: defaultTestMapping, substitute: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newMidTierFixture(t, "test-rules-repeat", tc.decision, tc.substitute, nil)
+			f.svc.WithModelMapping(tc.mapping)
+			f.store.hasPin = true
+			f.store.pin = sessionpin.Pin{
+				Provider:        tc.decision.Provider,
+				Model:           tc.decision.Model,
+				Reason:          tc.decision.Reason,
+				PinnedUntil:     time.Now().Add(time.Hour),
+				LastServedModel: tc.decision.Model,
+			}
+			var logs bytes.Buffer
+			ctx := observability.WithLogger(authedCtx(uuid.New().String()), slog.New(slog.NewJSONHandler(&logs, nil)))
+
+			rec := f.serve(t, ctx, mappedThinkingBody, nil)
+
+			want := tc.wantModel
+			if want == "" {
+				want = f.model
+			}
+			assert.Equal(t, want, rec.Header().Get(proxy.HeaderRouterModel))
+			line := completionLine(t, &logs)
+			assert.Equal(t, tc.decision.Model, line["prior_served_model"])
+			assert.Empty(t, line["routing_marker"], "a repeat of the session's pick is not news")
+			if tc.wantModel == "" {
+				require.Len(t, f.local.proxyBodies, 1)
+				return
+			}
+			require.Len(t, f.anthropic.proxyBodies, 1)
+			assert.Contains(t, string(f.anthropic.proxyBodies[0]), "prior-turn-signature", "the mapped model keeps its own signed reasoning")
+		})
+	}
+}
+
+// newMappingService serves the scorer's claude-opus-5 pick from a roster
+// without the mapping targets, with Anthropic and, when withOpenAI, OpenAI
+// dispatch clients registered.
+func newMappingService(t *testing.T, mapping proxy.ModelMapping, withOpenAI bool) (*proxy.Service, *fakeProvider, *fakeProvider) {
+	t.Helper()
+	respond := func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`)
+	}
+	anthropic := &fakeProvider{proxyResponse: respond}
+	openai := &fakeProvider{proxyResponse: respond}
+	clients := map[string]providers.Client{providers.ProviderAnthropic: anthropic}
+	keyed := map[string]struct{}{providers.ProviderAnthropic: {}}
+	if withOpenAI {
+		clients[providers.ProviderOpenAI] = openai
+		keyed[providers.ProviderOpenAI] = struct{}{}
+	}
+	svc := proxy.NewService(&fakeRouter{decision: opus5Decision}, clients, nil, false, nil, newFakePinStore(), false,
+		providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+		WithDeploymentKeyedProviders(keyed).
+		WithAvailableModels(map[string]struct{}{"claude-opus-5": {}, "claude-haiku-4-5": {}}).
+		WithModelMapping(mapping)
+	return svc, anthropic, openai
+}
+
+// A mapped target the request may not use leaves the scorer's pick in place.
+func TestModelMapping_IneligibleTargetServesScorerPick(t *testing.T) {
+	toOpus55 := proxy.ModelMapping{"claude-opus-5": "claude-opus-5-5"}
+	toSol := proxy.ModelMapping{"claude-opus-5": "gpt-6.1-sol"}
+	cases := map[string]struct {
+		mapping    proxy.ModelMapping
+		withOpenAI bool
+		key        any
+		value      []string
+	}{
+		"installation excluded the target":       {mapping: toOpus55, key: proxy.InstallationExcludedModelsContextKey{}, value: []string{"claude-opus-5-5"}},
+		"target outside the allowlist":           {mapping: toOpus55, key: proxy.InstallationAllowedModelsContextKey{}, value: []string{"claude-opus-5", "claude-haiku-4-5"}},
+		"installation excluded the provider":     {mapping: toSol, withOpenAI: true, key: proxy.InstallationExcludedProvidersContextKey{}, value: []string{providers.ProviderOpenAI}},
+		"target provider has no dispatch client": {mapping: toSol},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			svc, anthropic, openai := newMappingService(t, tc.mapping, tc.withOpenAI)
+			ctx := authedCtx(uuid.New().String())
+			if tc.key != nil {
+				ctx = context.WithValue(ctx, tc.key, tc.value)
+			}
+			rec := httptest.NewRecorder()
+
+			require.NoError(t, svc.ProxyMessages(ctx, []byte(pinTestBody), rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil)))
+
+			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.Empty(t, openai.proxyBodies)
+			require.Len(t, anthropic.proxyBodies, 1)
+			assert.Equal(t, "claude-opus-5", upstreamModel(t, anthropic.proxyBodies[0]))
+			assert.Equal(t, "claude-opus-5", rec.Header().Get(proxy.HeaderRouterModel))
+		})
+	}
+}
+
+// The eligibility cases above fail only for the reason they name: an eligible
+// target on the same service is mapped.
+func TestModelMapping_EligibleTargetIsMapped(t *testing.T) {
+	cases := map[string]struct {
+		mapping proxy.ModelMapping
+		want    string
+	}{
+		"same provider":    {mapping: proxy.ModelMapping{"claude-opus-5": "claude-opus-5-5"}, want: "claude-opus-5-5"},
+		"another provider": {mapping: proxy.ModelMapping{"claude-opus-5": "gpt-6.1-sol"}, want: "gpt-6.1-sol"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			svc, _, _ := newMappingService(t, tc.mapping, true)
+			rec := httptest.NewRecorder()
+
+			require.NoError(t, svc.ProxyMessages(authedCtx(uuid.New().String()), []byte(pinTestBody), rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil)))
+
+			assert.Equal(t, tc.want, rec.Header().Get(proxy.HeaderRouterModel))
+		})
+	}
+}
+
+// mappingDisabledStore disables the listed models for automatic routing.
+type mappingDisabledStore map[string]string
+
+func (s mappingDisabledStore) ListGlobalAutomaticRoutingExclusions(context.Context) (map[string]string, error) {
+	return s, nil
+}
+
+const mappingImageBody = `{
+	"model":"claude-opus-4-7",
+	"system":"sys",
+	"messages":[{"role":"user","content":[
+		{"type":"text","text":"what is in this picture"},
+		{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAA"}}
+	]}]
+}`
+
+// mappingLargeToolsBody's message text fits the 32K test target, while its
+// tool definitions alone exceed it.
+var mappingLargeToolsBody = `{
+	"model":"claude-opus-4-7",
+	"system":"sys",
+	"tools":[{"name":"R","description":"` + strings.Repeat("read a file ", 12_000) + `","input_schema":{"type":"object"}}],
+	"messages":[{"role":"user","content":"original prompt"}]
+}`
+
+// mappingLargeMaxTokensBody's input fits the 32K test target but leaves no
+// room for the requested output.
+const mappingLargeMaxTokensBody = `{
+	"model":"claude-opus-4-7",
+	"max_tokens":40000,
+	"system":"sys",
+	"messages":[{"role":"user","content":"original prompt"}]
+}`
+
+// A target this request cannot be served on dispatches the trained model
+// unchanged, and the skip names its reason.
+func TestModelMapping_RequestIneligibleTargetServesTrainedModel(t *testing.T) {
+	cases := map[string]struct {
+		body   string
+		mutate func(*catalog.Model)
+		setup  func(f localTurnFixture)
+		reason string
+	}{
+		"target provider not enrolled for the request": {
+			body: pinTestBody,
+			setup: func(f localTurnFixture) {
+				f.svc.WithDeploymentKeyedProviders(map[string]struct{}{providers.ProviderAnthropic: {}})
+			},
+			reason: "provider_not_enabled",
+		},
+		"request beyond the target's context window": {
+			body:   pinTestBody,
+			mutate: func(m *catalog.Model) { m.ContextWindow = 1 },
+			reason: "context_window_exceeded",
+		},
+		"images the target cannot read": {
+			body:   mappingImageBody,
+			reason: "not_image_capable",
+		},
+		"tool definitions beyond the target's context window": {
+			body:   mappingLargeToolsBody,
+			reason: "context_window_exceeded",
+		},
+		"output reserve beyond the target's context window": {
+			body:   mappingLargeMaxTokensBody,
+			reason: "context_window_exceeded",
+		},
+		"tools on a low tool-use target": {
+			body:   midTierToolResultBody,
+			mutate: func(m *catalog.Model) { m.ToolUseQuality = catalog.ToolUseLow },
+			reason: "low_tool_rating",
+		},
+		"tools on a low agentic target": {
+			body:   midTierToolResultBody,
+			mutate: func(m *catalog.Model) { m.AgenticUse = catalog.AgenticLow },
+			reason: "low_tool_rating",
+		},
+		"target disabled for automatic routing": {
+			body: pinTestBody,
+			setup: func(f localTurnFixture) {
+				f.svc.WithGlobalAutomaticExclusions(mappingDisabledStore{f.model: "withdrawn"})
+			},
+			reason: "automatic_routing_disabled",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newMidTierFixture(t, "test-map-ineligible", opus5Decision, false, tc.mutate)
+			f.svc.WithModelMapping(proxy.ModelMapping{"claude-opus-5": f.model})
+			if tc.setup != nil {
+				tc.setup(f)
+			}
+			var logs bytes.Buffer
+			ctx := observability.WithLogger(authedCtx(uuid.New().String()), slog.New(slog.NewJSONHandler(&logs, nil)))
+
+			rec := f.serve(t, ctx, tc.body, nil)
+
+			assert.Empty(t, f.local.proxyBodies)
+			require.Len(t, f.anthropic.proxyBodies, 1)
+			assert.Equal(t, "claude-opus-5", upstreamModel(t, f.anthropic.proxyBodies[0]))
+			assert.Equal(t, "claude-opus-5", rec.Header().Get(proxy.HeaderRouterModel))
+			skip := logLine(t, &logs, "Model mapping skipped; serving the trained model")
+			assert.Equal(t, tc.reason, skip["reason"])
+			assert.Equal(t, "claude-opus-5", skip["original_model"])
+			assert.Equal(t, f.model, skip["mapped_model"])
+			assert.Empty(t, completionLine(t, &logs)["substitution_reason"])
+		})
+	}
+}
+
+// The request-level cases above fail only for the reason they name: the same
+// target serves a request it can carry.
+func TestModelMapping_RequestEligibleTargetIsMapped(t *testing.T) {
+	f := newMidTierFixture(t, "test-map-eligible", opus5Decision, false, nil)
+	f.svc.WithModelMapping(proxy.ModelMapping{"claude-opus-5": f.model})
+
+	rec := f.serve(t, authedCtx(uuid.New().String()), pinTestBody, nil)
+
+	require.Len(t, f.local.proxyBodies, 1)
+	assert.Empty(t, f.anthropic.proxyBodies)
+	assert.Equal(t, f.model, rec.Header().Get(proxy.HeaderRouterModel))
+}
+
+// OpenAI enrolled only through the caller's Codex subscription serves only the
+// models that subscription covers; a target outside it falls back.
+func TestModelMapping_CodexSubscriptionOnlyServesCoveredTargets(t *testing.T) {
+	svc, anthropic, openai := newMappingService(t, proxy.ModelMapping{"claude-opus-5": "gpt-5.4-nano"}, true)
+	svc.WithDeploymentKeyedProviders(map[string]struct{}{providers.ProviderAnthropic: {}})
+	ctx := context.WithValue(authedCtx(uuid.New().String()), proxy.OpenAISubscriptionContextKey{}, "eyJhbGciOiJSUzI1NiJ9.codex.sig")
+	ctx = context.WithValue(ctx, proxy.OpenAIAccountIDContextKey{}, "acct-123")
+	var logs bytes.Buffer
+	ctx = observability.WithLogger(ctx, slog.New(slog.NewJSONHandler(&logs, nil)))
+	rec := httptest.NewRecorder()
+
+	require.NoError(t, svc.ProxyMessages(ctx, []byte(pinTestBody), rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil)))
+
+	assert.Equal(t, "request_excluded", logLine(t, &logs, "Model mapping skipped; serving the trained model")["reason"])
+	assert.Empty(t, openai.proxyBodies)
+	require.Len(t, anthropic.proxyBodies, 1)
+	assert.Equal(t, "claude-opus-5", upstreamModel(t, anthropic.proxyBodies[0]))
+	assert.Equal(t, "claude-opus-5", rec.Header().Get(proxy.HeaderRouterModel))
+}
+
+// logLine returns the first decoded log line whose message is msg.
+func logLine(t *testing.T, logs *bytes.Buffer, msg string) map[string]any {
+	t.Helper()
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		var fields map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &fields))
+		if fields["msg"] == msg {
+			return fields
+		}
+	}
+	t.Fatalf("no %q line logged", msg)
+	return nil
+}
+
+// sequenceRouter answers its nth call with decisions[n], repeating the last,
+// and records every request.
+type sequenceRouter struct {
+	decisions []router.Decision
+	requests  []router.Request
+}
+
+func (r *sequenceRouter) Route(_ context.Context, req router.Request) (router.Decision, error) {
+	r.requests = append(r.requests, req)
+	return r.decisions[min(len(r.requests), len(r.decisions))-1], nil
+}
+
+// A usage-bypass reroute that lands on a model admitted only for its Codex
+// subscription mapping, where the mapping cannot apply, is routed again
+// without the admitted models instead of dispatching the uncovered pick.
+func TestModelMapping_UsageBypassRerouteNeverDispatchesUnservedAdmission(t *testing.T) {
+	f := newMidTierFixture(t, "test-map-bypass-admitted", sonnet5Decision, true, nil)
+	f.anthropic.proxyErr = &providers.UpstreamErrorResponse{
+		Status: http.StatusTooManyRequests,
+		Body:   []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"weekly limit exceeded"}}`),
+	}
+	scorer := &sequenceRouter{decisions: []router.Decision{
+		{Provider: providers.ProviderOpenAI, Model: "gpt-5.4-mini", Reason: "cluster"},
+		sonnet5Decision,
+	}}
+	openai := &fakeProvider{}
+	f.svc = proxy.NewService(scorer,
+		map[string]providers.Client{providers.ProviderAnthropic: f.anthropic, providers.ProviderOpenAI: openai, f.provider: f.local},
+		nil, false, nil, f.store, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+		WithDeploymentKeyedProviders(map[string]struct{}{providers.ProviderAnthropic: {}, f.provider: {}}).
+		WithMidTierSubstitute(proxy.MidTierSubstitute{Provider: f.provider, Model: f.model}).
+		WithModelMapping(proxy.ModelMapping{"gpt-5.4-mini": "gpt-6-luna"})
+	ctx := context.WithValue(midTierBypassCtx(f), proxy.OpenAISubscriptionContextKey{}, "eyJhbGciOiJSUzI1NiJ9.codex.sig")
+	ctx = context.WithValue(ctx, proxy.OpenAIAccountIDContextKey{}, "acct-123")
+	ctx = context.WithValue(ctx, proxy.InstallationExcludedModelsContextKey{}, []string{"gpt-6-luna"})
+
+	f.serve(t, ctx, midTierSonnetBody, nil)
+
+	require.Len(t, scorer.requests, 2)
+	assert.NotContains(t, scorer.requests[0].ExcludedModels, "gpt-5.4-mini", "the mapping admits the source")
+	assert.Contains(t, scorer.requests[1].ExcludedModels, "gpt-5.4-mini")
+	assert.Empty(t, openai.proxyBodies, "the uncovered pick is never dispatched")
+	require.Len(t, f.local.proxyBodies, 1, "the second pick, claude-sonnet-5, is served by the substitute")
+}
+
+// usageSummarizer counts handover summaries and reports usage for each.
+type usageSummarizer struct {
+	calls atomic.Int32
+}
+
+func (s *usageSummarizer) Summarize(context.Context, *translate.RequestEnvelope, router.Request) (string, handover.Usage, error) {
+	s.calls.Add(1)
+	return "Prior conversation summary.", handover.Usage{InputTokens: 900, OutputTokens: 120}, nil
+}
+
+func (*usageSummarizer) Provider() string { return providers.ProviderAnthropic }
+
+type admittedSwitchFixture struct {
+	svc        *proxy.Service
+	scorer     *sequenceRouter
+	anthropic  *fakeProvider
+	openai     *fakeProvider
+	summarizer *usageSummarizer
+	store      *fakePinStore
+	ctx        context.Context
+	logs       *bytes.Buffer
+}
+
+// newAdmittedSwitchFixture pins a warm claude-opus-4-7 session on a Codex
+// subscription-only request whose scorer first picks gpt-5.4-mini, admitted
+// for its gpt-6-luna mapping, then claude-haiku-4-5. excluded is the
+// installation's model exclusion list.
+func newAdmittedSwitchFixture(t *testing.T, excluded ...string) admittedSwitchFixture {
+	t.Helper()
+	store := newFakePinStore()
+	store.hasPin = true
+	store.pin = sessionpin.Pin{
+		Provider:        providers.ProviderAnthropic,
+		Model:           "claude-opus-4-7",
+		Reason:          "cluster:v0.2",
+		PinnedUntil:     time.Now().Add(time.Hour),
+		LastInputTokens: 5000,
+		LastTurnEndedAt: time.Now().Add(-30 * time.Second),
+	}
+	scorer := &sequenceRouter{decisions: []router.Decision{
+		{Provider: providers.ProviderOpenAI, Model: "gpt-5.4-mini", Reason: "cluster:v0.2"},
+		{Provider: providers.ProviderAnthropic, Model: "claude-haiku-4-5", Reason: "cluster:v0.2"},
+	}}
+	anthropic, openai := &fakeProvider{}, &fakeProvider{}
+	summarizer := &usageSummarizer{}
+	svc := proxy.NewService(scorer,
+		map[string]providers.Client{providers.ProviderAnthropic: anthropic, providers.ProviderOpenAI: openai},
+		nil, false, nil, store, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+		WithDeploymentKeyedProviders(map[string]struct{}{providers.ProviderAnthropic: {}}).
+		WithModelMapping(proxy.ModelMapping{"gpt-5.4-mini": "gpt-6-luna"}).
+		WithSummarizer(summarizer)
+	ctx := context.WithValue(authedCtx(uuid.New().String()), proxy.OpenAISubscriptionContextKey{}, "eyJhbGciOiJSUzI1NiJ9.codex.sig")
+	ctx = context.WithValue(ctx, proxy.OpenAIAccountIDContextKey{}, "acct-123")
+	if len(excluded) > 0 {
+		ctx = context.WithValue(ctx, proxy.InstallationExcludedModelsContextKey{}, excluded)
+	}
+	logs := &bytes.Buffer{}
+	ctx = observability.WithLogger(ctx, slog.New(slog.NewJSONHandler(logs, nil)))
+	return admittedSwitchFixture{svc: svc, scorer: scorer, anthropic: anthropic, openai: openai, summarizer: summarizer, store: store, ctx: ctx, logs: logs}
+}
+
+// pinnedModels returns the model of every pin upsert so far.
+func (f admittedSwitchFixture) pinnedModels() []string {
+	f.store.mu.Lock()
+	defer f.store.mu.Unlock()
+	models := make([]string, 0, len(f.store.upserts))
+	for _, p := range f.store.upserts {
+		models = append(models, p.Model)
+	}
+	return models
+}
+
+// A planner switch off a warm pin whose fresh pick was admitted only for its
+// Codex mapping, where the mapping cannot apply, is decided against the pick
+// scored without the admitted models: the handover is summarized once, for
+// the model that serves, and the turn records it.
+func TestModelMapping_SwitchHandoverRunsOnceForUnservedAdmission(t *testing.T) {
+	f := newAdmittedSwitchFixture(t, "gpt-6-luna")
+	rec := httptest.NewRecorder()
+
+	require.NoError(t, f.svc.ProxyMessages(f.ctx, largeMultiTurnBody(t), rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil)))
+
+	require.Len(t, f.scorer.requests, 2)
+	assert.Contains(t, f.scorer.requests[1].ExcludedModels, "gpt-5.4-mini")
+	assert.Equal(t, int32(1), f.summarizer.calls.Load(), "one switch, one summary")
+	assert.Empty(t, f.openai.proxyBodies, "the uncovered pick is never dispatched")
+	assert.Equal(t, "claude-haiku-4-5", rec.Header().Get(proxy.HeaderRouterModel))
+	switched := logLine(t, f.logs, "router switched models")
+	assert.Equal(t, "claude-haiku-4-5", switched["to"])
+	assert.Equal(t, true, switched["handover_invoked"], "the summary that rewrote the forwarded history is recorded")
+	assert.Equal(t, false, switched["handover_fallback_to_full_history"])
+	require.Len(t, f.anthropic.proxyBodies, 1)
+	assert.True(t, strings.Contains(string(f.anthropic.proxyBodies[0]), "Prior conversation summary."), "the forwarded history carries the summary")
+	require.Eventually(t, func() bool { return slices.Contains(f.pinnedModels(), "claude-haiku-4-5") }, 2*time.Second, 5*time.Millisecond)
+	assert.NotContains(t, f.pinnedModels(), "gpt-5.4-mini", "the uncovered pick is never pinned")
+}
+
+// When the mapping can serve the admitted pick, the switch keeps it: one
+// scorer call, and the turn is dispatched on the mapped target.
+func TestModelMapping_SwitchKeepsServableAdmission(t *testing.T) {
+	f := newAdmittedSwitchFixture(t)
+	rec := httptest.NewRecorder()
+
+	require.NoError(t, f.svc.ProxyMessages(f.ctx, largeMultiTurnBody(t), rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil)))
+
+	assert.Len(t, f.scorer.requests, 1)
+	assert.Equal(t, int32(1), f.summarizer.calls.Load())
+	assert.Empty(t, f.anthropic.proxyBodies)
+	require.Len(t, f.openai.proxyBodies, 1)
+	assert.Equal(t, "gpt-6-luna", rec.Header().Get(proxy.HeaderRouterModel))
+}

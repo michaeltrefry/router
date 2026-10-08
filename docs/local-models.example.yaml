@@ -52,3 +52,40 @@ mid_tier_substitute:
 subscription_fallback:
   model: qwen3.8-flash-next
   enabled: true
+
+# Optional: serve the router's automatic selection of one catalog model on
+# another catalog model, e.g. a trained scorer's roster model on the current
+# release of the same family. Both sides must be catalog models, a target must
+# not itself be mapped, and each source must be a candidate of the active
+# cluster scorer (a retired source such as claude-fable-5 or gpt-5.5 takes its
+# target's tier so the scorer can select it again). A forced model, a hard-pinned utility turn
+# (compaction, title generation, probe, sub-agent override), a classifier turn
+# and a usage-bypassed turn are dispatched unmapped. Session pins, HMM history
+# and policy outcomes keep the original selection; the outcome is withheld from
+# training. Mapping runs before mid_tier_substitute, which still judges the
+# tier of the original selection, so a claude-sonnet-5 pick is mapped to
+# claude-sonnet-5-5 and then served on the mid-tier substitute when it is on.
+model_mapping:
+  claude-opus-5: claude-opus-5-5
+  claude-fable-5: claude-fable-5-1
+  claude-sonnet-5: claude-sonnet-5-5
+  gpt-5.5: gpt-6.1-sol
+  gpt-5.4-mini: gpt-6-luna
+
+# Optional: serve the router's automatic selection on a local model when the
+# model it lands on matches a pattern. `match` is a catalog model ID or a glob
+# (`*` matches any run of characters, `?` one, `[...]` a class) and must name at
+# least one catalog model; `model` must be one of the models above, of any tier.
+# Rules match the final model, after model_mapping, so with the mapping above a
+# gpt-5.4-mini pick becomes gpt-6-luna and is served here. Rules are tried in
+# order and the first match wins; mid_tier_substitute is evaluated after every
+# rule as the last one. A forced model, hard-pinned utility, classifier and
+# compaction turns are never substituted. When the local model cannot carry
+# the turn, or fails before any output, the turn is served on the matched model
+# (gpt-6-luna above). Session pins, HMM history and policy outcomes keep the
+# router's own pick (gpt-5.4-mini), so a repeat turn is not a model switch.
+substitution_rules:
+  - match: gpt-*-luna
+    model: qwen3.8-flash-next
+  - match: gpt-*-terra
+    model: qwen3.8-flash-next

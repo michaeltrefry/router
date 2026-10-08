@@ -9,6 +9,7 @@ import (
 	"weave-os/router/internal/observability"
 	"weave-os/router/internal/providers"
 	"weave-os/router/internal/router"
+	"weave-os/router/internal/router/policy"
 )
 
 // markerReasonLocalFailure follows the failed local model's label in the
@@ -16,7 +17,7 @@ import (
 const markerReasonLocalFailure = "failed"
 
 // localFailureSourceTurnRoute names the local turn route as the rule that put
-// a turn on a local model; the mid-tier substitute uses reasonMidTierSubstitute.
+// a turn on a local model; a substitution rule uses its own substitution reason.
 const localFailureSourceTurnRoute = "local_turn_route"
 
 // errNoNormalRoute reports a local turn whose routing without local rules
@@ -26,7 +27,7 @@ var errNoNormalRoute = errors.New("normal routing selects a local model")
 type localRoutingDisabledKey struct{}
 
 // withLocalRoutingDisabled marks ctx so the turn loop routes as if no local
-// turn route or mid-tier substitute were configured.
+// turn route or substitution rule were configured.
 func withLocalRoutingDisabled(ctx context.Context) context.Context {
 	return context.WithValue(ctx, localRoutingDisabledKey{}, true)
 }
@@ -38,7 +39,7 @@ func localRoutingDisabled(ctx context.Context) bool {
 
 // localFailureFallback is one turn's plan for a local model that fails before
 // any output: serve the turn on the target its routing would have chosen
-// without the local rule. The mid-tier substitute already holds that target;
+// without the local rule. A substitution rule already holds that target;
 // a local turn route recomputes it only when the local model has failed, so
 // the common path never pays for a second routing pass.
 type localFailureFallback struct {
@@ -49,7 +50,7 @@ type localFailureFallback struct {
 }
 
 // planLocalFailureFallback returns the fallback plan for a turn the local turn
-// route or the mid-tier substitute put on a local model. A user-forced local
+// route or a substitution rule put on a local model. A user-forced local
 // model, a caller-model passthrough and any other selection get nil: the
 // error surfaces as it would without the plan. reroute re-runs the turn loop
 // under withLocalRoutingDisabled; nil leaves a local turn route without one.
@@ -58,7 +59,7 @@ func planLocalFailureFallback(res turnLoopResult, reroute func() (turnLoopResult
 		return nil
 	}
 	switch {
-	case res.SubstitutionReason == reasonMidTierSubstitute && res.SubstitutedFrom.Model != "":
+	case localSubstitutionReason(res.SubstitutionReason) && res.SubstitutedFrom.Model != "":
 		// Substitution only replaces router-selected, non-hard-pinned
 		// decisions, which carry no turn-loop origin.
 		normal := res
@@ -66,7 +67,13 @@ func planLocalFailureFallback(res turnLoopResult, reroute func() (turnLoopResult
 		normal.SubstitutedFrom = router.Decision{}
 		normal.SubstitutionReason = ""
 		normal.Origin = ""
-		return &localFailureFallback{local: res.Decision, source: reasonMidTierSubstitute, normal: &normal}
+		if res.MappedDecision.Model != "" {
+			normal.Decision = res.MappedDecision
+			normal.SubstitutedFrom = res.SubstitutedFrom
+			normal.SubstitutionReason = reasonModelMapping
+			normal.Origin = policy.OverrideSourceDeployment
+		}
+		return &localFailureFallback{local: res.Decision, source: res.SubstitutionReason, normal: &normal}
 	case res.LocalTurnRouted && reroute != nil:
 		return &localFailureFallback{local: res.Decision, source: localFailureSourceTurnRoute, reroute: reroute}
 	}
