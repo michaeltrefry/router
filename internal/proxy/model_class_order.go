@@ -2,29 +2,57 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"slices"
 
 	"weave-os/router/internal/providers"
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
+	"weave-os/router/internal/router/cluster"
+	"weave-os/router/internal/router/policy"
 	"weave-os/router/internal/router/sessionpin"
 	"weave-os/router/internal/router/turntype"
 )
 
-// reasonModelClassOrder is the decision reason of a turn a low-class request
-// served on the first entry of the class order that could take it.
+// reasonModelClassOrder is the decision reason of a turn served on an entry
+// of its class's order list.
 const reasonModelClassOrder = "model_class_order"
 
 // ModelClassOrder lists, per class, the models a request naming that class
 // falls back through, in order. Low is strict: a low-class turn is served by
 // the first entry that can take it and by no other low model. High and mid
-// keep the router's in-class pick and use the list as its backup order.
+// keep the router's in-class pick and fall back through the list.
 type ModelClassOrder map[catalog.Tier][]string
+
+// ModelClassMembersContextKey carries the set of models a strict class order
+// confines a request to; absent when the class has no strict order.
+type ModelClassMembersContextKey struct{}
 
 // WithModelClassOrder installs the per-class order lists.
 func (s *Service) WithModelClassOrder(order ModelClassOrder) *Service {
 	s.modelClassOrder = order
 	return s
+}
+
+// ModelClassMembers returns the only models a request of class may be served
+// on, or nil when every model of the class may serve it. Only the low order is
+// strict.
+func (s *Service) ModelClassMembers(class catalog.Tier) []string {
+	if class != catalog.TierLow {
+		return nil
+	}
+	return s.modelClassOrder[catalog.TierLow]
+}
+
+// classMembersAllow reports whether a strict class order, when the request
+// carries one, lists model.
+func classMembersAllow(ctx context.Context, model string) bool {
+	members, ok := ctx.Value(ModelClassMembersContextKey{}).(map[string]struct{})
+	if !ok {
+		return true
+	}
+	_, listed := members[model]
+	return listed
 }
 
 // classOrderTarget retargets base onto an order entry for req, or returns
@@ -46,67 +74,92 @@ func classOrderTarget(base router.Decision, model string, tt turntype.TurnType, 
 	}
 	d := base
 	d.Provider, d.Model = provider, model
+	d.Effort = ""
+	d.Metadata = nil
 	d.Reason = reasonModelClassOrder
 	return d, true
 }
 
-// lowClassOrderDecision serves a low-class request on the first entry of the
-// low order that can take the turn; the entries after it are its fallbacks in
-// order. ok is false when the request is not low class or no order is set; a
-// configured order with no servable entry still answers, with no candidate,
-// so the request fails in its class rather than reaching another low model.
-func (s *Service) lowClassOrderDecision(ctx context.Context, base router.Decision, tt turntype.TurnType, req router.Request) (first router.Decision, rest []router.Decision, ok bool) {
+// classOrderCandidates resolves the request class's order entries that can
+// take the turn, in order, skipping the models in skip. ok is false when the
+// request names no class or the class has no order.
+func (s *Service) classOrderCandidates(ctx context.Context, base router.Decision, tt turntype.TurnType, req router.Request, skip ...string) (candidates []router.Decision, ok bool) {
 	class, classed := requestModelClass(ctx)
-	order := s.modelClassOrder[catalog.TierLow]
-	if !classed || class != catalog.TierLow || len(order) == 0 {
-		return router.Decision{}, nil, false
+	order := s.modelClassOrder[class]
+	if !classed || len(order) == 0 {
+		return nil, false
 	}
-	var candidates []router.Decision
 	for _, model := range order {
-		if catalog.IsLocal(model) && localRoutingDisabled(ctx) {
+		if slices.Contains(skip, model) || catalog.IsLocal(model) && localRoutingDisabled(ctx) {
 			continue
 		}
 		if d, servable := classOrderTarget(base, model, tt, req); servable {
 			candidates = append(candidates, d)
 		}
 	}
-	if len(candidates) == 0 {
-		return router.Decision{}, nil, true
-	}
-	// Each entry's in-turn rescue walks the entries after it, in order.
-	for i := range candidates {
-		rescue := make([]string, 0, len(candidates)-i-1)
-		for _, d := range candidates[i+1:] {
-			rescue = append(rescue, d.Model)
-		}
-		candidates[i].Metadata = &router.RoutingMetadata{RescueModels: rescue, RosterFailover: true}
-	}
-	return candidates[0], candidates[1:], true
+	return candidates, true
 }
 
-// withClassBackupOrder makes the class order the in-turn rescue order of a
-// high- or mid-class decision: sibling failover walks the listed models after
-// the one serving, which reaches models the scorer cannot pick.
-func (s *Service) withClassBackupOrder(ctx context.Context, res *turnLoopResult) {
-	class, classed := requestModelClass(ctx)
-	order := s.modelClassOrder[class]
-	if !classed || class == catalog.TierLow || len(order) == 0 || res.Decision.Model == "" {
+// serveClassOrder puts res on the first candidate, keeping the rest as the
+// turn's in-turn fallbacks.
+func serveClassOrder(res *turnLoopResult, candidates []router.Decision) {
+	res.Decision = candidates[0]
+	res.LocalAlternates = candidates[1:]
+	res.ClassOrdered = true
+	res.Origin = policy.OverrideSourceDeployment
+}
+
+// lowClassOrder serves a low-class request on its strict order. ok is false
+// when the request is not low class or the low class has no order.
+func (s *Service) lowClassOrder(ctx context.Context, res *turnLoopResult, req router.Request) (bool, error) {
+	if class, _ := requestModelClass(ctx); class != catalog.TierLow {
+		return false, nil
+	}
+	candidates, ordered := s.classOrderCandidates(ctx, res.Decision, res.TurnType, req)
+	if !ordered {
+		return false, nil
+	}
+	if len(candidates) == 0 {
+		return true, &ModelClassUnavailableError{Class: catalog.TierLow, Err: cluster.ErrNoEligibleProvider}
+	}
+	serveClassOrder(res, candidates)
+	return true, nil
+}
+
+// withClassBackup gives a high- or mid-class turn's automatic decision the
+// rest of its class order as in-turn fallbacks: a pick that fails before
+// output passes the turn to the next listed model, which reaches models the
+// scorer cannot pick.
+func (s *Service) withClassBackup(ctx context.Context, res *turnLoopResult, req router.Request) {
+	if class, _ := requestModelClass(ctx); class == catalog.TierLow || res.ClassOrdered ||
+		res.UsageBypass || res.CallerModelPassthrough || isUserForcedReason(res.Decision.Reason) {
 		return
 	}
-	serving := []string{res.Decision.Model, res.SubstitutedFrom.Model, res.MappedDecision.Model}
-	rescue := make([]string, 0, len(order))
-	for _, model := range order {
-		if !slices.Contains(serving, model) {
-			rescue = append(rescue, model)
-		}
+	candidates, ordered := s.classOrderCandidates(ctx, res.Decision, res.TurnType, req,
+		res.Decision.Model, res.SubstitutedFrom.Model, res.MappedDecision.Model)
+	if !ordered || len(candidates) == 0 {
+		return
 	}
-	md := router.RoutingMetadata{}
-	if res.Decision.Metadata != nil {
-		md = *res.Decision.Metadata
+	res.LocalAlternates = candidates
+	res.ClassOrdered = true
+}
+
+// rescueEmptyClass serves a high- or mid-class request whose routing found no
+// candidate on the first order entry that can take it, since the order may
+// list models the scorer cannot pick. It reports whether it served the turn.
+func (s *Service) rescueEmptyClass(ctx context.Context, res *turnLoopResult, req router.Request, routeErr error) bool {
+	if !errors.Is(routeErr, cluster.ErrNoEligibleProvider) && !errors.Is(routeErr, policy.ErrNoRoutableModels) {
+		return false
 	}
-	md.RescueModels = rescue
-	md.RosterFailover = true
-	res.Decision.Metadata = &md
+	if errors.Is(routeErr, cluster.ErrAllowlistEmptiesPool) {
+		return false
+	}
+	candidates, ordered := s.classOrderCandidates(ctx, res.Decision, res.TurnType, req)
+	if !ordered || len(candidates) == 0 {
+		return false
+	}
+	serveClassOrder(res, candidates)
+	return true
 }
 
 // legacyForcePinned reports a thread-scoped /force-model pin on the turn's pin

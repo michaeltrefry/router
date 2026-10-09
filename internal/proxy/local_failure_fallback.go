@@ -57,11 +57,21 @@ type localFailureFallback struct {
 // error surfaces as it would without the plan. reroute re-runs the turn loop
 // under withLocalRoutingDisabled; nil leaves a local turn route without one.
 func planLocalFailureFallback(res turnLoopResult, reroute func() (turnLoopResult, error)) *localFailureFallback {
-	if !providers.IsLocalProvider(res.Decision.Provider) || isUserForcedReason(res.Decision.Reason) || res.CallerModelPassthrough {
+	if isUserForcedReason(res.Decision.Reason) || res.CallerModelPassthrough {
+		return nil
+	}
+	if res.ClassOrdered && len(res.LocalAlternates) > 0 {
+		// The class order's next entry takes the turn, whatever failed.
+		next := res
+		next.Decision = res.LocalAlternates[0]
+		next.LocalAlternates = res.LocalAlternates[1:]
+		return &localFailureFallback{local: res.Decision, source: reasonModelClassOrder, normal: &next}
+	}
+	if !providers.IsLocalProvider(res.Decision.Provider) {
 		return nil
 	}
 	switch {
-	case (localSubstitutionReason(res.SubstitutionReason) || res.Decision.Reason == reasonModelClassOrder) && len(res.LocalAlternates) > 0:
+	case localSubstitutionReason(res.SubstitutionReason) && len(res.LocalAlternates) > 0:
 		// The next local model takes the turn before the router's pick.
 		next := res
 		next.Decision = res.LocalAlternates[0]

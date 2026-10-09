@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"weave-os/router/internal/proxy"
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
+	"weave-os/router/internal/router/cluster"
 )
 
 const classOrderYAML = `model_classes:
@@ -57,11 +59,28 @@ type classOrderStack struct {
 // class order through the composition root, scoring every turn onto pick.
 func classOrderService(t *testing.T, anthropic providers.Client, pick router.Decision) classOrderStack {
 	t.Helper()
+	return classOrderServiceWith(t, classOrderOpts{anthropic: anthropic, scorer: &countingRouter{decision: pick}, orderYAML: classOrderYAML})
+}
+
+type classOrderOpts struct {
+	anthropic providers.Client
+	openAI    providers.Client
+	scorer    router.Router
+	orderYAML string
+}
+
+func classOrderServiceWith(t *testing.T, o classOrderOpts) classOrderStack {
+	t.Helper()
 	mimo, qwen := newLocalUpstream(t), newLocalUpstream(t)
 	path := writeLocalModelsFile(t, lowLocalEntryYAML("test-mco-mimo", mimo.baseURL)+lowLocalEntryYAML("test-mco-qwen", qwen.baseURL)+
-		userModelTiersYAML+classOrderYAML)
+		userModelTiersYAML+o.orderYAML)
 	openAI := &streamingOpenAI{}
-	providerMap := map[string]providers.Client{providers.ProviderAnthropic: anthropic, providers.ProviderOpenAI: openAI}
+	var openAIClient providers.Client = openAI
+	if o.openAI != nil {
+		openAIClient = o.openAI
+	}
+	anthropic := o.anthropic
+	providerMap := map[string]providers.Client{providers.ProviderAnthropic: anthropic, providers.ProviderOpenAI: openAIClient}
 	keyed := map[string]struct{}{providers.ProviderAnthropic: {}, providers.ProviderOpenAI: {}}
 	cfg, err := loadLocalModels(envFrom(map[string]string{localModelsFileEnv: path, "LOCAL_TEST_KEY": "local-secret"}),
 		providerMap, keyed, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -74,7 +93,7 @@ func classOrderService(t *testing.T, anthropic providers.Client, pick router.Dec
 			delete(providers.APIKeyEnvVars, providers.LocalProviderName(id))
 		}
 	})
-	svc := proxy.NewService(&countingRouter{decision: pick}, providerMap, nil, false, nil, nil, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+	svc := proxy.NewService(o.scorer, providerMap, nil, false, nil, nil, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
 		WithDeploymentKeyedProviders(keyed).
 		WithModelClassOrder(cfg.modelClassOrder)
 	return classOrderStack{svc: svc, anthropic: anthropic, openAI: openAI, mimo: mimo, qwen: qwen}
@@ -82,8 +101,17 @@ func classOrderService(t *testing.T, anthropic providers.Client, pick router.Dec
 
 var lowPick = router.Decision{Provider: providers.ProviderAnthropic, Model: "claude-haiku-4-5", Reason: "cluster"}
 
-func classedCtx(class catalog.Tier, excluded ...string) context.Context {
+// classedCtx is what the model-class middleware attaches for class, members
+// included, plus the installation's excluded models.
+func (s classOrderStack) classedCtx(class catalog.Tier, excluded ...string) context.Context {
 	ctx := context.WithValue(routerKeyedCtx(), proxy.ModelClassContextKey{}, class)
+	if members := s.svc.ModelClassMembers(class); len(members) > 0 {
+		set := map[string]struct{}{}
+		for _, m := range members {
+			set[m] = struct{}{}
+		}
+		ctx = context.WithValue(ctx, proxy.ModelClassMembersContextKey{}, set)
+	}
 	return context.WithValue(ctx, proxy.InstallationExcludedModelsContextKey{}, excluded)
 }
 
@@ -107,7 +135,7 @@ func TestModelClassOrder_LowServesTheFirstEntryThatCanTakeTheTurn(t *testing.T) 
 			stack := classOrderService(t, &streamingAnthropic{}, lowPick)
 			rec := httptest.NewRecorder()
 
-			require.NoError(t, stack.svc.ProxyMessages(classedCtx(catalog.TierLow, tc.excluded...), []byte(localSubstituteBody), rec, paidRequest()))
+			require.NoError(t, stack.svc.ProxyMessages(stack.classedCtx(catalog.TierLow, tc.excluded...), []byte(localSubstituteBody), rec, paidRequest()))
 
 			assert.Equal(t, tc.want, rec.Header().Get(proxy.HeaderRouterModel))
 			assert.Equal(t, "low", rec.Header().Get(proxy.HeaderRouterModelClass))
@@ -121,7 +149,7 @@ func TestModelClassOrder_LowNeverServesAModelOffTheList(t *testing.T) {
 	stack := classOrderService(t, &streamingAnthropic{}, offList)
 	every := []string{"test-mco-mimo", "test-mco-qwen", "gpt-5.6-terra", "claude-sonnet-5-5", "gpt-6-luna", "claude-haiku-4-5"}
 
-	err := stack.svc.ProxyMessages(classedCtx(catalog.TierLow, every...), []byte(localSubstituteBody), httptest.NewRecorder(), paidRequest())
+	err := stack.svc.ProxyMessages(stack.classedCtx(catalog.TierLow, every...), []byte(localSubstituteBody), httptest.NewRecorder(), paidRequest())
 
 	var unavailable *proxy.ModelClassUnavailableError
 	require.ErrorAs(t, err, &unavailable)
@@ -134,7 +162,7 @@ func TestModelClassOrder_FailedLocalEntryPassesToTheNextEntry(t *testing.T) {
 	stack.mimo.server.Close()
 	rec := httptest.NewRecorder()
 
-	require.NoError(t, stack.svc.ProxyMessages(classedCtx(catalog.TierLow), []byte(localSubstituteBody), rec, paidRequest()))
+	require.NoError(t, stack.svc.ProxyMessages(stack.classedCtx(catalog.TierLow), []byte(localSubstituteBody), rec, paidRequest()))
 
 	assert.Equal(t, "test-mco-qwen", rec.Header().Get(proxy.HeaderRouterModel))
 	assert.Len(t, stack.qwen.bodies, 1)
@@ -147,7 +175,7 @@ func TestModelClassOrder_HighFallsBackToAstra(t *testing.T) {
 	stack := classOrderService(t, anthropic, router.Decision{Provider: providers.ProviderAnthropic, Model: "claude-fable-5-1", Reason: "cluster"})
 	rec := httptest.NewRecorder()
 
-	require.NoError(t, stack.svc.ProxyMessages(classedCtx(catalog.TierHigh), []byte(localSubstituteBody), rec, paidRequest()))
+	require.NoError(t, stack.svc.ProxyMessages(stack.classedCtx(catalog.TierHigh), []byte(localSubstituteBody), rec, paidRequest()))
 
 	assert.Contains(t, anthropic.models, "claude-fable-5-1")
 	assert.Equal(t, []string{"gpt-6-astra"}, stack.openAI.served())
@@ -169,4 +197,110 @@ func TestLoadLocalModels_RejectsModelClassEntryOfAnotherTier(t *testing.T) {
 			assert.True(t, strings.HasPrefix(err.Error(), "model classes:"), err.Error())
 		})
 	}
+}
+
+// failingOpenAI answers every dispatch with a retryable 503.
+type failingOpenAI struct {
+	mu     sync.Mutex
+	models []string
+}
+
+func (*failingOpenAI) SupportsSubscriptions() bool { return true }
+
+func (o *failingOpenAI) Proxy(_ context.Context, decision router.Decision, _ providers.PreparedRequest, _ http.ResponseWriter, _ *http.Request) error {
+	o.mu.Lock()
+	o.models = append(o.models, decision.Model)
+	o.mu.Unlock()
+	return &providers.UpstreamErrorResponse{Status: http.StatusServiceUnavailable, Headers: http.Header{"Content-Type": {"application/json"}},
+		Body: []byte(`{"error":{"message":"unavailable"}}`)}
+}
+
+func (*failingOpenAI) Passthrough(context.Context, providers.PreparedRequest, http.ResponseWriter, *http.Request) error {
+	return providers.ErrNotImplemented
+}
+
+// exclusionRespectingRouter picks pick unless the request excludes it.
+type exclusionRespectingRouter struct{ pick router.Decision }
+
+func (r exclusionRespectingRouter) Route(_ context.Context, req router.Request) (router.Decision, error) {
+	if _, excluded := req.ExcludedModels[r.pick.Model]; excluded {
+		return router.Decision{}, fmt.Errorf("every candidate excluded: %w", cluster.ErrNoEligibleProvider)
+	}
+	return r.pick, nil
+}
+
+// A failing vendor entry passes the turn to the next entry, never to a low
+// model off the list such as the requested model's baseline.
+func TestModelClassOrder_FailedVendorEntryPassesToTheNextEntryNotOffList(t *testing.T) {
+	stack := classOrderServiceWith(t, classOrderOpts{
+		anthropic: &streamingAnthropic{}, openAI: &failingOpenAI{}, scorer: &countingRouter{decision: lowPick},
+		orderYAML: "model_classes:\n  low: [test-mco-mimo, test-mco-qwen, gpt-5.6-terra, claude-sonnet-5-5]\n",
+	})
+	rec := httptest.NewRecorder()
+
+	require.NoError(t, stack.svc.ProxyMessages(stack.classedCtx(catalog.TierLow, "test-mco-mimo", "test-mco-qwen"), []byte(localSubstituteBody), rec, paidRequest()))
+
+	assert.Equal(t, "claude-sonnet-5-5", rec.Header().Get(proxy.HeaderRouterModel))
+	assert.Equal(t, []string{"claude-sonnet-5-5"}, stack.anthropic.(*streamingAnthropic).served(), "neither the baseline nor the router's pick serves")
+}
+
+// With Fable excluded the scorer finds nothing in the high class; the order
+// serves Astra, which the scorer cannot pick.
+func TestModelClassOrder_HighWithFableExcludedServesAstra(t *testing.T) {
+	stack := classOrderServiceWith(t, classOrderOpts{
+		anthropic: &streamingAnthropic{},
+		scorer:    exclusionRespectingRouter{pick: router.Decision{Provider: providers.ProviderAnthropic, Model: "claude-fable-5-1", Reason: "cluster"}},
+		orderYAML: classOrderYAML,
+	})
+	rec := httptest.NewRecorder()
+
+	require.NoError(t, stack.svc.ProxyMessages(stack.classedCtx(catalog.TierHigh, "claude-fable-5-1"), []byte(localSubstituteBody), rec, paidRequest()))
+
+	assert.Equal(t, "gpt-6-astra", rec.Header().Get(proxy.HeaderRouterModel))
+	assert.Equal(t, []string{"gpt-6-astra"}, stack.openAI.served())
+}
+
+// Fable refused by the caller's Claude subscription passes to Astra.
+func TestModelClassOrder_HighSubscriptionRefusalServesAstra(t *testing.T) {
+	anthropic := &streamingAnthropic{oauthStatus: http.StatusTooManyRequests}
+	stack := classOrderServiceWith(t, classOrderOpts{
+		anthropic: anthropic, scorer: &countingRouter{decision: router.Decision{Provider: providers.ProviderAnthropic, Model: "claude-fable-5-1", Reason: "cluster"}},
+		orderYAML: classOrderYAML,
+	})
+	rec := httptest.NewRecorder()
+
+	require.NoError(t, stack.svc.ProxyMessages(stack.classedCtx(catalog.TierHigh), []byte(localSubstituteBody), rec, claudeCodeRequest("")))
+
+	assert.Equal(t, "gpt-6-astra", rec.Header().Get(proxy.HeaderRouterModel))
+	assert.Equal(t, []string{"gpt-6-astra"}, stack.openAI.served())
+}
+
+// A class-ordered turn carries no in-band badge: a title turn's output is
+// parsed by the harness, and the response headers name the model and class.
+func TestModelClassOrder_TurnsCarryNoBadge(t *testing.T) {
+	for name, body := range map[string]string{"title": localTitleGenBody, "main loop": localSubstituteBody} {
+		t.Run(name, func(t *testing.T) {
+			stack := classOrderService(t, &streamingAnthropic{}, lowPick)
+			rec := httptest.NewRecorder()
+
+			require.NoError(t, stack.svc.ProxyMessages(stack.classedCtx(catalog.TierLow), []byte(body), rec, paidRequest()))
+
+			assert.NotContains(t, rec.Body.String(), "Weave Router")
+			assert.Equal(t, "test-mco-mimo", rec.Header().Get(proxy.HeaderRouterModel))
+		})
+	}
+}
+
+// When every listed entry has failed, no rescue reaches a low model off the
+// list: the requested model's baseline and the router's pick stay unused.
+func TestModelClassOrder_ExhaustedListNeverReachesAnOffListModel(t *testing.T) {
+	anthropic := &streamingAnthropic{}
+	stack := classOrderServiceWith(t, classOrderOpts{
+		anthropic: anthropic, openAI: &failingOpenAI{}, scorer: &countingRouter{decision: lowPick},
+		orderYAML: "model_classes:\n  low: [test-mco-mimo, test-mco-qwen, gpt-5.6-terra]\n",
+	})
+
+	_ = stack.svc.ProxyMessages(stack.classedCtx(catalog.TierLow, "test-mco-mimo", "test-mco-qwen"), []byte(localSubstituteBody), httptest.NewRecorder(), paidRequest())
+
+	assert.Empty(t, anthropic.served(), "claude-sonnet-4-6 (baseline) and claude-haiku-4-5 (pick) are off the list")
 }

@@ -266,6 +266,9 @@ type turnLoopResult struct {
 	// turn when the substitute in Decision fails before output; the router's
 	// pick follows them.
 	LocalAlternates []router.Decision
+	// ClassOrdered marks a turn whose LocalAlternates are its class order: any
+	// failure before output, local or not, passes the turn to the next.
+	ClassOrdered bool
 	// LocalTurnRouted marks a decision the local turn route made.
 	LocalTurnRouted bool
 	// PlannerDecision holds the planner's verdict and EV math when the planner ran.
@@ -749,6 +752,11 @@ func (s *Service) runTurnLoop(
 ) (res turnLoopResult, routeErr error) {
 	entryCtx, entryReq := ctx, req
 	defer func() {
+		if routeErr != nil && s.rescueEmptyClass(ctx, &res, entryReq, routeErr) {
+			observability.FromContext(ctx).Info("Model class order served a turn routing found no candidate for",
+				"turn_type", string(res.TurnType), "model", res.Decision.Model, "route_err", routeErr)
+			routeErr = nil
+		}
 		routeErr = modelClassUnavailable(ctx, routeErr)
 		if routeErr == nil {
 			routeErr = policyPinServed(ctx, res)
@@ -991,18 +999,13 @@ func (s *Service) runTurnLoop(
 	// local turn route, hard pins, session pins and the scorer, but never
 	// ahead of a user force. Like a hard pin it reads and writes no session
 	// pin, so the first entry is tried again each turn.
-	if !forceModelFound {
-		if first, rest, ordered := s.lowClassOrderDecision(ctx, res.Decision, res.TurnType, req); ordered && !s.legacyForcePinned(ctx, threadSessionKey, res.PinRole) {
-			if first.Model == "" {
-				class, _ := requestModelClass(ctx)
-				return res, &ModelClassUnavailableError{Class: class, Err: cluster.ErrNoEligibleProvider}
-			}
-			res.Decision = first
-			res.LocalAlternates = rest
-			res.Origin = policy.OverrideSourceDeployment
-			log.Info("Model class order served turn", "turn_type", string(res.TurnType), "model", first.Model, "provider", first.Provider, "fallbacks", len(rest))
-			return res, nil
+	if class, _ := requestModelClass(ctx); !forceModelFound && class == catalog.TierLow && len(s.ModelClassMembers(class)) > 0 &&
+		!s.legacyForcePinned(ctx, threadSessionKey, res.PinRole) {
+		if _, err := s.lowClassOrder(ctx, &res, req); err != nil {
+			return res, err
 		}
+		log.Info("Model class order served turn", "turn_type", string(res.TurnType), "model", res.Decision.Model, "provider", res.Decision.Provider, "fallbacks", len(res.LocalAlternates))
+		return res, nil
 	}
 
 	// The local turn route outranks the automatic hard pin and the scorer but

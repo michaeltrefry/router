@@ -729,7 +729,7 @@ func routingMarkerFor(res turnLoopResult) string {
 	// PriorServedModel is always empty there — suppress explicitly rather than
 	// letting it read as a first turn. A classifier verdict is parsed by the
 	// harness, not read by the user, and a prefix would corrupt it.
-	if res.HardPinned || isUnpinnedScoredTurn(res.TurnType) {
+	if res.HardPinned || isUnpinnedScoredTurn(res.TurnType) || res.Decision.Reason == reasonModelClassOrder {
 		return ""
 	}
 	// A shadow checkpoint is news even when ordinary routing keeps the same model.
@@ -4784,7 +4784,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 				localFailureRan = true
 				dispatched = true
 				// A further local model in the chain still takes a failure.
-				chainHeld = planLocalFailureFallback(normalRes, nil) != nil && providers.IsLocalProvider(target.Provider)
+				chainHeld = planLocalFailureFallback(normalRes, nil) != nil
 				crossFormat = false
 				respSummary = translate.ResponseSummary{}
 				reqStats = providers.RequestMutationStats{}
@@ -4826,9 +4826,9 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 				localFailureUsed = proxyErr == nil
 			}
 		}
-		// A failed low-tier substitute hands the turn to the next local model,
-		// which carries its own rescue plan.
-		if !dispatched || !providers.IsLocalProvider(routeRes.Decision.Provider) {
+		// A failed low-tier substitute or class-order entry hands the turn to
+		// the next one, which carries its own rescue plan.
+		if !dispatched {
 			break
 		}
 		localFailure = planLocalFailureFallback(routeRes, nil).after(localFailure)
@@ -8022,7 +8022,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 				localFailureRan = true
 				dispatched = true
 				// A further local model in the chain still takes a failure.
-				chainHeld = planLocalFailureFallback(normalRes, nil) != nil && providers.IsLocalProvider(target.Provider)
+				chainHeld = planLocalFailureFallback(normalRes, nil) != nil
 				// The writer was set up to translate the local model's Chat
 				// Completions and to badge it; keep translating and badge the
 				// model that serves instead.
@@ -8079,9 +8079,9 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 				localFailureUsed = proxyErr == nil
 			}
 		}
-		// A failed low-tier substitute hands the turn to the next local model,
-		// which carries its own rescue plan.
-		if !dispatched || !providers.IsLocalProvider(routeRes.Decision.Provider) {
+		// A failed low-tier substitute or class-order entry hands the turn to
+		// the next one, which carries its own rescue plan.
+		if !dispatched {
 			break
 		}
 		localFailure = planLocalFailureFallback(routeRes, nil).after(localFailure)
