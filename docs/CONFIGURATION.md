@@ -519,7 +519,32 @@ it; when routing finds no candidate in the class, the first servable entry
 serves, which reaches models the cluster scorer cannot pick (such as
 `gpt-6-astra`). A turn served on a list entry carries no in-band routing badge
 — `x-router-model` and `X-Weave-Model-Class` name what served. The `/v1/route` dry run reports the
-same choice. Gemini-native ingress routes only Gemini models, so a class whose
+same choice.
+
+An optional `class_rotation` list names classes whose list serves every turn
+instead of backing up the router's pick, rotated per session:
+
+```yaml
+class_rotation: [high, mid]
+```
+
+A rotating class's turn is served on its list rotated to the session's slot,
+a stable hash of the session key, so one session keeps one model on every turn
+(and its prompt cache) while different sessions spread across the list; the
+cluster scorer is not consulted. The rest of the rotated list is the turn's
+fallback chain as above. Each entry must name a class with a `model_classes`
+list; boot fails otherwise. `low` needs no entry: it always follows its list.
+
+Ordered turns (low, and rotating classes) keep their session state under a
+per-class key, so a model the session struck is skipped on its later turns
+(the list serves unchanged if every entry is struck), and a cyber-refusal
+re-pin to a listed model goes first. Strikes are recorded only with
+`ROUTER_COMMITTED_STREAM_ARM_DEMOTION` (a stream that died after output) and
+`ROUTER_RESCUED_FAILURE_ARM_DEMOTION` (a pick that failed before output and was
+served by a later entry), both off by default; `ROUTER_TRANSIENT_RATE_LIMIT`
+turns a 429 strike into a short cooldown. Requests that name a rotating class
+are not passed straight through on the caller's own subscription (usage
+bypass); the router serves them from the list. Gemini-native ingress routes only Gemini models, so a class whose
 list names none answers it with `model_class_unavailable`. A class-ordered turn logs `Model class order served turn`.
 
 #### Subscription exhaustion fallback

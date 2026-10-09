@@ -12,6 +12,7 @@ var (
 	errModelClassesModel     = errors.New("model classes: entry must name a catalog or configured local model")
 	errModelClassesTier      = errors.New("model classes: entry's tier differs from its class")
 	errModelClassesDuplicate = errors.New("model classes: model listed twice")
+	errClassRotationClass    = errors.New("class rotation: entry must be a class with a model_classes list")
 )
 
 // localModelClassesEntry orders, per class, the models x-weave-model-class
@@ -48,6 +49,20 @@ func validateModelClasses(entry *localModelClassesEntry) (proxy.ModelClassOrder,
 			seen[model] = struct{}{}
 			out[class.tier] = append(out[class.tier], model)
 		}
+	}
+	return out, nil
+}
+
+// validateClassRotation resolves class_rotation against the validated order:
+// every entry must name a class (low, mid or high) that has a list.
+func validateClassRotation(entries []string, order proxy.ModelClassOrder) ([]catalog.Tier, error) {
+	out := make([]catalog.Tier, 0, len(entries))
+	for _, entry := range entries {
+		class, err := parseLocalTier(entry)
+		if err != nil || len(order[class]) == 0 {
+			return nil, fmt.Errorf("%w: %q", errClassRotationClass, entry)
+		}
+		out = append(out, class)
 	}
 	return out, nil
 }

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
 	"weave-os/router/internal/router/cluster"
+	"weave-os/router/internal/router/sessionpin"
 )
 
 const classOrderYAML = `model_classes:
@@ -67,12 +69,20 @@ type classOrderOpts struct {
 	openAI    providers.Client
 	scorer    router.Router
 	orderYAML string
+	rotate    []catalog.Tier
+	mimoURL   string
+	pins      sessionpin.Store
+	demote    bool
 }
 
 func classOrderServiceWith(t *testing.T, o classOrderOpts) classOrderStack {
 	t.Helper()
 	mimo, qwen := newLocalUpstream(t), newLocalUpstream(t)
-	path := writeLocalModelsFile(t, lowLocalEntryYAML("test-mco-mimo", mimo.baseURL)+lowLocalEntryYAML("test-mco-qwen", qwen.baseURL)+
+	mimoURL := mimo.baseURL
+	if o.mimoURL != "" {
+		mimoURL = o.mimoURL
+	}
+	path := writeLocalModelsFile(t, lowLocalEntryYAML("test-mco-mimo", mimoURL)+lowLocalEntryYAML("test-mco-qwen", qwen.baseURL)+
 		userModelTiersYAML+o.orderYAML)
 	openAI := &streamingOpenAI{}
 	var openAIClient providers.Client = openAI
@@ -93,9 +103,12 @@ func classOrderServiceWith(t *testing.T, o classOrderOpts) classOrderStack {
 			delete(providers.APIKeyEnvVars, providers.LocalProviderName(id))
 		}
 	})
-	svc := proxy.NewService(o.scorer, providerMap, nil, false, nil, nil, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+	svc := proxy.NewService(o.scorer, providerMap, nil, false, nil, o.pins, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
 		WithDeploymentKeyedProviders(keyed).
-		WithModelClassOrder(cfg.modelClassOrder)
+		WithModelClassOrder(cfg.modelClassOrder).
+		WithClassRotation(o.rotate...).
+		WithCommittedStreamArmDemotion(o.demote).
+		WithRescuedFailureArmDemotion(o.demote)
 	return classOrderStack{svc: svc, anthropic: anthropic, openAI: openAI, mimo: mimo, qwen: qwen}
 }
 
@@ -326,4 +339,167 @@ func TestLoadLocalModels_ModelClassesExampleBoots(t *testing.T) {
 	assert.Equal(t, []string{"claude-fable-5-1", "gpt-6-astra"}, cfg.modelClassOrder[catalog.TierHigh])
 	assert.Equal(t, "mimo-v2.6-flash-rl", cfg.modelClassOrder[catalog.TierLow][0])
 	assert.Equal(t, catalog.TierMid, catalog.TierFor("gpt-5.5"), "the mapped source takes Sol's deployment tier")
+	assert.Equal(t, []catalog.Tier{catalog.TierHigh, catalog.TierMid}, cfg.classRotation)
+}
+
+// sessionBody is a main-loop turn whose first user message names a session.
+func sessionBody(session string) []byte {
+	return []byte(`{"model":"claude-sonnet-4-6","max_tokens":256,"system":"You are Claude Code.",` +
+		`"tools":[{"name":"Read","description":"read a file","input_schema":{"type":"object"}}],` +
+		`"messages":[{"role":"user","content":"task ` + session + `"}]}`)
+}
+
+// A rotating class assigns each session one model of its list and keeps it;
+// sessions spread across the list, and the scorer's pick is not used.
+func TestClassRotation_SessionsSpreadAndStick(t *testing.T) {
+	stack := classOrderServiceWith(t, classOrderOpts{
+		anthropic: &streamingAnthropic{},
+		scorer:    &countingRouter{decision: router.Decision{Provider: providers.ProviderAnthropic, Model: "claude-fable-5-1", Reason: "cluster"}},
+		orderYAML: classOrderYAML,
+		rotate:    []catalog.Tier{catalog.TierHigh, catalog.TierMid},
+	})
+	served := map[string]string{}
+	for i := 0; i < 12; i++ {
+		session := fmt.Sprintf("s%d", i)
+		rec := httptest.NewRecorder()
+		require.NoError(t, stack.svc.ProxyMessages(stack.classedCtx(catalog.TierHigh), sessionBody(session), rec, paidRequest()))
+		served[session] = rec.Header().Get(proxy.HeaderRouterModel)
+	}
+	models := map[string]int{}
+	for _, m := range served {
+		models[m]++
+	}
+	assert.Contains(t, models, "claude-fable-5-1")
+	assert.Contains(t, models, "gpt-6-astra", "sessions spread across the high list, not only the scorer's pick")
+
+	for session, model := range served {
+		rec := httptest.NewRecorder()
+		require.NoError(t, stack.svc.ProxyMessages(stack.classedCtx(catalog.TierHigh), sessionBody(session), rec, paidRequest()))
+		assert.Equal(t, model, rec.Header().Get(proxy.HeaderRouterModel), "session %s keeps its model", session)
+	}
+}
+
+// A rotated pick that fails before output passes to the next entry of the
+// session's rotated list, never back to the list's head: with Anthropic down,
+// a session whose slot starts at claude-opus-4-7 goes straight on to Sol
+// without trying claude-opus-5-5 (the unrotated head).
+func TestClassRotation_FailedPickFallsThroughTheRotatedList(t *testing.T) {
+	anthropic := &overloadedAnthropic{}
+	stack := classOrderServiceWith(t, classOrderOpts{
+		anthropic: anthropic, scorer: &countingRouter{decision: lowPick},
+		orderYAML: "model_classes:\n  mid: [claude-opus-5-5, claude-opus-4-7, gpt-6.1-sol]\n",
+		rotate:    []catalog.Tier{catalog.TierMid},
+	})
+	sawOpus47First := false
+	for i := 0; i < 16; i++ {
+		before := len(anthropic.models)
+		rec := httptest.NewRecorder()
+		require.NoError(t, stack.svc.ProxyMessages(stack.classedCtx(catalog.TierMid), sessionBody(fmt.Sprintf("r%d", i)), rec, paidRequest()))
+		require.Equal(t, "gpt-6.1-sol", rec.Header().Get(proxy.HeaderRouterModel), "Sol is the only entry that answers")
+		tried := slices.Compact(append([]string(nil), anthropic.models[before:]...))
+		if len(tried) > 0 && tried[0] == "claude-opus-4-7" {
+			sawOpus47First = true
+			assert.Equal(t, []string{"claude-opus-4-7"}, tried, "after opus-4-7 the rotated list continues at Sol")
+		}
+	}
+	assert.True(t, sawOpus47First, "precondition: some session's slot starts at claude-opus-4-7")
+}
+
+// One client session keeps its slot when its first message changes, as it
+// does after compaction; different client sessions spread.
+func TestClassRotation_ClientSessionKeepsItsSlotAcrossCompaction(t *testing.T) {
+	stack := classOrderServiceWith(t, classOrderOpts{
+		anthropic: &streamingAnthropic{}, scorer: &countingRouter{decision: lowPick},
+		orderYAML: classOrderYAML, rotate: []catalog.Tier{catalog.TierHigh},
+	})
+	serve := func(clientSession, firstMessage string) string {
+		ctx := context.WithValue(stack.classedCtx(catalog.TierHigh), proxy.ClientIdentityContextKey{}, proxy.ClientIdentity{SessionID: clientSession})
+		rec := httptest.NewRecorder()
+		require.NoError(t, stack.svc.ProxyMessages(ctx, sessionBody(firstMessage), rec, paidRequest()))
+		return rec.Header().Get(proxy.HeaderRouterModel)
+	}
+	models := map[string]bool{}
+	for i := 0; i < 10; i++ {
+		session := fmt.Sprintf("cc-session-%d", i)
+		before := serve(session, "original task")
+		after := serve(session, "summary of the conversation so far")
+		assert.Equal(t, before, after, "session %s keeps its model after compaction", session)
+		models[before] = true
+	}
+	assert.Len(t, models, 2, "client sessions spread across the high list")
+}
+
+func TestLoadLocalModels_RejectsClassRotationWithoutAList(t *testing.T) {
+	for name, block := range map[string]string{
+		"unknown class": "model_classes:\n  high: [claude-fable-5-1]\nclass_rotation: [top]\n",
+		"no list":       "model_classes:\n  high: [claude-fable-5-1]\nclass_rotation: [mid]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Cleanup(catalog.RestoreTiers)
+			path := writeLocalModelsFile(t, userModelTiersYAML+block)
+			_, err := loadLocalModels(envFrom(map[string]string{localModelsFileEnv: path}),
+				map[string]providers.Client{}, map[string]struct{}{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			require.ErrorIs(t, err, errClassRotationClass)
+		})
+	}
+}
+
+// A low entry whose stream dies after output committed is struck for the
+// session: its next turn starts at the next entry instead of failing again.
+func TestModelClassOrder_EntryStruckAfterCommittedFailureIsSkippedNextTurn(t *testing.T) {
+	broken := newFailingLocal(t, "midstream")
+	stack := classOrderServiceWith(t, classOrderOpts{
+		anthropic: &streamingAnthropic{}, scorer: &countingRouter{decision: lowPick},
+		orderYAML: classOrderYAML, mimoURL: broken.baseURL,
+		pins: &strikingPins{memoryPins{pins: map[string]sessionpin.Pin{}}}, demote: true,
+	})
+	ctx := context.WithValue(stack.classedCtx(catalog.TierLow), proxy.ClientIdentityContextKey{}, proxy.ClientIdentity{SessionID: "cc-strike"})
+
+	_ = stack.svc.ProxyMessages(ctx, sessionBody("turn one"), httptest.NewRecorder(), paidRequest())
+	require.Equal(t, 1, broken.count(), "turn one committed on MiMo and died")
+
+	rec := httptest.NewRecorder()
+	require.NoError(t, stack.svc.ProxyMessages(ctx, sessionBody("turn one"), rec, paidRequest()))
+	assert.Equal(t, "test-mco-qwen", rec.Header().Get(proxy.HeaderRouterModel))
+	assert.Equal(t, 1, broken.count(), "MiMo is not tried again this session")
+
+	other := context.WithValue(stack.classedCtx(catalog.TierLow), proxy.ClientIdentityContextKey{}, proxy.ClientIdentity{SessionID: "cc-other"})
+	_ = stack.svc.ProxyMessages(other, sessionBody("turn one"), httptest.NewRecorder(), paidRequest())
+	assert.Equal(t, 2, broken.count(), "another session still starts at MiMo")
+}
+
+// A low entry that fails before output and is served by the next entry is
+// struck too, so the session's next turn starts past it.
+func TestModelClassOrder_EntryRescuedPreCommitIsSkippedNextTurn(t *testing.T) {
+	failing := newFailingLocal(t, "500")
+	stack := classOrderServiceWith(t, classOrderOpts{
+		anthropic: &streamingAnthropic{}, scorer: &countingRouter{decision: lowPick},
+		orderYAML: classOrderYAML, mimoURL: failing.baseURL,
+		pins: &strikingPins{memoryPins{pins: map[string]sessionpin.Pin{}}}, demote: true,
+	})
+	ctx := context.WithValue(stack.classedCtx(catalog.TierLow), proxy.ClientIdentityContextKey{}, proxy.ClientIdentity{SessionID: "cc-rescued"})
+
+	rec := httptest.NewRecorder()
+	require.NoError(t, stack.svc.ProxyMessages(ctx, sessionBody("turn one"), rec, paidRequest()))
+	require.Equal(t, "test-mco-qwen", rec.Header().Get(proxy.HeaderRouterModel))
+	tried := failing.count()
+	require.Positive(t, tried)
+
+	rec = httptest.NewRecorder()
+	require.NoError(t, stack.svc.ProxyMessages(ctx, sessionBody("turn one"), rec, paidRequest()))
+	assert.Equal(t, "test-mco-qwen", rec.Header().Get(proxy.HeaderRouterModel))
+	assert.Equal(t, tried, failing.count(), "MiMo is not tried again this session")
+}
+
+// strikingPins records strikes on the row as the Postgres store does: the
+// struck row is expired and carries the model in DemotedModels.
+type strikingPins struct{ memoryPins }
+
+func (m *strikingPins) ExpireAndDemoteModel(_ context.Context, expired sessionpin.Pin, model string, _ sessionpin.DemotionReason) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row := m.pins[pinKey(expired.SessionKey, expired.Role)]
+	expired.DemotedModels = append(append([]string(nil), row.DemotedModels...), model)
+	m.pins[pinKey(expired.SessionKey, expired.Role)] = expired
+	return nil
 }
