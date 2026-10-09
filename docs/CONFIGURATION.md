@@ -518,7 +518,9 @@ and `mid` keep the router's in-class pick, with the rest of the list behind
 it; when routing finds no candidate in the class, the first servable entry
 serves, which reaches models the cluster scorer cannot pick (such as
 `gpt-6-astra`). A turn served on a list entry carries no in-band routing badge
-— `x-router-model` and `X-Weave-Model-Class` name what served. A class-ordered turn logs `Model class order served turn`.
+— `x-router-model` and `X-Weave-Model-Class` name what served. The `/v1/route` dry run reports the
+same choice. Gemini-native ingress routes only Gemini models, so a class whose
+list names none answers it with `model_class_unavailable`. A class-ordered turn logs `Model class order served turn`.
 
 #### Subscription exhaustion fallback
 
