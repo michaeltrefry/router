@@ -838,11 +838,13 @@ credential gets `401`.
 | Providers | `GET /admin/v1/providers` | — | — | — |
 | Provider exclusions | `GET /admin/v1/excluded-providers` | `PUT /admin/v1/excluded-providers` | `POST /admin/v1/excluded-providers` | `POST /admin/v1/excluded-providers/remove` |
 
-`GET /admin/v1/models` returns `[{model, provider, enabled, local}]`, sorted by
+`GET /admin/v1/models` returns `[{model, provider, enabled, local, class}]`, sorted by
 provider then model, over the deployment's routable universe: catalog models
 with a configured provider, local models and model-mapping targets — the same
 set the bare `/router-models` directive lists. `enabled` is false for a model on
-the installation exclusion list (or the `ROUTER_EXCLUDED_MODELS` override).
+the installation exclusion list (or the `ROUTER_EXCLUDED_MODELS` override). `class` is the model's tier as this deployment sets it (`high`, `mid` or
+`low`, the value `x-weave-model-class` selects on), omitted for an untiered
+model; a router without this API lists its catalog without classes.
 Providers return `[{provider, enabled}]` over the scorer's providers plus each
 local model's `local_<id>` provider. Exclusion GET responses retain
 `available`, `excluded` and `env_override_active` for the dashboard.
