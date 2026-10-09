@@ -19,6 +19,9 @@ type modelStatusDTO struct {
 	Provider string `json:"provider"`
 	Enabled  bool   `json:"enabled"`
 	Local    bool   `json:"local,omitempty"`
+	// Class is the model's tier (high, mid or low), the value
+	// x-weave-model-class selects on; empty for an untiered model.
+	Class string `json:"class,omitempty"`
 }
 
 type providerStatusDTO struct {
@@ -62,6 +65,7 @@ func GetModelsHandler(authSvc *auth.Service, routable RoutableModelsSource, over
 				Provider: model.Provider,
 				Enabled:  !isExcluded,
 				Local:    model.Local,
+				Class:    modelClass(model.Model),
 			})
 		}
 		c.JSON(http.StatusOK, out)
@@ -401,4 +405,12 @@ func respondProviderSelectionError(c *gin.Context, err error) bool {
 	observability.FromGin(c).Error("Failed to update excluded providers", "err", err)
 	c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Failed to update excluded providers."})
 	return false
+}
+
+// modelClass is the model's tier label, or "" when it has none.
+func modelClass(model string) string {
+	if tier := catalog.TierFor(model); tier != catalog.TierUnknown {
+		return tier.String()
+	}
+	return ""
 }

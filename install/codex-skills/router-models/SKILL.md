@@ -19,7 +19,10 @@ Start by running:
 ```
 
 That prints every deployed model grouped by provider, with `[x]` for models the
-router may pick and `[ ]` for models it may not. Present it back grouped by
+router may pick and `[ ]` for models it may not, and each model's class —
+`(high)`, `(mid)` or `(low)`, the value the `x-weave-model-class` request
+header selects on — after its id when it has one. Keep the class next to each
+id in what you show, e.g. `claude-opus-5-5 (mid)`. Present it back grouped by
 provider, with an **On:** line and an **Off:** line under each provider listing
 the exact model ids (comma-separated). Don't write `[x]` / `[ ]` or a markdown
 task list — chat renders checked tasks struck through, which reads as disabled.
