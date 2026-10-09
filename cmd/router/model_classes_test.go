@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -368,17 +369,53 @@ func TestClassRotation_SessionsSpreadAndStick(t *testing.T) {
 }
 
 // A rotated pick that fails before output passes to the next entry of the
-// session's rotated list.
+// session's rotated list, never back to the list's head: with Anthropic down,
+// a session whose slot starts at claude-opus-4-7 goes straight on to Sol
+// without trying claude-opus-5-5 (the unrotated head).
 func TestClassRotation_FailedPickFallsThroughTheRotatedList(t *testing.T) {
+	anthropic := &overloadedAnthropic{}
 	stack := classOrderServiceWith(t, classOrderOpts{
-		anthropic: &overloadedAnthropic{}, scorer: &countingRouter{decision: lowPick},
+		anthropic: anthropic, scorer: &countingRouter{decision: lowPick},
+		orderYAML: "model_classes:\n  mid: [claude-opus-5-5, claude-opus-4-7, gpt-6.1-sol]\n",
+		rotate:    []catalog.Tier{catalog.TierMid},
+	})
+	sawOpus47First := false
+	for i := 0; i < 16; i++ {
+		before := len(anthropic.models)
+		rec := httptest.NewRecorder()
+		require.NoError(t, stack.svc.ProxyMessages(stack.classedCtx(catalog.TierMid), sessionBody(fmt.Sprintf("r%d", i)), rec, paidRequest()))
+		require.Equal(t, "gpt-6.1-sol", rec.Header().Get(proxy.HeaderRouterModel), "Sol is the only entry that answers")
+		tried := slices.Compact(append([]string(nil), anthropic.models[before:]...))
+		if len(tried) > 0 && tried[0] == "claude-opus-4-7" {
+			sawOpus47First = true
+			assert.Equal(t, []string{"claude-opus-4-7"}, tried, "after opus-4-7 the rotated list continues at Sol")
+		}
+	}
+	assert.True(t, sawOpus47First, "precondition: some session's slot starts at claude-opus-4-7")
+}
+
+// One client session keeps its slot when its first message changes, as it
+// does after compaction; different client sessions spread.
+func TestClassRotation_ClientSessionKeepsItsSlotAcrossCompaction(t *testing.T) {
+	stack := classOrderServiceWith(t, classOrderOpts{
+		anthropic: &streamingAnthropic{}, scorer: &countingRouter{decision: lowPick},
 		orderYAML: classOrderYAML, rotate: []catalog.Tier{catalog.TierHigh},
 	})
-	for i := 0; i < 8; i++ {
+	serve := func(clientSession, firstMessage string) string {
+		ctx := context.WithValue(stack.classedCtx(catalog.TierHigh), proxy.ClientIdentityContextKey{}, proxy.ClientIdentity{SessionID: clientSession})
 		rec := httptest.NewRecorder()
-		require.NoError(t, stack.svc.ProxyMessages(stack.classedCtx(catalog.TierHigh), sessionBody(fmt.Sprintf("f%d", i)), rec, paidRequest()))
-		assert.Equal(t, "gpt-6-astra", rec.Header().Get(proxy.HeaderRouterModel), "every session ends on Astra while Fable fails")
+		require.NoError(t, stack.svc.ProxyMessages(ctx, sessionBody(firstMessage), rec, paidRequest()))
+		return rec.Header().Get(proxy.HeaderRouterModel)
 	}
+	models := map[string]bool{}
+	for i := 0; i < 10; i++ {
+		session := fmt.Sprintf("cc-session-%d", i)
+		before := serve(session, "original task")
+		after := serve(session, "summary of the conversation so far")
+		assert.Equal(t, before, after, "session %s keeps its model after compaction", session)
+		models[before] = true
+	}
+	assert.Len(t, models, 2, "client sessions spread across the high list")
 }
 
 func TestLoadLocalModels_RejectsClassRotationWithoutAList(t *testing.T) {

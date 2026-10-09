@@ -18,6 +18,7 @@ import (
 	"weave-os/router/internal/observability/apm"
 	"weave-os/router/internal/observability/otel"
 	"weave-os/router/internal/providers"
+	"weave-os/router/internal/requestcontext"
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
 	"weave-os/router/internal/router/cluster"
@@ -1001,7 +1002,11 @@ func (s *Service) runTurnLoop(
 	// force. Like a hard pin it reads and writes no session pin: the order
 	// itself keeps a session on one model.
 	if !forceModelFound && s.orderedClassTurn(ctx) && !s.legacyForcePinned(ctx, threadSessionKey, res.PinRole) {
-		if err := s.serveOrderedClass(ctx, &res, req, threadSessionKey); err != nil {
+		// The client session, not the first message, picks the slot:
+		// compaction rewrites that message, and sub-agents share their
+		// parent's session.
+		rotationKey := deriveConversationSessionKeyForRequest(ctx, env, apiKeyID, threadSessionKey, requestcontext.ClassRotationConversationKey)
+		if err := s.serveOrderedClass(ctx, &res, req, rotationKey); err != nil {
 			return res, err
 		}
 		class, _ := requestModelClass(ctx)

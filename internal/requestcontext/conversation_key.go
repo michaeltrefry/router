@@ -13,6 +13,9 @@ const (
 	ForceModelConversationKey ConversationKeyDomain = "force_model_session:"
 	// LegacyBetaConversationKey remains the migration identity even after managed beta retirement.
 	LegacyBetaConversationKey ConversationKeyDomain = "beta_session:"
+	// ClassRotationConversationKey keys a client session's slot in a
+	// rotating model class.
+	ClassRotationConversationKey ConversationKeyDomain = "class_rotation:"
 )
 
 // ConversationKey derives the existing 16-byte preference identity without protocol or runtime dependencies.
