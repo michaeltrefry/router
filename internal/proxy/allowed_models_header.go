@@ -107,8 +107,12 @@ func requestAllowedModelSet(ctx context.Context) map[string]struct{} {
 }
 
 // modelInRequestSubset reports whether model may be served under the
-// request-level allowlist; true when no subset was sent.
+// request-level restrictions: the allowlist subset and the model class. True
+// when the request sent neither.
 func modelInRequestSubset(ctx context.Context, model string) bool {
+	if !modelInRequestedClass(ctx, model) {
+		return false
+	}
 	subset := requestAllowedModelSet(ctx)
 	if subset == nil {
 		return true
@@ -194,4 +198,12 @@ func (s *Service) readmitForcedModel(
 func requestAllowedModelsPresent(ctx context.Context) bool {
 	_, ok := requestAllowedModelsFromContext(ctx)
 	return ok
+}
+
+// requestNarrowsModels reports whether the request restricts its own model
+// pool, by allowlist subset or model class. Such requests bypass the semantic
+// cache, whose key carries neither.
+func requestNarrowsModels(ctx context.Context) bool {
+	_, classed := requestModelClass(ctx)
+	return classed || requestAllowedModelsPresent(ctx)
 }

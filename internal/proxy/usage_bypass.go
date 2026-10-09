@@ -219,6 +219,11 @@ func subscriptionCoveredTarget(ctx context.Context, headers http.Header, req rou
 			return "", "", false
 		}
 	}
+	// The lane serves the requested model verbatim, so a request asking for
+	// another class routes instead.
+	if !modelInRequestedClass(ctx, model) {
+		return "", "", false
+	}
 	if token == "" {
 		return "", "", false
 	}
@@ -390,6 +395,7 @@ func (s *Service) bypassToAnthropic(
 	w.Header().Set(HeaderRouterDecision, decision.Reason)
 	w.Header().Set(HeaderRouterProvider, decision.Provider)
 	w.Header().Set(HeaderRouterModel, decision.Model)
+	setModelClassHeader(w.Header(), decision.Model)
 	w.Header().Set(HeaderRouterContextWindow, strconv.Itoa(contextWindowForRequest(decision.Model, decision.Provider)))
 
 	p, provErr := s.provider(providers.ProviderAnthropic)

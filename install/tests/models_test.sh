@@ -71,7 +71,7 @@ if [ "${ROUTER_MODE:-full}" = "down" ]; then
 fi
 
 catalog='{"models":[{"model":"claude-opus-5","provider":"anthropic"},{"model":"gpt-5.6","provider":"openai"}]}'
-models='[{"model":"claude-opus-5","provider":"anthropic","enabled":true},{"model":"claude-haiku-4-5","provider":"anthropic","enabled":false},{"model":"gpt-5.6","provider":"openai","enabled":true}]'
+models='[{"model":"claude-opus-5","provider":"anthropic","enabled":true,"class":"mid"},{"model":"claude-haiku-4-5","provider":"anthropic","enabled":false,"class":"low"},{"model":"gpt-5.6","provider":"openai","enabled":true}]'
 providers='[{"provider":"anthropic","enabled":true},{"provider":"openai","enabled":false}]'
 
 case "$path" in
@@ -192,6 +192,12 @@ run_models "$home" -- --claude
 check "list exits 0" "$rc" "0"
 contains "list marks an enabled model" "$out" "[x] claude-opus-5"
 contains "list marks a disabled model" "$out" "[ ] claude-haiku-4-5"
+contains "list names an enabled model's class" "$out" "[x] claude-opus-5 (mid)"
+contains "list names a disabled model's class" "$out" "claude-haiku-4-5 (low)"
+case "$out" in
+  *"gpt-5.6 ("*) no "an untiered model renders without a class" "no suffix" "$out" ;;
+  *) ok "an untiered model renders without a class" ;;
+esac
 contains "list groups by provider" "$out" "openai"
 contains "list reports the enabled count" "$out" "2 of 3 enabled"
 contains "list shows the preferred ranking" "$out" "Preferred order: claude-opus-5"

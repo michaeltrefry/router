@@ -14,6 +14,7 @@ import (
 	"weave-os/router/internal/api/admin"
 	"weave-os/router/internal/auth"
 	"weave-os/router/internal/providers"
+	"weave-os/router/internal/router/catalog"
 	"weave-os/router/internal/router/cluster"
 	"weave-os/router/internal/server/middleware"
 
@@ -211,6 +212,7 @@ type modelRow struct {
 	Provider string `json:"provider"`
 	Enabled  bool   `json:"enabled"`
 	Local    bool   `json:"local"`
+	Class    string `json:"class"`
 }
 
 func TestGetModels_ListsRoutableUniverseWithEnabledState(t *testing.T) {
@@ -223,11 +225,28 @@ func TestGetModels_ListsRoutableUniverseWithEnabledState(t *testing.T) {
 	var rows []modelRow
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
 	assert.Equal(t, []modelRow{
-		{Model: "claude-opus-5", Provider: providers.ProviderAnthropic, Enabled: false},
-		{Model: "claude-opus-5-5", Provider: providers.ProviderAnthropic, Enabled: true},
-		{Model: f.localModel, Provider: f.localProv, Enabled: true, Local: true},
+		{Model: "claude-opus-5", Provider: providers.ProviderAnthropic, Enabled: false, Class: "high"},
+		{Model: "claude-opus-5-5", Provider: providers.ProviderAnthropic, Enabled: true, Class: "high"},
+		{Model: f.localModel, Provider: f.localProv, Enabled: true, Local: true, Class: "mid"},
 		{Model: "gpt-5.5", Provider: providers.ProviderOpenAI, Enabled: true},
-	}, rows, "the routable universe, mapping target and local model included, sorted by provider then model")
+	}, rows, "the routable universe, mapping target and local model included, sorted by provider then model; class is the tier")
+}
+
+// The class follows the deployment's model_tiers, not the static catalog.
+func TestGetModels_ClassFollowsDeploymentTiers(t *testing.T) {
+	f := newModelSelectionFixture(t, fakeExclusionOverride{})
+	t.Cleanup(catalog.RestoreTiers)
+	require.NoError(t, catalog.RetierModels(map[string]catalog.Tier{"claude-opus-5-5": catalog.TierMid}))
+
+	rec := f.do(t, http.MethodGet, "/admin/v1/models", "")
+
+	var rows []modelRow
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	classes := map[string]string{}
+	for _, r := range rows {
+		classes[r.Model] = r.Class
+	}
+	assert.Equal(t, "mid", classes["claude-opus-5-5"])
 }
 
 func TestGetModels_RejectsMissingKey(t *testing.T) {

@@ -11,6 +11,9 @@ const (
 	HeaderRouterProvider = "x-router-provider"
 	// HeaderRouterModel carries the model that served the turn.
 	HeaderRouterModel = "x-router-model"
+	// HeaderRouterModelClass carries the class (catalog tier) of the model
+	// that served the turn: high, mid or low.
+	HeaderRouterModelClass = "X-Weave-Model-Class"
 	// HeaderRouterContextWindow carries the effective context window (tokens)
 	// of the model that served the turn, so window-aware clients (pi) can budget
 	// auto-compaction against the served model rather than the requested one.

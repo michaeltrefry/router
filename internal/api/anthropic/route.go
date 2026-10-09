@@ -42,6 +42,12 @@ func RouteHandler(svc *proxy.Service) gin.HandlerFunc {
 				writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Invalid routing knobs supplied.")
 				return
 			}
+			var classUnavailable *proxy.ModelClassUnavailableError
+			if errors.As(routeErr, &classUnavailable) {
+				cls, _ := proxy.ClassifyDispatchError(routeErr)
+				writeAnthropicError(c, cls.Status, "api_error", cls.Message)
+				return
+			}
 			if errors.Is(routeErr, router.ErrPolicyPinUnavailable) {
 				log.Warn("Policy pin unavailable on route", "err", routeErr)
 				writeAnthropicError(c, http.StatusServiceUnavailable, "api_error", router.PolicyPinUnavailableReason)

@@ -152,6 +152,12 @@ type Service struct {
 	// WithMidTierSubstitute.
 	midTierProvider string
 	midTierModel    string
+	// lowTierTargets replace automatic low-tier selections, in order; see
+	// WithLowTierSubstitute.
+	lowTierTargets []LocalTarget
+	// modelClassOrder orders each class's models for x-weave-model-class
+	// requests; see WithModelClassOrder.
+	modelClassOrder ModelClassOrder
 	// substitutionRules replace automatic selections matching a model
 	// pattern, ahead of the mid-tier substitute; see WithSubstitutionRules.
 	substitutionRules []SubstitutionRule
@@ -723,7 +729,7 @@ func routingMarkerFor(res turnLoopResult) string {
 	// PriorServedModel is always empty there — suppress explicitly rather than
 	// letting it read as a first turn. A classifier verdict is parsed by the
 	// harness, not read by the user, and a prefix would corrupt it.
-	if res.HardPinned || isUnpinnedScoredTurn(res.TurnType) {
+	if res.HardPinned || isUnpinnedScoredTurn(res.TurnType) || res.Decision.Reason == reasonModelClassOrder {
 		return ""
 	}
 	// A shadow checkpoint is news even when ordinary routing keeps the same model.
@@ -1114,7 +1120,11 @@ func (s *Service) safetyExcludedModels(env *translate.RequestEnvelope, outputRes
 // Otherwise desugars the positive allowlists into the exclusion set: every
 // routable model absent from the effective allowlist is excluded.
 func (s *Service) excludedModelsForRequest(ctx context.Context) map[string]struct{} {
-	return s.excludedModelsFor(ctx, allowedModelsForRequest(ctx))
+	excluded := s.excludedModelsFor(ctx, allowedModelsForRequest(ctx))
+	if class := s.modelClassExclusions(ctx); class != nil {
+		return mergeExcludedModels(excluded, class)
+	}
+	return excluded
 }
 
 // policyExcludedModels is excludedModelsForRequest without the request-level
@@ -2778,6 +2788,7 @@ func (s *Service) writeCachedResponse(w http.ResponseWriter, resp cache.CachedRe
 	w.Header().Set(HeaderRouterDecision, decision.Reason)
 	w.Header().Set(HeaderRouterProvider, decision.Provider)
 	w.Header().Set(HeaderRouterModel, decision.Model)
+	setModelClassHeader(w.Header(), decision.Model)
 	w.Header().Set(HeaderRouterContextWindow, strconv.Itoa(contextWindowForRequest(decision.Model, decision.Provider)))
 	w.Header().Set(HeaderRouterCache, RouterCacheHit)
 	if resp.StatusCode != 0 && resp.StatusCode != http.StatusOK {
@@ -3063,6 +3074,8 @@ func defaultStrategyUnavailable(strategy router.Strategy) error {
 func (s *Service) Route(ctx context.Context, req router.Request) (router.Decision, error) {
 	routeCtx, span := startRoutingSpan(ctx, req)
 	decision, err := s.routeFor(routeCtx, req)
+	decision, err = s.classOrderedRoute(ctx, req, decision, err)
+	err = modelClassUnavailable(ctx, err)
 	finishRoutingSpan(span, decision, err)
 	return decision, err
 }
@@ -3902,7 +3915,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			finishRoutingSpan(rerouteSpan, decision, rerouteErr)
 			if rerouteErr != nil {
 				log.Error("Reroute after usage-bypass failure failed", "err", rerouteErr)
-				return rerouteErr
+				return modelClassUnavailable(ctx, rerouteErr)
 			}
 			routeRes.Decision = decision
 			routeRes.Fresh = decision
@@ -4030,7 +4043,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 	// Subscription-only turns are excluded (like the OpenAI path): the mode is an
 	// unfoldable routing signal absent from the cache key, so a stored body would
 	// bypass the exhausted-sub 402 guard and the depleted-credits warning below.
-	cacheEligible := routeRes.EscalationOrdinal == 0 && routeRes.llmEscalation == nil && !clientRecoveryApplied && s.semanticCacheAllowed(ctx) && s.semanticCache != nil && !env.Stream() && decision.Metadata != nil && externalID != "" && !bypassEval && !compactionHandoverRan && !billing.SubscriptionOnlyFromContext(ctx) && !requestAllowedModelsPresent(ctx)
+	cacheEligible := routeRes.EscalationOrdinal == 0 && routeRes.llmEscalation == nil && !clientRecoveryApplied && s.semanticCacheAllowed(ctx) && s.semanticCache != nil && !env.Stream() && decision.Metadata != nil && externalID != "" && !bypassEval && !compactionHandoverRan && !billing.SubscriptionOnlyFromContext(ctx) && !requestNarrowsModels(ctx)
 	if cacheEligible {
 		if resp, hit := s.semanticCache.Lookup(externalID, cache.FormatAnthropic, decision.Metadata.Embedding, decision.Metadata.ClusterIDs, decision.Metadata.ClusterRouterVersion, decision.Metadata.EffectiveKnobsHash); hit {
 			s.writeCachedResponse(w, resp, decision)
@@ -4057,6 +4070,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 	w.Header().Set(HeaderRouterDecision, decision.Reason)
 	w.Header().Set(HeaderRouterProvider, decision.Provider)
 	w.Header().Set(HeaderRouterModel, decision.Model)
+	setModelClassHeader(w.Header(), decision.Model)
 	w.Header().Set(HeaderRouterContextWindow, strconv.Itoa(contextWindowForRequest(decision.Model, decision.Provider)))
 	if !agentShadowMode {
 		s.setFeedbackLinkHeader(ctx, w, installationID, externalID, requestID, auth.UserIDFrom(ctx))
@@ -4740,7 +4754,9 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 
 	localFailureUsed := false
 	localFailureRan := false
-	if localFailure.rescues(ctx, proxyErr, preludeBuf) {
+	chainHeld := false
+	for localFailure.rescues(ctx, proxyErr, preludeBuf) {
+		dispatched := false
 		normalRes, normalErr := localFailure.normalRoute()
 		if normalErr != nil {
 			localFailure.logUnavailable(ctx, proxyErr, normalErr)
@@ -4767,6 +4783,9 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			default:
 				localFailure.logServing(ctx, normalRes, proxyErr)
 				localFailureRan = true
+				dispatched = true
+				// A further local model in the chain still takes a failure.
+				chainHeld = planLocalFailureFallback(normalRes, nil) != nil
 				crossFormat = false
 				respSummary = translate.ResponseSummary{}
 				reqStats = providers.RequestMutationStats{}
@@ -4796,7 +4815,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 						bindings:               targetBindings,
 						attempt:                targetAttempt,
 						flushErr:               flushErrAsAnthropic,
-						deferFlushOnExhaustion: laterRescueViable,
+						deferFlushOnExhaustion: laterRescueViable || chainHeld,
 						purpose:                normalRes.dispatchPurpose(inference.PurposeAnthropicMessages),
 						origin:                 normalRes.dispatchOrigin(target),
 					})
@@ -4808,10 +4827,16 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 				localFailureUsed = proxyErr == nil
 			}
 		}
+		// A failed low-tier substitute or class-order entry hands the turn to
+		// the next one, which carries its own rescue plan.
+		if !dispatched {
+			break
+		}
+		localFailure = planLocalFailureFallback(routeRes, nil).after(localFailure)
 	}
 	// The local model's error was held for this rescue; with nothing after it,
 	// surface it now.
-	if localFailureViable && !localFailureRan && !laterRescueViable && proxyErr != nil && !preludeBuf.Committed() {
+	if localFailureViable && (!localFailureRan || chainHeld) && !laterRescueViable && proxyErr != nil && !preludeBuf.Committed() {
 		flushDeferredErr()
 	}
 
@@ -7142,7 +7167,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 
 	// See the ProxyMessages cache-eligibility note: subscription-only requests
 	// bypass the semantic cache because the key does not capture that mode.
-	cacheEligible := routeRes.EscalationOrdinal == 0 && routeRes.llmEscalation == nil && s.semanticCacheAllowed(ctx) && s.semanticCache != nil && !env.Stream() && decision.Metadata != nil && externalID != "" && !bypassEval && !responsesPassthrough && !billing.SubscriptionOnlyFromContext(ctx) && !requestAllowedModelsPresent(ctx)
+	cacheEligible := routeRes.EscalationOrdinal == 0 && routeRes.llmEscalation == nil && s.semanticCacheAllowed(ctx) && s.semanticCache != nil && !env.Stream() && decision.Metadata != nil && externalID != "" && !bypassEval && !responsesPassthrough && !billing.SubscriptionOnlyFromContext(ctx) && !requestNarrowsModels(ctx)
 	if cacheEligible {
 		if resp, hit := s.semanticCache.Lookup(externalID, cache.FormatOpenAI, decision.Metadata.Embedding, decision.Metadata.ClusterIDs, decision.Metadata.ClusterRouterVersion, decision.Metadata.EffectiveKnobsHash); hit {
 			s.writeCachedResponse(w, resp, decision)
@@ -7173,6 +7198,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 	w.Header().Set(HeaderRouterDecision, decision.Reason)
 	w.Header().Set(HeaderRouterProvider, decision.Provider)
 	w.Header().Set(HeaderRouterModel, decision.Model)
+	setModelClassHeader(w.Header(), decision.Model)
 	w.Header().Set(HeaderRouterContextWindow, strconv.Itoa(contextWindowForRequest(decision.Model, decision.Provider)))
 	s.setFeedbackLinkHeader(ctx, w, installationID, externalID, requestID, auth.UserIDFrom(ctx))
 
@@ -7958,7 +7984,9 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 
 	localFailureUsed := false
 	localFailureRan := false
-	if localFailure.rescues(ctx, proxyErr, preludeBuf) {
+	chainHeld := false
+	for localFailure.rescues(ctx, proxyErr, preludeBuf) {
+		dispatched := false
 		normalRes, normalErr := localFailure.normalRoute()
 		if normalErr != nil {
 			localFailure.logUnavailable(ctx, proxyErr, normalErr)
@@ -7993,6 +8021,9 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 			default:
 				localFailure.logServing(ctx, normalRes, proxyErr)
 				localFailureRan = true
+				dispatched = true
+				// A further local model in the chain still takes a failure.
+				chainHeld = planLocalFailureFallback(normalRes, nil) != nil
 				// The writer was set up to translate the local model's Chat
 				// Completions and to badge it; keep translating and badge the
 				// model that serves instead.
@@ -8036,7 +8067,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 						bindings:               targetBindings,
 						attempt:                targetAttempt,
 						flushErr:               flushErrAsOpenAI,
-						deferFlushOnExhaustion: laterRescueViable,
+						deferFlushOnExhaustion: laterRescueViable || chainHeld,
 						purpose:                normalRes.dispatchPurpose(surfacePurpose),
 						origin:                 normalRes.dispatchOrigin(target),
 					})
@@ -8049,10 +8080,16 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 				localFailureUsed = proxyErr == nil
 			}
 		}
+		// A failed low-tier substitute or class-order entry hands the turn to
+		// the next one, which carries its own rescue plan.
+		if !dispatched {
+			break
+		}
+		localFailure = planLocalFailureFallback(routeRes, nil).after(localFailure)
 	}
 	// The local model's error was held for this rescue; with nothing after it,
 	// surface it now.
-	if localFailureViable && !localFailureRan && !laterRescueViable && proxyErr != nil && !preludeBuf.Committed() {
+	if localFailureViable && (!localFailureRan || chainHeld) && !laterRescueViable && proxyErr != nil && !preludeBuf.Committed() {
 		flushDeferredErr()
 	}
 

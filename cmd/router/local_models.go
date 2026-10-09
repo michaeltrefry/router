@@ -64,6 +64,7 @@ type localModelsFile struct {
 	Models            []localModelEntry            `yaml:"models"`
 	TurnRouting       *localTurnRoutingEntry       `yaml:"turn_routing"`
 	MidTierSubstitute *localMidTierSubstituteEntry `yaml:"mid_tier_substitute"`
+	LowTierSubstitute *localLowTierSubstituteEntry `yaml:"low_tier_substitute"`
 	// SubscriptionFallback shares the substitute's shape: a model and an
 	// enabled flag that defaults to true.
 	SubscriptionFallback *localMidTierSubstituteEntry `yaml:"subscription_fallback"`
@@ -72,6 +73,10 @@ type localModelsFile struct {
 	// SubstitutionRules serve a (mapped) automatic selection matching a
 	// model pattern on a local model; the first match wins.
 	SubstitutionRules []localSubstitutionRuleEntry `yaml:"substitution_rules"`
+	// ModelTiers retiers built-in catalog models for this deployment.
+	ModelTiers *localModelTiersEntry `yaml:"model_tiers"`
+	// ModelClasses orders each class's models for x-weave-model-class.
+	ModelClasses *localModelClassesEntry `yaml:"model_classes"`
 }
 
 // localSubstitutionRuleEntry serves selections whose model matches Match, a
@@ -102,9 +107,13 @@ type localModelsConfig struct {
 	models               []localModel
 	turnRoute            proxy.LocalTurnRoute
 	midTier              proxy.MidTierSubstitute
+	lowTier              proxy.LowTierSubstitute
 	subscriptionFallback proxy.SubscriptionLocalFallback
 	modelMapping         proxy.ModelMapping
 	substitutionRules    []proxy.SubstitutionRule
+	modelTiers           map[string]catalog.Tier
+	modelClasses         *localModelClassesEntry
+	modelClassOrder      proxy.ModelClassOrder
 }
 
 type localModelEntry struct {
@@ -166,6 +175,10 @@ func parseLocalModels(r io.Reader, getenv func(string) string) (localModelsConfi
 	if err != nil {
 		return localModelsConfig{}, err
 	}
+	lowTier, err := validateLowTierSubstitute(file.LowTierSubstitute, tiers)
+	if err != nil {
+		return localModelsConfig{}, err
+	}
 	fallback, err := validateSubscriptionFallback(file.SubscriptionFallback, seen)
 	if err != nil {
 		return localModelsConfig{}, err
@@ -178,9 +191,13 @@ func parseLocalModels(r io.Reader, getenv func(string) string) (localModelsConfi
 	if err != nil {
 		return localModelsConfig{}, err
 	}
+	modelTiers, err := validateModelTiers(file.ModelTiers)
+	if err != nil {
+		return localModelsConfig{}, err
+	}
 	return localModelsConfig{
-		models: out, turnRoute: route, midTier: midTier, subscriptionFallback: fallback,
-		modelMapping: mapping, substitutionRules: rules,
+		models: out, turnRoute: route, midTier: midTier, lowTier: lowTier, subscriptionFallback: fallback,
+		modelMapping: mapping, substitutionRules: rules, modelTiers: modelTiers, modelClasses: file.ModelClasses,
 	}, nil
 }
 
@@ -479,14 +496,35 @@ func loadLocalModels(
 	if err := registerLocalModels(cfg.models, providerMap, envKeyedProviders, logger); err != nil {
 		return localModelsConfig{}, err
 	}
+	// Before tiering mapping sources, so a retired source takes its target's
+	// deployment tier.
+	if err := catalog.RetierModels(cfg.modelTiers); err != nil {
+		return localModelsConfig{}, err
+	}
+	if len(cfg.modelTiers) > 0 {
+		logger.Info("Model tiers configured", "retiered_models", len(cfg.modelTiers))
+	}
 	if err := catalog.TierMappingSources(cfg.modelMapping); err != nil {
 		return localModelsConfig{}, err
+	}
+	order, err := validateModelClasses(cfg.modelClasses)
+	if err != nil {
+		return localModelsConfig{}, err
+	}
+	cfg.modelClassOrder = order
+	for _, tier := range []catalog.Tier{catalog.TierHigh, catalog.TierMid, catalog.TierLow} {
+		if models := order[tier]; len(models) > 0 {
+			logger.Info("Model class order configured", "class", tier.String(), "models", models)
+		}
 	}
 	if cfg.turnRoute.Model != "" {
 		logger.Info("Local turn routing enabled", "model", cfg.turnRoute.Model, "turn_types", cfg.turnRoute.TurnTypes)
 	}
 	if cfg.midTier.Model != "" {
 		logger.Info("Mid-tier local substitution enabled", "model", cfg.midTier.Model)
+	}
+	for i, target := range cfg.lowTier.Targets {
+		logger.Info("Low-tier local substitution enabled", "model", target.Model, "order", i+1)
 	}
 	if cfg.subscriptionFallback.Model != "" {
 		logger.Info("Subscription local fallback enabled", "model", cfg.subscriptionFallback.Model)

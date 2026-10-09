@@ -13,7 +13,10 @@ Start by running:
 `{{ROUTER_CLI}} models --claude{{SCOPE}}`
 
 That prints every deployed model grouped by provider, with `[x]` for models the
-router may pick and `[ ]` for models it may not. Present it back to me grouped
+router may pick and `[ ]` for models it may not, and each model's class —
+`(high)`, `(mid)` or `(low)`, the value the `x-weave-model-class` request
+header selects on — after its id when it has one. Keep the class next to each
+id in what you show me, e.g. `claude-haiku-4-5 (low)`. Present it back to me grouped
 by provider, with an **On:** line and an **Off:** line under each provider
 listing the exact model ids (comma-separated). Don't write `[x]` / `[ ]` or a
 markdown task list — chat renders checked tasks struck through, which reads as

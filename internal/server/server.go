@@ -143,6 +143,7 @@ func RegisterWithFeatures(engine *gin.Engine, authSvc *auth.Service, proxySvc *p
 			proxy.HeaderRouterDecision,
 			proxy.HeaderRouterProvider,
 			proxy.HeaderRouterModel,
+			proxy.HeaderRouterModelClass,
 			proxy.HeaderRouterContextWindow,
 			proxy.HeaderRouterCache,
 			proxy.HeaderRouterFallbackFrom,
@@ -367,6 +368,7 @@ func RegisterWithFeatures(engine *gin.Engine, authSvc *auth.Service, proxySvc *p
 		middleware.WithRouterStrategyDefault(defaultStrategy, strategyAvailability, registeredStrategies...),
 		middleware.WithPolicyDebugOverride(),
 		middleware.WithAllowedModelsOverride(proxySvc),
+		middleware.WithModelClass(proxySvc),
 		middleware.WithRoutingKnobsOverride(),
 		middleware.WithForceEffortOverride(),
 	)
@@ -398,6 +400,7 @@ func RegisterWithFeatures(engine *gin.Engine, authSvc *auth.Service, proxySvc *p
 		middleware.WithRouterStrategyDefault(defaultStrategy, strategyAvailability, registeredStrategies...),
 		middleware.WithPolicyDebugOverride(),
 		middleware.WithAllowedModelsOverride(proxySvc),
+		middleware.WithModelClass(proxySvc),
 		middleware.WithRoutingKnobsOverride(),
 		middleware.WithForceEffortOverride(),
 	)
@@ -458,6 +461,7 @@ func RegisterWithFeatures(engine *gin.Engine, authSvc *auth.Service, proxySvc *p
 		middleware.WithRouterStrategyDefault(defaultStrategy, strategyAvailability, registeredStrategies...),
 		middleware.WithPolicyDebugOverride(),
 		middleware.WithAllowedModelsOverride(proxySvc),
+		middleware.WithModelClass(proxySvc),
 		middleware.WithRoutingKnobsOverride(),
 		middleware.WithForceEffortOverride(),
 	)
@@ -478,6 +482,7 @@ func RegisterWithFeatures(engine *gin.Engine, authSvc *auth.Service, proxySvc *p
 		middleware.WithRouterStrategyDefault(defaultStrategy, strategyAvailability, registeredStrategies...),
 		middleware.WithPolicyDebugOverride(),
 		middleware.WithAllowedModelsOverride(proxySvc),
+		middleware.WithModelClass(proxySvc),
 		middleware.WithRoutingKnobsOverride(),
 	)
 	previewMiddleware = append(previewMiddleware, policyPinMiddleware...)

@@ -262,6 +262,13 @@ type turnLoopResult struct {
 	// MappedDecision is the model mapping's target for this turn, kept when
 	// a later rule replaces it in Decision; zero when no mapping applied.
 	MappedDecision router.Decision
+	// LocalAlternates are the further local models, in order, that take the
+	// turn when the substitute in Decision fails before output; the router's
+	// pick follows them.
+	LocalAlternates []router.Decision
+	// ClassOrdered marks a turn whose LocalAlternates are its class order: any
+	// failure before output, local or not, passes the turn to the next.
+	ClassOrdered bool
 	// LocalTurnRouted marks a decision the local turn route made.
 	LocalTurnRouted bool
 	// PlannerDecision holds the planner's verdict and EV math when the planner ran.
@@ -415,7 +422,7 @@ func (r turnLoopResult) modelSwitched() bool {
 // is not included, since its next turn returns to the original.
 func (r turnLoopResult) recordedSelection() router.Decision {
 	switch r.SubstitutionReason {
-	case reasonModelMapping, reasonMidTierSubstitute, reasonSubstitutionRule:
+	case reasonModelMapping, reasonMidTierSubstitute, reasonLowTierSubstitute, reasonSubstitutionRule:
 		return r.SubstitutedFrom
 	}
 	return r.Decision
@@ -745,6 +752,12 @@ func (s *Service) runTurnLoop(
 ) (res turnLoopResult, routeErr error) {
 	entryCtx, entryReq := ctx, req
 	defer func() {
+		if routeErr != nil && s.rescueEmptyClass(ctx, &res, entryReq, routeErr) {
+			observability.FromContext(ctx).Info("Model class order served a turn routing found no candidate for",
+				"turn_type", string(res.TurnType), "model", res.Decision.Model, "route_err", routeErr)
+			routeErr = nil
+		}
+		routeErr = modelClassUnavailable(ctx, routeErr)
 		if routeErr == nil {
 			routeErr = policyPinServed(ctx, res)
 			if routeErr == nil {
@@ -982,6 +995,19 @@ func (s *Service) runTurnLoop(
 		)
 	}
 
+	// A low-class request follows its class order every turn, ahead of the
+	// local turn route, hard pins, session pins and the scorer, but never
+	// ahead of a user force. Like a hard pin it reads and writes no session
+	// pin, so the first entry is tried again each turn.
+	if class, _ := requestModelClass(ctx); !forceModelFound && class == catalog.TierLow && len(s.ModelClassMembers(class)) > 0 &&
+		!s.legacyForcePinned(ctx, threadSessionKey, res.PinRole) {
+		if _, err := s.lowClassOrder(ctx, &res, req); err != nil {
+			return res, err
+		}
+		log.Info("Model class order served turn", "turn_type", string(res.TurnType), "model", res.Decision.Model, "provider", res.Decision.Provider, "fallbacks", len(res.LocalAlternates))
+		return res, nil
+	}
+
 	// The local turn route outranks the automatic hard pin and the scorer but
 	// never a user force: an eligible force on a hard-pinned turn returned
 	// above, and on any other turn the routing below honors it. It is served
@@ -1057,6 +1083,9 @@ func (s *Service) runTurnLoop(
 				hardPinErr := cluster.ErrClusterUnavailable
 				if len(req.GatewayProviders) > 0 {
 					hardPinErr = policy.ErrGatewayServesNoDeployedModel
+				}
+				if _, classed := requestModelClass(ctx); classed {
+					hardPinErr = cluster.ErrNoEligibleProvider
 				}
 				log.Warn(
 					"Hard-pin: no eligible provider for request",
@@ -1420,7 +1449,9 @@ func (s *Service) runTurnLoop(
 				// to it below rather than losing the intent entirely.
 				forcedTierFloor = catalog.TierFor(pin.Model)
 			}
-		} else if excluded || autoDisabled {
+		} else if (excluded || autoDisabled) && modelInRequestedClass(ctx, pin.Model) {
+			// A per-request model class is no reason to drop the pin for
+			// later turns.
 			// Auto-escalation carries no user tier intent. An excluded escalation
 			// pin can never serve, so expire it instead of re-dropping it every
 			// turn until TTL.
@@ -1590,10 +1621,10 @@ func (s *Service) runTurnLoop(
 		}
 	}
 
-	// A request-level allowlist narrows the pool for this turn only; a pin
-	// outside it reroutes inside the subset instead of serving through.
+	// A request-level allowlist or model class narrows the pool for this turn
+	// only; a pin outside it reroutes inside the pool instead of serving through.
 	if pinFound && !modelInRequestSubset(ctx, pin.Model) {
-		log.Info("Session pin outside request allowed-models subset; falling through to scorer",
+		log.Info("Session pin outside request allowed-models subset or model class; falling through to scorer",
 			"pin_model", pin.Model,
 			"pin_provider", pin.Provider,
 		)

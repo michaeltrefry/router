@@ -28,7 +28,7 @@ func (s *Service) WithMidTierSubstitute(sub MidTierSubstitute) *Service {
 // automatic selection on a turn a local model may serve.
 func midTierSubstitutable(res turnLoopResult) bool {
 	if res.HardPinned || res.UsageBypass || res.CallerModelPassthrough || len(res.Purpose) > 0 ||
-		isUserForcedReason(res.Decision.Reason) {
+		isUserForcedReason(res.Decision.Reason) || res.Decision.Reason == reasonModelClassOrder {
 		return false
 	}
 	return localServableTurn(res.TurnType)

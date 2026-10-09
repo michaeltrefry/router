@@ -3137,9 +3137,10 @@ subscriptions_fail() {
   models_fail "$what"
 }
 
-# models_render_list prints the [{model,provider,enabled}] payload as a
-# provider-grouped checklist. The API sorts by provider then model, which is
-# what group_by needs, and what keeps two runs comparable.
+# models_render_list prints the [{model,provider,enabled,class}] payload as a
+# provider-grouped checklist, each model followed by its class when it has
+# one. The API sorts by provider then model, which is what group_by needs, and
+# what keeps two runs comparable.
 models_render_list() {
   local payload="$1" total enabled
   total="$(printf '%s' "$payload" | jq 'length')"
@@ -3149,9 +3150,10 @@ models_render_list() {
   printf '%s' "$payload" | jq -r --arg on "$C_GREEN" --arg off "$C_DIM" --arg reset "$C_RESET" --arg bold "$C_BOLD" '
     group_by(.provider)[]
     | ($bold + .[0].provider + $reset),
-      (.[] | if .enabled
-             then "  " + $on + "[x]" + $reset + " " + .model
-             else "  " + $off + "[ ] " + .model + $reset
+      (.[] | (if .class then " (" + .class + ")" else "" end) as $class
+           | if .enabled
+             then "  " + $on + "[x]" + $reset + " " + .model + $class
+             else "  " + $off + "[ ] " + .model + $class + $reset
              end)
   '
 }

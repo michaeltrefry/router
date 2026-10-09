@@ -158,6 +158,7 @@ func (s *Service) dispatchPlanned(ctx context.Context, in failoverInputs, plan i
 			if !committed(in.buf) {
 				in.w.Header().Set(HeaderRouterProvider, decision.Provider)
 				in.w.Header().Set(HeaderRouterModel, decision.Model)
+				setModelClassHeader(in.w.Header(), decision.Model)
 				in.w.Header().Set(HeaderRouterContextWindow, strconv.Itoa(contextWindowForRequest(decision.Model, decision.Provider)))
 				if attempt.Index > 0 {
 					in.w.Header().Set(HeaderRouterFallbackFrom, in.bindings[0].Provider)

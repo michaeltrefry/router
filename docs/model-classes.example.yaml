@@ -1,0 +1,50 @@
+# Model classes for x-weave-model-class requests, with free local models first.
+# Point ROUTER_LOCAL_MODELS_FILE at a copy of this file (it is a complete
+# local-models file; see local-models.example.yaml for every other block).
+models:
+  - id: mimo-v2.6-flash-rl
+    base_url: http://localhost:8096/v1
+    api_key_env: LOCAL_MIMO_API_KEY
+    upstream_model: mimo-v2.6-flash-rl
+    context_window: 262144
+    tier: low
+  - id: qwen3.8-flash-next
+    base_url: http://localhost:8081/v1
+    api_key_env: LOCAL_QWEN_API_KEY
+    upstream_model: qwen3.8-flash-next-unsloth-ud-q4_k_xl
+    context_window: 262144
+    tier: low
+
+# Retier built-in catalog models. Each list holds catalog IDs or globs;
+# `default` (low, mid or high) tiers every other tiered built-in model.
+# Passthrough-only (untiered) rows stay untiered and a local model keeps its own
+# tier. Applied before mapping sources take their target's tier. The tier is
+# the class `x-weave-model-class` selects on.
+model_tiers:
+  high: [claude-fable-5-1, gpt-6-astra]
+  mid: ["claude-opus-*", "gpt-*-sol"]
+  default: low
+
+# The trained scorer decides on its roster; the current release serves.
+model_mapping:
+  claude-opus-5: claude-opus-5-5
+  claude-fable-5: claude-fable-5-1
+  claude-sonnet-5: claude-sonnet-5-5
+  gpt-5.5: gpt-6.1-sol
+  gpt-5.4-mini: gpt-6-luna
+
+# Requests without the header: a low-tier pick is served on these tier-low
+# local models in order; one that fails before any output passes the turn to
+# the next, then to the router's pick.
+low_tier_substitute:
+  models: [mimo-v2.6-flash-rl, qwen3.8-flash-next]
+
+# Requests with the header: each class's fallback chain. Every entry must carry
+# its class's tier after model_tiers. A model that fails before any output
+# passes the turn to the next entry. `low` is strict: the first entry that can
+# take the turn serves it, every turn, and no low model off the list does.
+# `high` and `mid` keep the router's in-class pick with the list behind it.
+model_classes:
+  high: [claude-fable-5-1, gpt-6-astra]
+  mid: [claude-opus-5-5, gpt-6.1-sol]
+  low: [mimo-v2.6-flash-rl, qwen3.8-flash-next, gpt-5.6-terra, claude-sonnet-5-5, gpt-6-luna, claude-haiku-4-5]
