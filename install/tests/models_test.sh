@@ -194,6 +194,10 @@ contains "list marks an enabled model" "$out" "[x] claude-opus-5"
 contains "list marks a disabled model" "$out" "[ ] claude-haiku-4-5"
 contains "list names an enabled model's class" "$out" "[x] claude-opus-5 (mid)"
 contains "list names a disabled model's class" "$out" "claude-haiku-4-5 (low)"
+case "$out" in
+  *"gpt-5.6 ("*) no "an untiered model renders without a class" "no suffix" "$out" ;;
+  *) ok "an untiered model renders without a class" ;;
+esac
 contains "list groups by provider" "$out" "openai"
 contains "list reports the enabled count" "$out" "2 of 3 enabled"
 contains "list shows the preferred ranking" "$out" "Preferred order: claude-opus-5"
