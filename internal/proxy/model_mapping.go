@@ -129,6 +129,7 @@ func mappedProvider(target, provider string) string {
 
 // applyServingRules maps then substitutes the turn's automatic selection.
 func (s *Service) applyServingRules(ctx context.Context, res *turnLoopResult, req router.Request) {
+	defer s.withClassBackupOrder(ctx, res)
 	s.mapModel(ctx, res, req)
 	s.substituteLocal(ctx, res, req)
 }

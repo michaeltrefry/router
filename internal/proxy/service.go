@@ -155,6 +155,9 @@ type Service struct {
 	// lowTierTargets replace automatic low-tier selections, in order; see
 	// WithLowTierSubstitute.
 	lowTierTargets []LocalTarget
+	// modelClassOrder orders each class's models for x-weave-model-class
+	// requests; see WithModelClassOrder.
+	modelClassOrder ModelClassOrder
 	// substitutionRules replace automatic selections matching a model
 	// pattern, ahead of the mid-tier substitute; see WithSubstitutionRules.
 	substitutionRules []SubstitutionRule

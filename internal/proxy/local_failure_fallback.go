@@ -61,7 +61,7 @@ func planLocalFailureFallback(res turnLoopResult, reroute func() (turnLoopResult
 		return nil
 	}
 	switch {
-	case localSubstitutionReason(res.SubstitutionReason) && len(res.LocalAlternates) > 0:
+	case (localSubstitutionReason(res.SubstitutionReason) || res.Decision.Reason == reasonModelClassOrder) && len(res.LocalAlternates) > 0:
 		// The next local model takes the turn before the router's pick.
 		next := res
 		next.Decision = res.LocalAlternates[0]

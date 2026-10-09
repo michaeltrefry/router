@@ -987,6 +987,24 @@ func (s *Service) runTurnLoop(
 		)
 	}
 
+	// A low-class request follows its class order every turn, ahead of the
+	// local turn route, hard pins, session pins and the scorer, but never
+	// ahead of a user force. Like a hard pin it reads and writes no session
+	// pin, so the first entry is tried again each turn.
+	if !forceModelFound {
+		if first, rest, ordered := s.lowClassOrderDecision(ctx, res.Decision, res.TurnType, req); ordered && !s.legacyForcePinned(ctx, threadSessionKey, res.PinRole) {
+			if first.Model == "" {
+				class, _ := requestModelClass(ctx)
+				return res, &ModelClassUnavailableError{Class: class, Err: cluster.ErrNoEligibleProvider}
+			}
+			res.Decision = first
+			res.LocalAlternates = rest
+			res.Origin = policy.OverrideSourceDeployment
+			log.Info("Model class order served turn", "turn_type", string(res.TurnType), "model", first.Model, "provider", first.Provider, "fallbacks", len(rest))
+			return res, nil
+		}
+	}
+
 	// The local turn route outranks the automatic hard pin and the scorer but
 	// never a user force: an eligible force on a hard-pinned turn returned
 	// above, and on any other turn the routing below honors it. It is served
