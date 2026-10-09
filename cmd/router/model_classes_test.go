@@ -107,7 +107,8 @@ func classOrderServiceWith(t *testing.T, o classOrderOpts) classOrderStack {
 		WithDeploymentKeyedProviders(keyed).
 		WithModelClassOrder(cfg.modelClassOrder).
 		WithClassRotation(o.rotate...).
-		WithCommittedStreamArmDemotion(o.demote)
+		WithCommittedStreamArmDemotion(o.demote).
+		WithRescuedFailureArmDemotion(o.demote)
 	return classOrderStack{svc: svc, anthropic: anthropic, openAI: openAI, mimo: mimo, qwen: qwen}
 }
 
@@ -460,6 +461,33 @@ func TestModelClassOrder_EntryStruckAfterCommittedFailureIsSkippedNextTurn(t *te
 	require.NoError(t, stack.svc.ProxyMessages(ctx, sessionBody("turn one"), rec, paidRequest()))
 	assert.Equal(t, "test-mco-qwen", rec.Header().Get(proxy.HeaderRouterModel))
 	assert.Equal(t, 1, broken.count(), "MiMo is not tried again this session")
+
+	other := context.WithValue(stack.classedCtx(catalog.TierLow), proxy.ClientIdentityContextKey{}, proxy.ClientIdentity{SessionID: "cc-other"})
+	_ = stack.svc.ProxyMessages(other, sessionBody("turn one"), httptest.NewRecorder(), paidRequest())
+	assert.Equal(t, 2, broken.count(), "another session still starts at MiMo")
+}
+
+// A low entry that fails before output and is served by the next entry is
+// struck too, so the session's next turn starts past it.
+func TestModelClassOrder_EntryRescuedPreCommitIsSkippedNextTurn(t *testing.T) {
+	failing := newFailingLocal(t, "500")
+	stack := classOrderServiceWith(t, classOrderOpts{
+		anthropic: &streamingAnthropic{}, scorer: &countingRouter{decision: lowPick},
+		orderYAML: classOrderYAML, mimoURL: failing.baseURL,
+		pins: &strikingPins{memoryPins{pins: map[string]sessionpin.Pin{}}}, demote: true,
+	})
+	ctx := context.WithValue(stack.classedCtx(catalog.TierLow), proxy.ClientIdentityContextKey{}, proxy.ClientIdentity{SessionID: "cc-rescued"})
+
+	rec := httptest.NewRecorder()
+	require.NoError(t, stack.svc.ProxyMessages(ctx, sessionBody("turn one"), rec, paidRequest()))
+	require.Equal(t, "test-mco-qwen", rec.Header().Get(proxy.HeaderRouterModel))
+	tried := failing.count()
+	require.Positive(t, tried)
+
+	rec = httptest.NewRecorder()
+	require.NoError(t, stack.svc.ProxyMessages(ctx, sessionBody("turn one"), rec, paidRequest()))
+	assert.Equal(t, "test-mco-qwen", rec.Header().Get(proxy.HeaderRouterModel))
+	assert.Equal(t, tried, failing.count(), "MiMo is not tried again this session")
 }
 
 // strikingPins records strikes on the row as the Postgres store does: the

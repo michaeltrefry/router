@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"weave-os/router/internal/providers"
+	"weave-os/router/internal/requestcontext"
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
 	"weave-os/router/internal/router/cluster"
@@ -156,7 +157,7 @@ func (s *Service) serveOrderedClass(ctx context.Context, res *turnLoopResult, re
 	if len(candidates) == 0 {
 		return &ModelClassUnavailableError{Class: class, Err: cluster.ErrNoEligibleProvider}
 	}
-	if sessionKey != ([sessionpin.SessionKeyLen]byte{}) {
+	if sessionKey != ([sessionpin.SessionKeyLen]byte{}) && s.pinStore != nil {
 		struck, repin := s.classOrderSessionState(ctx, sessionKey, res.PinRole)
 		candidates = withSessionState(candidates, struck, repin)
 		// This turn's own strikes and refusal re-pin land on the same rows.
@@ -277,4 +278,10 @@ func (s *Service) classOrderedRoute(ctx context.Context, req router.Request, dec
 		return res.Decision, nil
 	}
 	return decision, err
+}
+
+// classOrderKeyDomain keys a session's ordered-class slot and state per class,
+// so one class's strikes never reorder another's list.
+func classOrderKeyDomain(class catalog.Tier) requestcontext.ConversationKeyDomain {
+	return requestcontext.ClassRotationConversationKey + requestcontext.ConversationKeyDomain(class.String()+":")
 }
