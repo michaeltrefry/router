@@ -43,7 +43,9 @@ func localRoutingDisabled(ctx context.Context) bool {
 // a local turn route recomputes it only when the local model has failed, so
 // the common path never pays for a second routing pass.
 type localFailureFallback struct {
-	local   router.Decision
+	local router.Decision
+	// earlier are the local models that already failed this turn before local.
+	earlier []router.Decision
 	source  string
 	normal  *turnLoopResult
 	reroute func() (turnLoopResult, error)
@@ -59,6 +61,12 @@ func planLocalFailureFallback(res turnLoopResult, reroute func() (turnLoopResult
 		return nil
 	}
 	switch {
+	case localSubstitutionReason(res.SubstitutionReason) && len(res.LocalAlternates) > 0:
+		// The next local model takes the turn before the router's pick.
+		next := res
+		next.Decision = res.LocalAlternates[0]
+		next.LocalAlternates = res.LocalAlternates[1:]
+		return &localFailureFallback{local: res.Decision, source: res.SubstitutionReason, normal: &next}
 	case localSubstitutionReason(res.SubstitutionReason) && res.SubstitutedFrom.Model != "":
 		// Substitution only replaces router-selected, non-hard-pinned
 		// decisions, which carry no turn-loop origin.
@@ -66,6 +74,7 @@ func planLocalFailureFallback(res turnLoopResult, reroute func() (turnLoopResult
 		normal.Decision = res.SubstitutedFrom
 		normal.SubstitutedFrom = router.Decision{}
 		normal.SubstitutionReason = ""
+		normal.LocalAlternates = nil
 		normal.Origin = ""
 		if res.MappedDecision.Model != "" {
 			normal.Decision = res.MappedDecision
@@ -139,4 +148,22 @@ func (fb *localFailureFallback) logUnavailable(ctx context.Context, localErr, wh
 		"err", localErr,
 		"normal_route_err", why,
 	)
+}
+
+// after records prev's failed local models on fb, the next hop of a chain.
+func (fb *localFailureFallback) after(prev *localFailureFallback) *localFailureFallback {
+	if fb != nil && prev != nil {
+		fb.earlier = append(append([]router.Decision(nil), prev.earlier...), prev.local)
+	}
+	return fb
+}
+
+// failedLocal reports whether model already failed this turn.
+func (fb *localFailureFallback) failedLocal(provider, model string) bool {
+	for _, d := range append([]router.Decision{fb.local}, fb.earlier...) {
+		if d.Provider == provider && d.Model == model {
+			return true
+		}
+	}
+	return false
 }

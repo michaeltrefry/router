@@ -64,6 +64,7 @@ type localModelsFile struct {
 	Models            []localModelEntry            `yaml:"models"`
 	TurnRouting       *localTurnRoutingEntry       `yaml:"turn_routing"`
 	MidTierSubstitute *localMidTierSubstituteEntry `yaml:"mid_tier_substitute"`
+	LowTierSubstitute *localLowTierSubstituteEntry `yaml:"low_tier_substitute"`
 	// SubscriptionFallback shares the substitute's shape: a model and an
 	// enabled flag that defaults to true.
 	SubscriptionFallback *localMidTierSubstituteEntry `yaml:"subscription_fallback"`
@@ -104,6 +105,7 @@ type localModelsConfig struct {
 	models               []localModel
 	turnRoute            proxy.LocalTurnRoute
 	midTier              proxy.MidTierSubstitute
+	lowTier              proxy.LowTierSubstitute
 	subscriptionFallback proxy.SubscriptionLocalFallback
 	modelMapping         proxy.ModelMapping
 	substitutionRules    []proxy.SubstitutionRule
@@ -169,6 +171,10 @@ func parseLocalModels(r io.Reader, getenv func(string) string) (localModelsConfi
 	if err != nil {
 		return localModelsConfig{}, err
 	}
+	lowTier, err := validateLowTierSubstitute(file.LowTierSubstitute, tiers)
+	if err != nil {
+		return localModelsConfig{}, err
+	}
 	fallback, err := validateSubscriptionFallback(file.SubscriptionFallback, seen)
 	if err != nil {
 		return localModelsConfig{}, err
@@ -186,7 +192,7 @@ func parseLocalModels(r io.Reader, getenv func(string) string) (localModelsConfi
 		return localModelsConfig{}, err
 	}
 	return localModelsConfig{
-		models: out, turnRoute: route, midTier: midTier, subscriptionFallback: fallback,
+		models: out, turnRoute: route, midTier: midTier, lowTier: lowTier, subscriptionFallback: fallback,
 		modelMapping: mapping, substitutionRules: rules, modelTiers: modelTiers,
 	}, nil
 }
@@ -502,6 +508,9 @@ func loadLocalModels(
 	}
 	if cfg.midTier.Model != "" {
 		logger.Info("Mid-tier local substitution enabled", "model", cfg.midTier.Model)
+	}
+	for i, target := range cfg.lowTier.Targets {
+		logger.Info("Low-tier local substitution enabled", "model", target.Model, "order", i+1)
 	}
 	if cfg.subscriptionFallback.Model != "" {
 		logger.Info("Subscription local fallback enabled", "model", cfg.subscriptionFallback.Model)

@@ -121,10 +121,10 @@ func (s *Service) planSubscriptionLocalFallback(ctx context.Context, res turnLoo
 // planSubscriptionLocalFallbackAfterLocalFailure plans the subscription
 // fallback for the normal target that now serves a failed local turn. The
 // primary plan was skipped because the turn's decision was local. When the
-// fallback model is the local model that just failed, the normal target's
-// refusal surfaces instead of dispatching that model again.
+// fallback model is a local model that already failed this turn, the normal
+// target's refusal surfaces instead of dispatching that model again.
 func (s *Service) planSubscriptionLocalFallbackAfterLocalFailure(ctx context.Context, failed *localFailureFallback, normal turnLoopResult, req router.Request, headers http.Header) *subscriptionLocalFallback {
-	if failed.local.Provider == s.subscriptionFallbackProvider && failed.local.Model == s.subscriptionFallbackModel {
+	if failed.failedLocal(s.subscriptionFallbackProvider, s.subscriptionFallbackModel) {
 		return nil
 	}
 	note, _ := ctx.Value(subscriptionRefusalNoteKey{}).(*subscriptionRefusalNote)
