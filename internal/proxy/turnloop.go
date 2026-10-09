@@ -1059,6 +1059,9 @@ func (s *Service) runTurnLoop(
 				if len(req.GatewayProviders) > 0 {
 					hardPinErr = policy.ErrGatewayServesNoDeployedModel
 				}
+				if _, classed := requestModelClass(ctx); classed {
+					hardPinErr = cluster.ErrNoEligibleProvider
+				}
 				log.Warn(
 					"Hard-pin: no eligible provider for request",
 					"turn_type", string(res.TurnType),

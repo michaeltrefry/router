@@ -390,6 +390,7 @@ func (s *Service) bypassToAnthropic(
 	w.Header().Set(HeaderRouterDecision, decision.Reason)
 	w.Header().Set(HeaderRouterProvider, decision.Provider)
 	w.Header().Set(HeaderRouterModel, decision.Model)
+	setModelClassHeader(w.Header(), decision.Model)
 	w.Header().Set(HeaderRouterContextWindow, strconv.Itoa(contextWindowForRequest(decision.Model, decision.Provider)))
 
 	p, provErr := s.provider(providers.ProviderAnthropic)

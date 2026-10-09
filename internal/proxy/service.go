@@ -3068,6 +3068,7 @@ func defaultStrategyUnavailable(strategy router.Strategy) error {
 func (s *Service) Route(ctx context.Context, req router.Request) (router.Decision, error) {
 	routeCtx, span := startRoutingSpan(ctx, req)
 	decision, err := s.routeFor(routeCtx, req)
+	err = modelClassUnavailable(ctx, err)
 	finishRoutingSpan(span, decision, err)
 	return decision, err
 }
@@ -3907,7 +3908,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			finishRoutingSpan(rerouteSpan, decision, rerouteErr)
 			if rerouteErr != nil {
 				log.Error("Reroute after usage-bypass failure failed", "err", rerouteErr)
-				return rerouteErr
+				return modelClassUnavailable(ctx, rerouteErr)
 			}
 			routeRes.Decision = decision
 			routeRes.Fresh = decision

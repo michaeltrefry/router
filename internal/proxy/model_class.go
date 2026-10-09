@@ -68,6 +68,10 @@ func modelClassUnavailable(ctx context.Context, err error) error {
 	if !ok || err == nil || !errors.Is(err, cluster.ErrNoEligibleProvider) && !errors.Is(err, policy.ErrNoRoutableModels) {
 		return err
 	}
+	// The org allowlist names its own fix; the class is not the cause.
+	if errors.Is(err, cluster.ErrAllowlistEmptiesPool) {
+		return err
+	}
 	var already *ModelClassUnavailableError
 	if errors.As(err, &already) {
 		return err

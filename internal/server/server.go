@@ -143,6 +143,7 @@ func RegisterWithFeatures(engine *gin.Engine, authSvc *auth.Service, proxySvc *p
 			proxy.HeaderRouterDecision,
 			proxy.HeaderRouterProvider,
 			proxy.HeaderRouterModel,
+			proxy.HeaderRouterModelClass,
 			proxy.HeaderRouterContextWindow,
 			proxy.HeaderRouterCache,
 			proxy.HeaderRouterFallbackFrom,

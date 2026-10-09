@@ -15,6 +15,7 @@ import (
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
 	"weave-os/router/internal/router/cluster"
+	"weave-os/router/internal/translate"
 )
 
 func ctxWithModelClass(class catalog.Tier) context.Context {
@@ -108,4 +109,33 @@ func TestDispatchPlanned_SetsServedModelClassHeader(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "low", rec.Header().Get(HeaderRouterModelClass))
+}
+
+func TestModelClassUnavailable_KeepsAllowlistError(t *testing.T) {
+	err := fmt.Errorf("allowlist: %w", cluster.ErrAllowlistEmptiesPool)
+	assert.Same(t, err, modelClassUnavailable(ctxWithModelClass(catalog.TierLow), err))
+}
+
+// A utility turn whose hard-pin resolver finds nothing in the class reports
+// the class, not a cluster outage.
+func TestTurnLoop_HardPinTurnWithEmptyClassFailsAsClassUnavailable(t *testing.T) {
+	var seen HardPinRequest
+	svc := NewService(&tierProbeRouter{}, nil, nil, false, nil, nil, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+		WithDeploymentKeyedProviders(keyed(providers.ProviderAnthropic)).
+		WithHardPinResolver(func(req HardPinRequest) (string, string, bool) {
+			seen = req
+			return "", "", false
+		})
+	env, err := translate.ParseAnthropic([]byte(`{"model":"claude-haiku-4-5","max_tokens":32,"messages":[{"role":"user","content":"hello"}],` +
+		`"output_config":{"format":{"type":"json_schema","schema":{"properties":{"title":{"type":"string"}}}}}}`))
+	require.NoError(t, err)
+	feats := env.RoutingFeatures(false)
+	ctx := ctxWithModelClass(catalog.TierHigh)
+
+	_, err = svc.runTurnLoop(ctx, env, feats, "key-1", uuid.New(), "", nil,
+		router.Request{RequestedModel: feats.Model, ExcludedModels: svc.excludedModelsForRequest(ctx)})
+
+	var unavailable *ModelClassUnavailableError
+	require.ErrorAs(t, err, &unavailable)
+	assert.Contains(t, seen.ExcludedModels, "claude-haiku-4-5", "the resolver is offered only the class")
 }
