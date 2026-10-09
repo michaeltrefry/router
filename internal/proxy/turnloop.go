@@ -745,6 +745,7 @@ func (s *Service) runTurnLoop(
 ) (res turnLoopResult, routeErr error) {
 	entryCtx, entryReq := ctx, req
 	defer func() {
+		routeErr = modelClassUnavailable(ctx, routeErr)
 		if routeErr == nil {
 			routeErr = policyPinServed(ctx, res)
 			if routeErr == nil {
@@ -1057,6 +1058,9 @@ func (s *Service) runTurnLoop(
 				hardPinErr := cluster.ErrClusterUnavailable
 				if len(req.GatewayProviders) > 0 {
 					hardPinErr = policy.ErrGatewayServesNoDeployedModel
+				}
+				if _, classed := requestModelClass(ctx); classed {
+					hardPinErr = cluster.ErrNoEligibleProvider
 				}
 				log.Warn(
 					"Hard-pin: no eligible provider for request",

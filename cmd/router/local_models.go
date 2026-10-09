@@ -72,6 +72,8 @@ type localModelsFile struct {
 	// SubstitutionRules serve a (mapped) automatic selection matching a
 	// model pattern on a local model; the first match wins.
 	SubstitutionRules []localSubstitutionRuleEntry `yaml:"substitution_rules"`
+	// ModelTiers retiers built-in catalog models for this deployment.
+	ModelTiers *localModelTiersEntry `yaml:"model_tiers"`
 }
 
 // localSubstitutionRuleEntry serves selections whose model matches Match, a
@@ -105,6 +107,7 @@ type localModelsConfig struct {
 	subscriptionFallback proxy.SubscriptionLocalFallback
 	modelMapping         proxy.ModelMapping
 	substitutionRules    []proxy.SubstitutionRule
+	modelTiers           map[string]catalog.Tier
 }
 
 type localModelEntry struct {
@@ -178,9 +181,13 @@ func parseLocalModels(r io.Reader, getenv func(string) string) (localModelsConfi
 	if err != nil {
 		return localModelsConfig{}, err
 	}
+	modelTiers, err := validateModelTiers(file.ModelTiers)
+	if err != nil {
+		return localModelsConfig{}, err
+	}
 	return localModelsConfig{
 		models: out, turnRoute: route, midTier: midTier, subscriptionFallback: fallback,
-		modelMapping: mapping, substitutionRules: rules,
+		modelMapping: mapping, substitutionRules: rules, modelTiers: modelTiers,
 	}, nil
 }
 
@@ -478,6 +485,14 @@ func loadLocalModels(
 	}
 	if err := registerLocalModels(cfg.models, providerMap, envKeyedProviders, logger); err != nil {
 		return localModelsConfig{}, err
+	}
+	// Before tiering mapping sources, so a retired source takes its target's
+	// deployment tier.
+	if err := catalog.RetierModels(cfg.modelTiers); err != nil {
+		return localModelsConfig{}, err
+	}
+	if len(cfg.modelTiers) > 0 {
+		logger.Info("Model tiers configured", "retiered_models", len(cfg.modelTiers))
 	}
 	if err := catalog.TierMappingSources(cfg.modelMapping); err != nil {
 		return localModelsConfig{}, err

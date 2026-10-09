@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -68,6 +69,7 @@ const (
 	DispatchErrorClassifierHistory
 	DispatchErrorClassifierInputTooLong
 	DispatchErrorClassifierUnavailable
+	DispatchErrorModelClassUnavailable
 )
 
 // DispatchErrorClass is the format-agnostic classification of a dispatch
@@ -101,6 +103,7 @@ func ClassifyDispatchError(err error) (DispatchErrorClass, bool) {
 	var statusErr *providers.UpstreamStatusError
 	var bufferedErr *providers.UpstreamErrorResponse
 	var forcedExcluded *ForcedModelExcludedError
+	var classUnavailable *ModelClassUnavailableError
 	var forcedUnknown *ForcedModelUnknownError
 	var passthroughUnknown *PassthroughModelUnknownError
 	var forcedClusterStrategy *ForcedClusterUnsupportedStrategyError
@@ -271,6 +274,16 @@ func ClassifyDispatchError(err error) (DispatchErrorClass, bool) {
 			Message:    "The routed model cannot serve this request's shape (tool schema, reasoning intent, or tool history). Please retry.",
 			LogLevel:   "warn",
 			LogMessage: "Routed model cannot serve this request shape; no failover was available",
+		}, true
+	// Must precede the ErrNoEligibleProvider and ErrNoRoutableModels cases it
+	// wraps: the class, not the installation's keys or config, is the cause.
+	case errors.As(err, &classUnavailable):
+		return DispatchErrorClass{
+			Kind:       DispatchErrorModelClassUnavailable,
+			Status:     http.StatusServiceUnavailable,
+			Message:    fmt.Sprintf("%s: no %s-class model can serve this request (%s: %s).", ModelClassUnavailableCode, classUnavailable.Class, ModelClassHeader, classUnavailable.Class),
+			LogLevel:   "warn",
+			LogMessage: "No model of the requested class can serve the request",
 		}, true
 	// Must precede the ErrNoEligibleProvider case: ErrAllowlistEmptiesPool
 	// wraps it, so the generic case would otherwise match first and report a

@@ -79,8 +79,11 @@ var contextWindowExceededClass = DispatchErrorClass{
 // OpenAIErrorCode is the OpenAI error envelope "code" for a classified dispatch
 // error, or "" when OpenAI defines none for it.
 func OpenAIErrorCode(kind DispatchErrorKind) string {
-	if kind == DispatchErrorContextWindowExceeded {
+	switch kind {
+	case DispatchErrorContextWindowExceeded:
 		return openAIContextOverflowCode
+	case DispatchErrorModelClassUnavailable:
+		return ModelClassUnavailableCode
 	}
 	return ""
 }
