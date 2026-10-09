@@ -4828,7 +4828,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 		if !dispatched || !providers.IsLocalProvider(routeRes.Decision.Provider) {
 			break
 		}
-		localFailure = planLocalFailureFallback(routeRes, nil)
+		localFailure = planLocalFailureFallback(routeRes, nil).after(localFailure)
 	}
 	// The local model's error was held for this rescue; with nothing after it,
 	// surface it now.
@@ -8081,7 +8081,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 		if !dispatched || !providers.IsLocalProvider(routeRes.Decision.Provider) {
 			break
 		}
-		localFailure = planLocalFailureFallback(routeRes, nil)
+		localFailure = planLocalFailureFallback(routeRes, nil).after(localFailure)
 	}
 	// The local model's error was held for this rescue; with nothing after it,
 	// surface it now.

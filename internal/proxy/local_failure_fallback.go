@@ -43,7 +43,9 @@ func localRoutingDisabled(ctx context.Context) bool {
 // a local turn route recomputes it only when the local model has failed, so
 // the common path never pays for a second routing pass.
 type localFailureFallback struct {
-	local   router.Decision
+	local router.Decision
+	// earlier are the local models that already failed this turn before local.
+	earlier []router.Decision
 	source  string
 	normal  *turnLoopResult
 	reroute func() (turnLoopResult, error)
@@ -146,4 +148,22 @@ func (fb *localFailureFallback) logUnavailable(ctx context.Context, localErr, wh
 		"err", localErr,
 		"normal_route_err", why,
 	)
+}
+
+// after records prev's failed local models on fb, the next hop of a chain.
+func (fb *localFailureFallback) after(prev *localFailureFallback) *localFailureFallback {
+	if fb != nil && prev != nil {
+		fb.earlier = append(append([]router.Decision(nil), prev.earlier...), prev.local)
+	}
+	return fb
+}
+
+// failedLocal reports whether model already failed this turn.
+func (fb *localFailureFallback) failedLocal(provider, model string) bool {
+	for _, d := range append([]router.Decision{fb.local}, fb.earlier...) {
+		if d.Provider == provider && d.Model == model {
+			return true
+		}
+	}
+	return false
 }

@@ -66,10 +66,10 @@ func lowTierService(t *testing.T, first, second string, firstURL, secondURL stri
 
 // lowTierServiceFor is lowTierService with the normal target's client and the
 // low-tier pick the scorer makes.
-func lowTierServiceFor(t *testing.T, first, second string, firstURL, secondURL string, normal providers.Client, pick router.Decision) *proxy.Service {
+func lowTierServiceFor(t *testing.T, first, second string, firstURL, secondURL string, normal providers.Client, pick router.Decision, extraYAML ...string) *proxy.Service {
 	t.Helper()
 	path := writeLocalModelsFile(t, lowLocalEntryYAML(first, firstURL)+localHeaderTimeoutYAML+lowLocalEntryYAML(second, secondURL)+
-		"low_tier_substitute:\n  models: ["+first+", "+second+"]\n")
+		"low_tier_substitute:\n  models: ["+first+", "+second+"]\n"+strings.Join(extraYAML, ""))
 	providerMap := map[string]providers.Client{pick.Provider: normal}
 	keyed := map[string]struct{}{pick.Provider: {}}
 	cfg, err := loadLocalModels(
@@ -86,7 +86,8 @@ func lowTierServiceFor(t *testing.T, first, second string, firstURL, secondURL s
 	})
 	return proxy.NewService(&countingRouter{decision: pick}, providerMap, nil, false, nil, nil, false, pick.Provider, pick.Model, nil).
 		WithDeploymentKeyedProviders(keyed).
-		WithLowTierSubstitute(cfg.lowTier)
+		WithLowTierSubstitute(cfg.lowTier).
+		WithSubscriptionLocalFallback(cfg.subscriptionFallback)
 }
 
 func TestLowTierSubstitute_FirstLocalServesLowPick(t *testing.T) {
