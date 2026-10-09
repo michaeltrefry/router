@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -15,6 +16,7 @@ import (
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
 	"weave-os/router/internal/router/cluster"
+	"weave-os/router/internal/router/sessionpin"
 	"weave-os/router/internal/translate"
 )
 
@@ -39,7 +41,10 @@ func TestExcludedModelsForRequest_ModelClassExcludesEveryOtherTier(t *testing.T)
 
 	got := s.excludedModelsForRequest(ctxWithModelClass(catalog.TierMid))
 
-	assert.Equal(t, map[string]struct{}{testOpus: {}, "claude-haiku-4-5": {}}, got)
+	assert.Contains(t, got, testOpus)
+	assert.Contains(t, got, "claude-haiku-4-5")
+	assert.Contains(t, got, "claude-opus-4-8", "an untiered catalog model is in no class")
+	assert.NotContains(t, got, "claude-sonnet-5-5")
 	assert.Empty(t, s.excludedModelsForRequest(context.Background()), "no class, no exclusion")
 }
 
@@ -138,4 +143,131 @@ func TestTurnLoop_HardPinTurnWithEmptyClassFailsAsClassUnavailable(t *testing.T)
 	var unavailable *ModelClassUnavailableError
 	require.ErrorAs(t, err, &unavailable)
 	assert.Contains(t, seen.ExcludedModels, "claude-haiku-4-5", "the resolver is offered only the class")
+}
+
+func TestTurnLoop_SavedForceOutsideClassRejectsInsideServes(t *testing.T) {
+	newSvc := func() (*Service, *tierProbeRouter) {
+		fr := &tierProbeRouter{available: map[string]struct{}{"claude-haiku-4-5": {}}}
+		store := &overwritingPinStore{pin: sessionpin.Pin{
+			Provider:    providers.ProviderAnthropic,
+			Model:       "claude-opus-5",
+			Reason:      translate.ReasonUserForceModel,
+			PinnedUntil: pinNeverExpires,
+		}, found: true}
+		return NewService(fr, nil, nil, false, nil, store, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+			WithDeploymentKeyedProviders(keyed(providers.ProviderAnthropic)), fr
+	}
+	env := forceCommandEnv(t)
+	feats := env.RoutingFeatures(false)
+
+	svc, fr := newSvc()
+	_, err := svc.runTurnLoop(ctxWithModelClass(catalog.TierLow), env, feats, "key-1", uuid.New(), "", nil,
+		router.Request{RequestedModel: feats.Model})
+	require.ErrorIs(t, err, ErrForcedModelExcluded)
+	cls, _ := ClassifyDispatchError(err)
+	assert.Equal(t, http.StatusBadRequest, cls.Status)
+	assert.Empty(t, fr.captured, "the request fails instead of routing around the force")
+
+	svc, _ = newSvc()
+	res, err := svc.runTurnLoop(ctxWithModelClass(catalog.TierHigh), env, feats, "key-1", uuid.New(), "", nil,
+		router.Request{RequestedModel: feats.Model})
+	require.NoError(t, err)
+	assert.Equal(t, "claude-opus-5", res.Decision.Model)
+}
+
+func TestTurnLoop_StickyPinOutsideModelClassReroutes(t *testing.T) {
+	store := &overwritingPinStore{pin: sessionpin.Pin{
+		Provider:    providers.ProviderAnthropic,
+		Model:       testOpus,
+		Reason:      "cluster:v0.2",
+		PinnedUntil: time.Now().Add(time.Hour),
+	}, found: true}
+	fr := &tierProbeRouter{available: map[string]struct{}{testOpus: {}, "claude-haiku-4-5": {}}}
+	svc := NewService(fr, nil, nil, false, nil, store, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+		WithDeploymentKeyedProviders(keyed(providers.ProviderAnthropic))
+	env := forceCommandEnv(t)
+	feats := env.RoutingFeatures(false)
+	ctx := ctxWithModelClass(catalog.TierLow)
+
+	res, err := svc.runTurnLoop(ctx, env, feats, "key-1", uuid.New(), "", nil,
+		router.Request{RequestedModel: feats.Model, ExcludedModels: svc.excludedModelsForRequest(ctx)})
+
+	require.NoError(t, err)
+	assert.Equal(t, "claude-haiku-4-5", res.Decision.Model)
+	assert.False(t, res.StickyHit)
+}
+
+func TestRescueDecisions_SkipCandidatesOutsideModelClass(t *testing.T) {
+	svc := NewService(nil, nil, nil, false, nil, nil, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+		WithDeploymentKeyedProviders(keyed(providers.ProviderAnthropic))
+	failed := router.Decision{Provider: providers.ProviderAnthropic, Model: "claude-sonnet-5-5"}
+	candidates := []string{"claude-opus-5-5", "claude-sonnet-4-6"}
+
+	got := svc.rescueDecisions(ctxWithModelClass(catalog.TierMid), failed, candidates, "sibling", 0, 0, 0)
+
+	models := make([]string, 0, len(got))
+	for _, d := range got {
+		models = append(models, d.Model)
+	}
+	assert.Equal(t, []string{"claude-sonnet-4-6"}, models)
+}
+
+func TestSubscriptionCoveredTarget_RefusesRequestedModelOutsideClass(t *testing.T) {
+	headers := http.Header{"Authorization": []string{"Bearer sk-ant-oat01-test"}}
+	req := router.Request{RequestedModel: "claude-opus-5"}
+
+	_, _, covered := subscriptionCoveredTarget(context.Background(), headers, req)
+	require.True(t, covered, "precondition: the subscription covers the requested model")
+	_, _, covered = subscriptionCoveredTarget(ctxWithModelClass(catalog.TierLow), headers, req)
+	assert.False(t, covered)
+}
+
+func TestRequestNarrowsModels(t *testing.T) {
+	assert.False(t, requestNarrowsModels(context.Background()))
+	assert.True(t, requestNarrowsModels(ctxWithModelClass(catalog.TierLow)), "a class request bypasses the semantic cache")
+}
+
+// legacyForcePinStore holds a thread-scoped force pin only, as written before
+// forces moved to their own session role.
+type legacyForcePinStore struct{ overwritingPinStore }
+
+func (s *legacyForcePinStore) Get(ctx context.Context, key [sessionpin.SessionKeyLen]byte, role string) (sessionpin.Pin, bool, error) {
+	if role == forceModelSessionRole {
+		return sessionpin.Pin{}, false, nil
+	}
+	return s.overwritingPinStore.Get(ctx, key, role)
+}
+
+func TestTurnLoop_LegacyForceOutsideClassRejects(t *testing.T) {
+	store := &legacyForcePinStore{overwritingPinStore{pin: sessionpin.Pin{
+		Provider:    providers.ProviderAnthropic,
+		Model:       "claude-opus-5",
+		Reason:      translate.ReasonUserForceModel,
+		PinnedUntil: pinNeverExpires,
+	}, found: true}}
+	fr := &tierProbeRouter{available: map[string]struct{}{"claude-haiku-4-5": {}}}
+	svc := NewService(fr, nil, nil, false, nil, store, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil).
+		WithDeploymentKeyedProviders(keyed(providers.ProviderAnthropic))
+	// A tool-bearing main-loop turn reads the legacy pin from its pin role.
+	env, err := translate.ParseAnthropic([]byte(`{"model":"claude-opus-4-7","max_tokens":256,` +
+		`"tools":[{"name":"noop","description":"placeholder","input_schema":{"type":"object"}}],` +
+		`"messages":[{"role":"user","content":"fix the build"}]}`))
+	require.NoError(t, err)
+	feats := env.RoutingFeatures(false)
+	ctx := ctxWithModelClass(catalog.TierLow)
+
+	_, err = svc.runTurnLoop(ctx, env, feats, "key-1", uuid.New(), "", nil,
+		router.Request{RequestedModel: feats.Model, ExcludedModels: svc.excludedModelsForRequest(ctx)})
+
+	require.ErrorIs(t, err, ErrForcedModelExcluded)
+	assert.Empty(t, fr.captured, "the request fails instead of routing around the force")
+}
+
+func TestCallerModelPassthrough_OutsideClassReportsClass(t *testing.T) {
+	svc := NewService(nil, nil, nil, false, nil, nil, false, providers.ProviderAnthropic, "claude-haiku-4-5", nil)
+
+	_, err := svc.callerModelPassthroughDecision(ctxWithModelClass(catalog.TierLow), router.Request{RequestedModel: "claude-opus-5"})
+
+	var unavailable *ModelClassUnavailableError
+	require.ErrorAs(t, err, &unavailable)
 }

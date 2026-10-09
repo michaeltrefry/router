@@ -1424,7 +1424,9 @@ func (s *Service) runTurnLoop(
 				// to it below rather than losing the intent entirely.
 				forcedTierFloor = catalog.TierFor(pin.Model)
 			}
-		} else if excluded || autoDisabled {
+		} else if (excluded || autoDisabled) && modelInRequestedClass(ctx, pin.Model) {
+			// A per-request model class is no reason to drop the pin for
+			// later turns.
 			// Auto-escalation carries no user tier intent. An excluded escalation
 			// pin can never serve, so expire it instead of re-dropping it every
 			// turn until TTL.
@@ -1594,10 +1596,10 @@ func (s *Service) runTurnLoop(
 		}
 	}
 
-	// A request-level allowlist narrows the pool for this turn only; a pin
-	// outside it reroutes inside the subset instead of serving through.
+	// A request-level allowlist or model class narrows the pool for this turn
+	// only; a pin outside it reroutes inside the pool instead of serving through.
 	if pinFound && !modelInRequestSubset(ctx, pin.Model) {
-		log.Info("Session pin outside request allowed-models subset; falling through to scorer",
+		log.Info("Session pin outside request allowed-models subset or model class; falling through to scorer",
 			"pin_model", pin.Model,
 			"pin_provider", pin.Provider,
 		)

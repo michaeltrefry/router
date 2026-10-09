@@ -43,6 +43,9 @@ func (s *Service) forcedModelBinding(ctx context.Context, model, provider string
 	if _, drop := s.policyExcludedModels(ctx)[model]; drop {
 		return "", fmt.Sprintf("%s is excluded on this installation", model)
 	}
+	if reason := forcedModelClassConflict(ctx, model); reason != "" {
+		return "", reason
+	}
 	// Gateway-exclusive routing drops every vendor from the eligible set, so
 	// resolving to the catalog primary would produce a pin the turn loop then
 	// rejects — the force would read as applied and route automatically.
