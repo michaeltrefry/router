@@ -5515,7 +5515,10 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 		// be re-picked by the next turn either; the strike lands on the primary,
 		// not on whatever served.
 		primaryModelRescueRan := siblingRescueRan || decision.Model != primaryModel
-		if providers.IsResponseHeaderTimeout(primaryFailureErr) && (primaryModelRescueRan || proxyErr != nil) {
+		// A class order's pick that failed pre-commit and was served by a later
+		// entry is struck like a sibling-rescued primary.
+		classChainRescued := localFailureRan && routeRes.ClassOrdered && decision.Model != primaryModel
+		if classChainRescued || providers.IsResponseHeaderTimeout(primaryFailureErr) && (primaryModelRescueRan || proxyErr != nil) {
 			rescuedArmDemoted, rescuedArmDemotionReason = s.maybeStrikeArmAfterRescuedFailure(ctx, primaryModelRescueRan, routeRes.HardPinned, primaryFailureErr, primaryDecision, installationID, routeRes.SessionKey, stickyStateRole(routeRes), routeRes.PinRole)
 		} else {
 			rescuedArmDemoted, rescuedArmDemotionReason = s.maybeStrikeArmAfterRescuedFailure(ctx, siblingRescueRan, routeRes.HardPinned, rescuedPrimaryErr, rescuedPrimary, installationID, routeRes.SessionKey, stickyStateRole(routeRes), routeRes.PinRole)
@@ -8586,7 +8589,8 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 			armDemotionReasonOAI = sessionpin.DemotionReasonCommittedStreamFailure
 		}
 		primaryModelRescueRan := siblingRescueRan || decision.Model != primaryModel
-		if providers.IsResponseHeaderTimeout(primaryFailureErr) && (primaryModelRescueRan || proxyErr != nil) {
+		classChainRescued := localFailureRan && routeRes.ClassOrdered && decision.Model != primaryModel
+		if classChainRescued || providers.IsResponseHeaderTimeout(primaryFailureErr) && (primaryModelRescueRan || proxyErr != nil) {
 			rescuedArmDemotedOAI, rescuedArmDemotionReasonOAI = s.maybeStrikeArmAfterRescuedFailure(ctx, primaryModelRescueRan, routeRes.HardPinned, primaryFailureErr, primaryDecision, installationIDFromContext(ctx), routeRes.SessionKey, stickyStateRole(routeRes), routeRes.PinRole)
 		} else {
 			rescuedArmDemotedOAI, rescuedArmDemotionReasonOAI = s.maybeStrikeArmAfterRescuedFailure(ctx, siblingRescueRan, routeRes.HardPinned, rescuedPrimaryErr, rescuedPrimary, installationIDFromContext(ctx), routeRes.SessionKey, stickyStateRole(routeRes), routeRes.PinRole)

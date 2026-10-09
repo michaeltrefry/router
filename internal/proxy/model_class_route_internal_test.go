@@ -75,3 +75,8 @@ func TestClassOrderTarget_HonorsSafetyExclusions(t *testing.T) {
 	_, ok = classOrderTarget(router.Decision{}, "claude-haiku-4-5", turntype.MainLoop, req)
 	assert.False(t, ok)
 }
+
+func TestClassOrderKeyDomain_IsPerClass(t *testing.T) {
+	assert.NotEqual(t, classOrderKeyDomain(catalog.TierHigh), classOrderKeyDomain(catalog.TierLow))
+	assert.NotEqual(t, classOrderKeyDomain(catalog.TierMid), classOrderKeyDomain(catalog.TierHigh))
+}
