@@ -53,6 +53,17 @@ func modelInRequestedClass(ctx context.Context, model string) bool {
 	return !ok || catalog.TierFor(model) == class
 }
 
+// forcedModelClassConflict names why a forced model cannot serve a request
+// that asked for another class, or returns "" when it can. A force and a
+// class are both explicit caller choices, so a conflict fails the request.
+func forcedModelClassConflict(ctx context.Context, model string) string {
+	class, ok := requestModelClass(ctx)
+	if !ok || catalog.TierFor(model) == class {
+		return ""
+	}
+	return fmt.Sprintf("%s is a %s-class model; this request asked for %s: %s", model, catalog.TierFor(model), ModelClassHeader, class)
+}
+
 // ModelClassUnavailableError reports that no model of Class can serve the
 // request; the router never serves it on another class instead.
 type ModelClassUnavailableError struct {
@@ -93,10 +104,17 @@ func (s *Service) modelClassExclusions(ctx context.Context) map[string]struct{} 
 	if !ok {
 		return nil
 	}
+	// The routable universe omits untiered models that mapping targets and
+	// operator hard pins can still name, so every catalog model is judged.
 	out := map[string]struct{}{}
 	for model := range s.routableUniverse() {
 		if catalog.TierFor(model) != class {
 			out[model] = struct{}{}
+		}
+	}
+	for _, m := range catalog.Models {
+		if m.Tier != class {
+			out[m.ID] = struct{}{}
 		}
 	}
 	return out

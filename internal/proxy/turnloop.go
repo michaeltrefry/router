@@ -1424,7 +1424,9 @@ func (s *Service) runTurnLoop(
 				// to it below rather than losing the intent entirely.
 				forcedTierFloor = catalog.TierFor(pin.Model)
 			}
-		} else if excluded || autoDisabled {
+		} else if (excluded || autoDisabled) && modelInRequestedClass(ctx, pin.Model) {
+			// A per-request model class is no reason to drop the pin for
+			// later turns.
 			// Auto-escalation carries no user tier intent. An excluded escalation
 			// pin can never serve, so expire it instead of re-dropping it every
 			// turn until TTL.

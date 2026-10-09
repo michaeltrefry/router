@@ -100,6 +100,9 @@ func (s *Service) blindExperimentPassthroughDecision(ctx context.Context, req ro
 }
 
 func (s *Service) callerModelPassthroughDecision(ctx context.Context, req router.Request) (router.Decision, error) {
+	if class, classed := requestModelClass(ctx); classed && !modelInRequestedClass(ctx, req.RequestedModel) {
+		return router.Decision{}, &ModelClassUnavailableError{Class: class, Err: fmt.Errorf("requested model %q is outside the class: %w", req.RequestedModel, cluster.ErrNoEligibleProvider)}
+	}
 	if !modelPermittedByAllowlist(ctx, req.RequestedModel) || !modelInRequestSubset(ctx, req.RequestedModel) {
 		return router.Decision{}, fmt.Errorf("requested model %q is not allowed: %w", req.RequestedModel, cluster.ErrAllowlistEmptiesPool)
 	}
