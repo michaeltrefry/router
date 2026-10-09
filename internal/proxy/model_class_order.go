@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"slices"
 
@@ -31,6 +32,16 @@ type ModelClassMembersContextKey struct{}
 // WithModelClassOrder installs the per-class order lists.
 func (s *Service) WithModelClassOrder(order ModelClassOrder) *Service {
 	s.modelClassOrder = order
+	return s
+}
+
+// WithClassRotation names the classes whose order list is rotated per session
+// and serves every turn, instead of backing up the scorer's pick.
+func (s *Service) WithClassRotation(classes ...catalog.Tier) *Service {
+	s.classRotation = map[catalog.Tier]bool{}
+	for _, c := range classes {
+		s.classRotation[c] = true
+	}
 	return s
 }
 
@@ -95,6 +106,12 @@ func (s *Service) classOrderCandidates(ctx context.Context, base router.Decision
 	if !classed || len(order) == 0 {
 		return nil, false
 	}
+	return s.servableOrderEntries(ctx, base, tt, req, order, skip...), true
+}
+
+// servableOrderEntries resolves the entries of order that can take the turn,
+// in order, skipping the models in skip.
+func (s *Service) servableOrderEntries(ctx context.Context, base router.Decision, tt turntype.TurnType, req router.Request, order []string, skip ...string) (candidates []router.Decision) {
 	for _, model := range order {
 		if slices.Contains(skip, model) || catalog.IsLocal(model) && localRoutingDisabled(ctx) {
 			continue
@@ -103,7 +120,7 @@ func (s *Service) classOrderCandidates(ctx context.Context, base router.Decision
 			candidates = append(candidates, d)
 		}
 	}
-	return candidates, true
+	return candidates
 }
 
 // serveClassOrder puts res on the first candidate, keeping the rest as the
@@ -115,21 +132,40 @@ func serveClassOrder(res *turnLoopResult, candidates []router.Decision) {
 	res.Origin = policy.OverrideSourceDeployment
 }
 
-// lowClassOrder serves a low-class request on its strict order. ok is false
-// when the request is not low class or the low class has no order.
-func (s *Service) lowClassOrder(ctx context.Context, res *turnLoopResult, req router.Request) (bool, error) {
-	if class, _ := requestModelClass(ctx); class != catalog.TierLow {
-		return false, nil
+// orderedClassTurn reports whether the request's class picks its model from
+// its order list rather than the scorer: the strict low order, or a class
+// that rotates its list per session.
+func (s *Service) orderedClassTurn(ctx context.Context) bool {
+	class, classed := requestModelClass(ctx)
+	if !classed || len(s.modelClassOrder[class]) == 0 {
+		return false
 	}
-	candidates, ordered := s.classOrderCandidates(ctx, res.Decision, res.TurnType, req)
-	if !ordered {
-		return false, nil
+	return class == catalog.TierLow || s.classRotation[class]
+}
+
+// serveOrderedClass serves an ordered-class turn on the first servable entry
+// of its list, rotated for a rotating class so the list starts at the
+// session's slot; the entries after it are its fallbacks.
+func (s *Service) serveOrderedClass(ctx context.Context, res *turnLoopResult, req router.Request, sessionKey [sessionpin.SessionKeyLen]byte) error {
+	class, _ := requestModelClass(ctx)
+	order := s.modelClassOrder[class]
+	if s.classRotation[class] {
+		order = rotateForSession(order, sessionKey)
 	}
+	candidates := s.servableOrderEntries(ctx, res.Decision, res.TurnType, req, order)
 	if len(candidates) == 0 {
-		return true, &ModelClassUnavailableError{Class: catalog.TierLow, Err: cluster.ErrNoEligibleProvider}
+		return &ModelClassUnavailableError{Class: class, Err: cluster.ErrNoEligibleProvider}
 	}
 	serveClassOrder(res, candidates)
-	return true, nil
+	return nil
+}
+
+// rotateForSession starts order at the session's slot, a stable hash of its
+// key, so one session keeps one model every turn and sessions spread evenly
+// across the list.
+func rotateForSession(order []string, sessionKey [sessionpin.SessionKeyLen]byte) []string {
+	start := int(binary.BigEndian.Uint64(sessionKey[:8]) % uint64(len(order)))
+	return append(append([]string(nil), order[start:]...), order[:start]...)
 }
 
 // withClassBackup gives a high- or mid-class turn's automatic decision the
@@ -187,8 +223,8 @@ func (s *Service) legacyForcePinned(ctx context.Context, sessionKey [sessionpin.
 // first servable entry of its list.
 func (s *Service) classOrderedRoute(ctx context.Context, req router.Request, decision router.Decision, err error) (router.Decision, error) {
 	res := turnLoopResult{TurnType: turntype.MainLoop}
-	if class, _ := requestModelClass(ctx); class == catalog.TierLow && len(s.ModelClassMembers(class)) > 0 {
-		if _, orderErr := s.lowClassOrder(ctx, &res, req); orderErr != nil {
+	if s.orderedClassTurn(ctx) {
+		if orderErr := s.serveOrderedClass(ctx, &res, req, [sessionpin.SessionKeyLen]byte{}); orderErr != nil {
 			return router.Decision{}, orderErr
 		}
 		return res.Decision, nil

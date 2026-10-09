@@ -995,16 +995,17 @@ func (s *Service) runTurnLoop(
 		)
 	}
 
-	// A low-class request follows its class order every turn, ahead of the
-	// local turn route, hard pins, session pins and the scorer, but never
-	// ahead of a user force. Like a hard pin it reads and writes no session
-	// pin, so the first entry is tried again each turn.
-	if class, _ := requestModelClass(ctx); !forceModelFound && class == catalog.TierLow && len(s.ModelClassMembers(class)) > 0 &&
-		!s.legacyForcePinned(ctx, threadSessionKey, res.PinRole) {
-		if _, err := s.lowClassOrder(ctx, &res, req); err != nil {
+	// A low-class request follows its class order every turn, and a rotating
+	// class its list rotated to the session's slot, ahead of the local turn
+	// route, hard pins, session pins and the scorer, but never ahead of a user
+	// force. Like a hard pin it reads and writes no session pin: the order
+	// itself keeps a session on one model.
+	if !forceModelFound && s.orderedClassTurn(ctx) && !s.legacyForcePinned(ctx, threadSessionKey, res.PinRole) {
+		if err := s.serveOrderedClass(ctx, &res, req, threadSessionKey); err != nil {
 			return res, err
 		}
-		log.Info("Model class order served turn", "turn_type", string(res.TurnType), "model", res.Decision.Model, "provider", res.Decision.Provider, "fallbacks", len(res.LocalAlternates))
+		class, _ := requestModelClass(ctx)
+		log.Info("Model class order served turn", "class", class.String(), "rotated", s.classRotation[class], "turn_type", string(res.TurnType), "model", res.Decision.Model, "provider", res.Decision.Provider, "fallbacks", len(res.LocalAlternates))
 		return res, nil
 	}
 

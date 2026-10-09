@@ -158,6 +158,9 @@ type Service struct {
 	// modelClassOrder orders each class's models for x-weave-model-class
 	// requests; see WithModelClassOrder.
 	modelClassOrder ModelClassOrder
+	// classRotation names the classes served on their order list rotated
+	// per session; see WithClassRotation.
+	classRotation map[catalog.Tier]bool
 	// substitutionRules replace automatic selections matching a model
 	// pattern, ahead of the mid-tier substitute; see WithSubstitutionRules.
 	substitutionRules []SubstitutionRule
