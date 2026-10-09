@@ -339,6 +339,7 @@ func TestLoadLocalModels_ModelClassesExampleBoots(t *testing.T) {
 	assert.Equal(t, []string{"claude-fable-5-1", "gpt-6-astra"}, cfg.modelClassOrder[catalog.TierHigh])
 	assert.Equal(t, "mimo-v2.6-flash-rl", cfg.modelClassOrder[catalog.TierLow][0])
 	assert.Equal(t, catalog.TierMid, catalog.TierFor("gpt-5.5"), "the mapped source takes Sol's deployment tier")
+	assert.Equal(t, []catalog.Tier{catalog.TierHigh, catalog.TierMid}, cfg.classRotation)
 }
 
 // sessionBody is a main-loop turn whose first user message names a session.

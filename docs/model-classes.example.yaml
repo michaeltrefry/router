@@ -48,3 +48,8 @@ model_classes:
   high: [claude-fable-5-1, gpt-6-astra]
   mid: [claude-opus-5-5, gpt-6.1-sol]
   low: [mimo-v2.6-flash-rl, qwen3.8-flash-next, gpt-5.6-terra, claude-sonnet-5-5, gpt-6-luna, claude-haiku-4-5]
+
+# Serve high and mid from their lists, one model per session: each session's
+# slot is a hash of its key, so sessions spread across Claude and ChatGPT and
+# keep their model (and prompt cache) every turn. The scorer is not used.
+class_rotation: [high, mid]
