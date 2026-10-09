@@ -46,6 +46,13 @@ func requestModelClass(ctx context.Context) (catalog.Tier, bool) {
 	return class, ok && class != catalog.TierUnknown
 }
 
+// modelInRequestedClass reports whether model belongs to the request's class;
+// true when the request named none.
+func modelInRequestedClass(ctx context.Context, model string) bool {
+	class, ok := requestModelClass(ctx)
+	return !ok || catalog.TierFor(model) == class
+}
+
 // ModelClassUnavailableError reports that no model of Class can serve the
 // request; the router never serves it on another class instead.
 type ModelClassUnavailableError struct {

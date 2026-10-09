@@ -219,6 +219,11 @@ func subscriptionCoveredTarget(ctx context.Context, headers http.Header, req rou
 			return "", "", false
 		}
 	}
+	// The lane serves the requested model verbatim, so a request asking for
+	// another class routes instead.
+	if !modelInRequestedClass(ctx, model) {
+		return "", "", false
+	}
 	if token == "" {
 		return "", "", false
 	}

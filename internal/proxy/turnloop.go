@@ -1594,10 +1594,10 @@ func (s *Service) runTurnLoop(
 		}
 	}
 
-	// A request-level allowlist narrows the pool for this turn only; a pin
-	// outside it reroutes inside the subset instead of serving through.
+	// A request-level allowlist or model class narrows the pool for this turn
+	// only; a pin outside it reroutes inside the pool instead of serving through.
 	if pinFound && !modelInRequestSubset(ctx, pin.Model) {
-		log.Info("Session pin outside request allowed-models subset; falling through to scorer",
+		log.Info("Session pin outside request allowed-models subset or model class; falling through to scorer",
 			"pin_model", pin.Model,
 			"pin_provider", pin.Provider,
 		)
