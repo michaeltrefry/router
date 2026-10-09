@@ -75,6 +75,8 @@ type localModelsFile struct {
 	SubstitutionRules []localSubstitutionRuleEntry `yaml:"substitution_rules"`
 	// ModelTiers retiers built-in catalog models for this deployment.
 	ModelTiers *localModelTiersEntry `yaml:"model_tiers"`
+	// ModelClasses orders each class's models for x-weave-model-class.
+	ModelClasses *localModelClassesEntry `yaml:"model_classes"`
 }
 
 // localSubstitutionRuleEntry serves selections whose model matches Match, a
@@ -110,6 +112,8 @@ type localModelsConfig struct {
 	modelMapping         proxy.ModelMapping
 	substitutionRules    []proxy.SubstitutionRule
 	modelTiers           map[string]catalog.Tier
+	modelClasses         *localModelClassesEntry
+	modelClassOrder      proxy.ModelClassOrder
 }
 
 type localModelEntry struct {
@@ -193,7 +197,7 @@ func parseLocalModels(r io.Reader, getenv func(string) string) (localModelsConfi
 	}
 	return localModelsConfig{
 		models: out, turnRoute: route, midTier: midTier, lowTier: lowTier, subscriptionFallback: fallback,
-		modelMapping: mapping, substitutionRules: rules, modelTiers: modelTiers,
+		modelMapping: mapping, substitutionRules: rules, modelTiers: modelTiers, modelClasses: file.ModelClasses,
 	}, nil
 }
 
@@ -502,6 +506,16 @@ func loadLocalModels(
 	}
 	if err := catalog.TierMappingSources(cfg.modelMapping); err != nil {
 		return localModelsConfig{}, err
+	}
+	order, err := validateModelClasses(cfg.modelClasses)
+	if err != nil {
+		return localModelsConfig{}, err
+	}
+	cfg.modelClassOrder = order
+	for _, tier := range []catalog.Tier{catalog.TierHigh, catalog.TierMid, catalog.TierLow} {
+		if models := order[tier]; len(models) > 0 {
+			logger.Info("Model class order configured", "class", tier.String(), "models", models)
+		}
 	}
 	if cfg.turnRoute.Model != "" {
 		logger.Info("Local turn routing enabled", "model", cfg.turnRoute.Model, "turn_types", cfg.turnRoute.TurnTypes)

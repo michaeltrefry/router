@@ -50,7 +50,7 @@ func requestModelClass(ctx context.Context) (catalog.Tier, bool) {
 // true when the request named none.
 func modelInRequestedClass(ctx context.Context, model string) bool {
 	class, ok := requestModelClass(ctx)
-	return !ok || catalog.TierFor(model) == class
+	return !ok || catalog.TierFor(model) == class && classMembersAllow(ctx, model)
 }
 
 // forcedModelClassConflict names why a forced model cannot serve a request
@@ -108,12 +108,12 @@ func (s *Service) modelClassExclusions(ctx context.Context) map[string]struct{} 
 	// operator hard pins can still name, so every catalog model is judged.
 	out := map[string]struct{}{}
 	for model := range s.routableUniverse() {
-		if catalog.TierFor(model) != class {
+		if catalog.TierFor(model) != class || !classMembersAllow(ctx, model) {
 			out[model] = struct{}{}
 		}
 	}
 	for _, m := range catalog.Models {
-		if m.Tier != class {
+		if m.Tier != class || !classMembersAllow(ctx, m.ID) {
 			out[m.ID] = struct{}{}
 		}
 	}
