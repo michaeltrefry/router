@@ -72,6 +72,12 @@ func classOrderTarget(base router.Decision, model string, tt turntype.TurnType, 
 	if automaticServingIneligibility(provider, model, req) != "" {
 		return router.Decision{}, false
 	}
+	if _, unsafe := req.SafetyExcludedModels[model]; unsafe {
+		return router.Decision{}, false
+	}
+	if _, unsigned := req.UnsignedHistoryExcludedModels[model]; unsigned {
+		return router.Decision{}, false
+	}
 	d := base
 	d.Provider, d.Model = provider, model
 	d.Effort = ""
@@ -151,7 +157,10 @@ func (s *Service) rescueEmptyClass(ctx context.Context, res *turnLoopResult, req
 	if !errors.Is(routeErr, cluster.ErrNoEligibleProvider) && !errors.Is(routeErr, policy.ErrNoRoutableModels) {
 		return false
 	}
-	if errors.Is(routeErr, cluster.ErrAllowlistEmptiesPool) {
+	// An org allowlist names its own fix, and a request the class already
+	// refused (a caller-model passthrough outside it) is not router-chosen.
+	var refused *ModelClassUnavailableError
+	if errors.Is(routeErr, cluster.ErrAllowlistEmptiesPool) || errors.As(routeErr, &refused) {
 		return false
 	}
 	candidates, ordered := s.classOrderCandidates(ctx, res.Decision, res.TurnType, req)
@@ -170,4 +179,22 @@ func (s *Service) legacyForcePinned(ctx context.Context, sessionKey [sessionpin.
 	}
 	pin, found := s.loadPin(ctx, sessionKey, role)
 	return found && isUserForcedReason(pin.Reason)
+}
+
+// classOrderedRoute applies the class order to a decision-only route (the
+// /v1/route dry run): a low-class request reports its first servable entry,
+// and a high- or mid-class request whose routing found nothing reports the
+// first servable entry of its list.
+func (s *Service) classOrderedRoute(ctx context.Context, req router.Request, decision router.Decision, err error) (router.Decision, error) {
+	res := turnLoopResult{TurnType: turntype.MainLoop}
+	if class, _ := requestModelClass(ctx); class == catalog.TierLow && len(s.ModelClassMembers(class)) > 0 {
+		if _, orderErr := s.lowClassOrder(ctx, &res, req); orderErr != nil {
+			return router.Decision{}, orderErr
+		}
+		return res.Decision, nil
+	}
+	if err != nil && s.rescueEmptyClass(ctx, &res, req, err) {
+		return res.Decision, nil
+	}
+	return decision, err
 }

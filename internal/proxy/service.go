@@ -3074,6 +3074,7 @@ func defaultStrategyUnavailable(strategy router.Strategy) error {
 func (s *Service) Route(ctx context.Context, req router.Request) (router.Decision, error) {
 	routeCtx, span := startRoutingSpan(ctx, req)
 	decision, err := s.routeFor(routeCtx, req)
+	decision, err = s.classOrderedRoute(ctx, req, decision, err)
 	err = modelClassUnavailable(ctx, err)
 	finishRoutingSpan(span, decision, err)
 	return decision, err

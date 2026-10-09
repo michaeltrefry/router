@@ -304,3 +304,26 @@ func TestModelClassOrder_ExhaustedListNeverReachesAnOffListModel(t *testing.T) {
 
 	assert.Empty(t, anthropic.served(), "claude-sonnet-4-6 (baseline) and claude-haiku-4-5 (pick) are off the list")
 }
+
+// The model-classes example boots: its model_classes entries carry their
+// classes' tiers once its model_tiers apply.
+func TestLoadLocalModels_ModelClassesExampleBoots(t *testing.T) {
+	t.Cleanup(func() {
+		catalog.RestoreTiers()
+		catalog.UntierMappingSources("gpt-5.5", "claude-fable-5")
+		catalog.UnregisterLocalModels("qwen3.8-flash-next", "mimo-v2.6-flash-rl")
+		for _, id := range []string{"qwen3.8-flash-next", "mimo-v2.6-flash-rl"} {
+			delete(providers.ProviderFamilies, providers.LocalProviderName(id))
+			delete(providers.APIKeyEnvVars, providers.LocalProviderName(id))
+		}
+	})
+	cfg, err := loadLocalModels(envFrom(map[string]string{
+		localModelsFileEnv: "../../docs/model-classes.example.yaml", "LOCAL_QWEN_API_KEY": "s", "LOCAL_MIMO_API_KEY": "s",
+	}), map[string]providers.Client{}, map[string]struct{}{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	require.NoError(t, err)
+	assert.Len(t, cfg.lowTier.Targets, 2)
+	assert.Equal(t, []string{"claude-fable-5-1", "gpt-6-astra"}, cfg.modelClassOrder[catalog.TierHigh])
+	assert.Equal(t, "mimo-v2.6-flash-rl", cfg.modelClassOrder[catalog.TierLow][0])
+	assert.Equal(t, catalog.TierMid, catalog.TierFor("gpt-5.5"), "the mapped source takes Sol's deployment tier")
+}

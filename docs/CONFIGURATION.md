@@ -431,6 +431,97 @@ reads `→ <substitute> (local) · substitute for <original model>`. Its policy 
 original model as the selection and is excluded from training
 (`training_exclusion_reason: mid_tier_substitute`).
 
+#### Low-tier substitution
+
+An optional top-level `low_tier_substitute` block serves turns the router
+itself sent to a low-tier model on the configured local models, tried in
+order:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `models` | yes | `id`s of entries under `models`, each `tier: low`, in the order to try them. |
+| `enabled` | no | `false` keeps the block but substitutes nothing. Default `true`. |
+
+The first listed model that can carry the turn serves it (the same checks as
+mid-tier substitution: installation exclusion, provider enabled, automatic
+disable, `context_window`, images, tool ratings). One that fails before any
+output passes the turn to the next listed model, then to the router's own
+pick; see [Local failure fallback](#local-failure-fallback). Pattern rules and
+the mid-tier substitute are matched first. Everything else — which turns are
+eligible, what the session pin and HMM history record, the routing marker and
+the policy outcome — is as for mid-tier substitution, with
+`substitution_reason: low_tier_substitute`.
+
+#### Model tiers and classes
+
+[`model-classes.example.yaml`](model-classes.example.yaml) is a complete
+local-models file for this setup. Every routable catalog model has a tier,
+`low`, `mid` or `high`. An optional
+top-level `model_tiers` block retiers built-in catalog models for this
+deployment:
+
+```yaml
+model_tiers:
+  high: [claude-fable-5-1, gpt-6-astra]
+  mid: ["claude-opus-*", "gpt-*-sol"]
+  default: low
+```
+
+Each list holds catalog IDs or globs; `default` tiers every other tiered
+built-in model. A pattern that matches no tiered model, a model listed under
+two tiers and an unknown `default` fail boot. Passthrough-only (untiered) rows
+stay untiered, and a local model keeps its own `tier`. The tiers are applied
+before mapping sources take their target's tier, and every tier-based rule
+(mid- and low-tier substitution, session-pin roles, sibling failover) reads the
+retiered value.
+
+A request can restrict the router's automatic pick to one tier with
+`x-weave-model-class: high|mid|low` (case-insensitive), from any router key on
+a self-hosted deployment. An unknown value is a 400
+(`model_class_header_invalid`), and so is sending it with
+`x-weave-force-model` (`model_class_conflicts_with_force_model`). A session's
+saved `/force-model` outside the class is a 400 too; inside the class it
+serves. Nothing after selection moves the turn out of the class: model
+mapping, substitution rules, the tier substitutes, turn-type routing, the
+subscription and local-failure fallbacks, sibling failover, session pins,
+baseline failover and subscription passthrough all stay in it, and class
+requests skip the semantic cache. When no model of the class can serve the
+call, the router answers 503 with `model_class_unavailable` (the message
+prefix; the OpenAI `code`) instead of using another class; a class whose
+models are all refused by a spent subscription returns that 429.
+
+Every proxied response carries `X-Weave-Model-Class` naming the served model's
+tier, and `GET /admin/v1/models` returns each model's `class`.
+
+An optional top-level `model_classes` block orders each class's models for
+these requests:
+
+```yaml
+model_classes:
+  high: [claude-fable-5-1, gpt-6-astra]
+  mid: [claude-opus-5-5, gpt-6.1-sol]
+  low: [mimo-v2.6-flash-rl, qwen3.8-flash-next, gpt-5.6-terra, claude-sonnet-5-5, gpt-6-luna, claude-haiku-4-5]
+```
+
+Every entry must be a catalog or local model carrying its class's tier after
+`model_tiers`; boot fails otherwise. The list is the turn's fallback chain:
+when the model serving a classed turn fails before any output (a local server
+down, a vendor 5xx, a subscription's rate limit), the turn passes to the next
+listed model that can take it, and when the list runs out the last error
+reaches the client — a spent subscription's 429 included.
+
+`low` is strict: a low-class request is served by the first entry that can
+take the turn, on every turn and with no session pin, ahead of turn-type
+routing, hard pins and the scorer (never ahead of a user force), and no low
+model off the list serves it, not even the requested model's baseline. `high`
+and `mid` keep the router's in-class pick, with the rest of the list behind
+it; when routing finds no candidate in the class, the first servable entry
+serves, which reaches models the cluster scorer cannot pick (such as
+`gpt-6-astra`). A turn served on a list entry carries no in-band routing badge
+— `x-router-model` and `X-Weave-Model-Class` name what served. The `/v1/route` dry run reports the
+same choice. Gemini-native ingress routes only Gemini models, so a class whose
+list names none answers it with `model_class_unavailable`. A class-ordered turn logs `Model class order served turn`.
+
 #### Subscription exhaustion fallback
 
 An optional top-level `subscription_fallback` block serves a turn on one of
@@ -487,11 +578,14 @@ badge naming the model that answered.
 
 #### Local failure fallback
 
-When a turn that turn-type routing, a substitution rule or mid-tier
-substitution put on a local model fails before anything reached the client (connection refused, a 5xx, a
+When a turn that turn-type routing, a substitution rule, mid- or low-tier
+substitution or a low class order put on a local model fails before anything reached the client (connection refused, a 5xx, a
 response-header timeout, or any other error before the first byte), the router
 serves the same turn on the target it would have had without the local rule:
 
+- a turn low-tier substitution or a low class order served goes to the next
+  listed model that could take it; after the last local, low-tier
+  substitution falls through to the router's pick;
 - a turn a substitution rule or mid-tier substitution served goes to the
   router's original pick (the model named in `substituted_from_model`), or to
   its mapped model when `model_mapping` applied, with no second routing pass;
