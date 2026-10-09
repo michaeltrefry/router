@@ -745,6 +745,7 @@ func (s *Service) runTurnLoop(
 ) (res turnLoopResult, routeErr error) {
 	entryCtx, entryReq := ctx, req
 	defer func() {
+		routeErr = modelClassUnavailable(ctx, routeErr)
 		if routeErr == nil {
 			routeErr = policyPinServed(ctx, res)
 			if routeErr == nil {

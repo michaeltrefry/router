@@ -1114,7 +1114,11 @@ func (s *Service) safetyExcludedModels(env *translate.RequestEnvelope, outputRes
 // Otherwise desugars the positive allowlists into the exclusion set: every
 // routable model absent from the effective allowlist is excluded.
 func (s *Service) excludedModelsForRequest(ctx context.Context) map[string]struct{} {
-	return s.excludedModelsFor(ctx, allowedModelsForRequest(ctx))
+	excluded := s.excludedModelsFor(ctx, allowedModelsForRequest(ctx))
+	if class := s.modelClassExclusions(ctx); class != nil {
+		return mergeExcludedModels(excluded, class)
+	}
+	return excluded
 }
 
 // policyExcludedModels is excludedModelsForRequest without the request-level
@@ -2778,6 +2782,7 @@ func (s *Service) writeCachedResponse(w http.ResponseWriter, resp cache.CachedRe
 	w.Header().Set(HeaderRouterDecision, decision.Reason)
 	w.Header().Set(HeaderRouterProvider, decision.Provider)
 	w.Header().Set(HeaderRouterModel, decision.Model)
+	setModelClassHeader(w.Header(), decision.Model)
 	w.Header().Set(HeaderRouterContextWindow, strconv.Itoa(contextWindowForRequest(decision.Model, decision.Provider)))
 	w.Header().Set(HeaderRouterCache, RouterCacheHit)
 	if resp.StatusCode != 0 && resp.StatusCode != http.StatusOK {
@@ -4057,6 +4062,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 	w.Header().Set(HeaderRouterDecision, decision.Reason)
 	w.Header().Set(HeaderRouterProvider, decision.Provider)
 	w.Header().Set(HeaderRouterModel, decision.Model)
+	setModelClassHeader(w.Header(), decision.Model)
 	w.Header().Set(HeaderRouterContextWindow, strconv.Itoa(contextWindowForRequest(decision.Model, decision.Provider)))
 	if !agentShadowMode {
 		s.setFeedbackLinkHeader(ctx, w, installationID, externalID, requestID, auth.UserIDFrom(ctx))
@@ -7173,6 +7179,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 	w.Header().Set(HeaderRouterDecision, decision.Reason)
 	w.Header().Set(HeaderRouterProvider, decision.Provider)
 	w.Header().Set(HeaderRouterModel, decision.Model)
+	setModelClassHeader(w.Header(), decision.Model)
 	w.Header().Set(HeaderRouterContextWindow, strconv.Itoa(contextWindowForRequest(decision.Model, decision.Provider)))
 	s.setFeedbackLinkHeader(ctx, w, installationID, externalID, requestID, auth.UserIDFrom(ctx))
 
