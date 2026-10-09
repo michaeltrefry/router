@@ -156,8 +156,52 @@ func (s *Service) serveOrderedClass(ctx context.Context, res *turnLoopResult, re
 	if len(candidates) == 0 {
 		return &ModelClassUnavailableError{Class: class, Err: cluster.ErrNoEligibleProvider}
 	}
+	if sessionKey != ([sessionpin.SessionKeyLen]byte{}) {
+		struck, repin := s.classOrderSessionState(ctx, sessionKey, res.PinRole)
+		candidates = withSessionState(candidates, struck, repin)
+		// This turn's own strikes and refusal re-pin land on the same rows.
+		res.SessionKey = sessionKey
+	}
 	serveClassOrder(res, candidates)
 	return nil
+}
+
+// classOrderSessionState reads what earlier class-ordered turns of the session
+// recorded under sessionKey: models struck after a committed failure (and,
+// under transient rate limits, those cooling down), and a refusal re-pin.
+func (s *Service) classOrderSessionState(ctx context.Context, sessionKey [sessionpin.SessionKeyLen]byte, role string) (struck map[string]struct{}, repin string) {
+	if s.pinStore == nil {
+		return nil, ""
+	}
+	pin, active, _ := s.loadPinWithStoreState(ctx, sessionKey, role)
+	hmmHistory := s.loadHMMHistory(ctx, sessionKey, role)
+	demoted := mergeSessionStrikes(pin.DemotedModels, hmmHistory.DemotedModels)
+	if s.ResolveTransientRateLimit(ctx) {
+		cooling := activeDemotionCooldowns(mergeDemotionCooldowns(pin.DemotionCooldowns, hmmHistory.DemotionCooldowns), s.clockNow())
+		demoted = mergeSessionStrikes(demoted, cooldownsByExpiry(cooling))
+	}
+	if active && pin.Reason == reasonCyberRefusalRepin {
+		repin = pin.Model
+	}
+	return modelSet(demoted), repin
+}
+
+// withSessionState drops struck entries from candidates, keeping order, and
+// moves a refusal re-pin to the front. Strikes are soft: when every entry is
+// struck the order serves unchanged.
+func withSessionState(candidates []router.Decision, struck map[string]struct{}, repin string) []router.Decision {
+	kept := slices.DeleteFunc(slices.Clone(candidates), func(d router.Decision) bool {
+		_, out := struck[d.Model]
+		return out
+	})
+	if len(kept) == 0 {
+		kept = slices.Clone(candidates)
+	}
+	if i := slices.IndexFunc(kept, func(d router.Decision) bool { return d.Model == repin }); repin != "" && i > 0 {
+		front := kept[i]
+		kept = append([]router.Decision{front}, slices.Delete(kept, i, i+1)...)
+	}
+	return kept
 }
 
 // rotateForSession starts order at the session's slot, a stable hash of its
