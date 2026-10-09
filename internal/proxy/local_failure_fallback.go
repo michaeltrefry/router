@@ -59,6 +59,12 @@ func planLocalFailureFallback(res turnLoopResult, reroute func() (turnLoopResult
 		return nil
 	}
 	switch {
+	case localSubstitutionReason(res.SubstitutionReason) && len(res.LocalAlternates) > 0:
+		// The next local model takes the turn before the router's pick.
+		next := res
+		next.Decision = res.LocalAlternates[0]
+		next.LocalAlternates = res.LocalAlternates[1:]
+		return &localFailureFallback{local: res.Decision, source: res.SubstitutionReason, normal: &next}
 	case localSubstitutionReason(res.SubstitutionReason) && res.SubstitutedFrom.Model != "":
 		// Substitution only replaces router-selected, non-hard-pinned
 		// decisions, which carry no turn-loop origin.
@@ -66,6 +72,7 @@ func planLocalFailureFallback(res turnLoopResult, reroute func() (turnLoopResult
 		normal.Decision = res.SubstitutedFrom
 		normal.SubstitutedFrom = router.Decision{}
 		normal.SubstitutionReason = ""
+		normal.LocalAlternates = nil
 		normal.Origin = ""
 		if res.MappedDecision.Model != "" {
 			normal.Decision = res.MappedDecision

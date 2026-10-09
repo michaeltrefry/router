@@ -152,6 +152,9 @@ type Service struct {
 	// WithMidTierSubstitute.
 	midTierProvider string
 	midTierModel    string
+	// lowTierTargets replace automatic low-tier selections, in order; see
+	// WithLowTierSubstitute.
+	lowTierTargets []LocalTarget
 	// substitutionRules replace automatic selections matching a model
 	// pattern, ahead of the mid-tier substitute; see WithSubstitutionRules.
 	substitutionRules []SubstitutionRule
@@ -4747,7 +4750,9 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 
 	localFailureUsed := false
 	localFailureRan := false
-	if localFailure.rescues(ctx, proxyErr, preludeBuf) {
+	chainHeld := false
+	for localFailure.rescues(ctx, proxyErr, preludeBuf) {
+		dispatched := false
 		normalRes, normalErr := localFailure.normalRoute()
 		if normalErr != nil {
 			localFailure.logUnavailable(ctx, proxyErr, normalErr)
@@ -4774,6 +4779,9 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			default:
 				localFailure.logServing(ctx, normalRes, proxyErr)
 				localFailureRan = true
+				dispatched = true
+				// A further local model in the chain still takes a failure.
+				chainHeld = planLocalFailureFallback(normalRes, nil) != nil && providers.IsLocalProvider(target.Provider)
 				crossFormat = false
 				respSummary = translate.ResponseSummary{}
 				reqStats = providers.RequestMutationStats{}
@@ -4803,7 +4811,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 						bindings:               targetBindings,
 						attempt:                targetAttempt,
 						flushErr:               flushErrAsAnthropic,
-						deferFlushOnExhaustion: laterRescueViable,
+						deferFlushOnExhaustion: laterRescueViable || chainHeld,
 						purpose:                normalRes.dispatchPurpose(inference.PurposeAnthropicMessages),
 						origin:                 normalRes.dispatchOrigin(target),
 					})
@@ -4815,10 +4823,16 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 				localFailureUsed = proxyErr == nil
 			}
 		}
+		// A failed low-tier substitute hands the turn to the next local model,
+		// which carries its own rescue plan.
+		if !dispatched || !providers.IsLocalProvider(routeRes.Decision.Provider) {
+			break
+		}
+		localFailure = planLocalFailureFallback(routeRes, nil)
 	}
 	// The local model's error was held for this rescue; with nothing after it,
 	// surface it now.
-	if localFailureViable && !localFailureRan && !laterRescueViable && proxyErr != nil && !preludeBuf.Committed() {
+	if localFailureViable && (!localFailureRan || chainHeld) && !laterRescueViable && proxyErr != nil && !preludeBuf.Committed() {
 		flushDeferredErr()
 	}
 
@@ -7966,7 +7980,9 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 
 	localFailureUsed := false
 	localFailureRan := false
-	if localFailure.rescues(ctx, proxyErr, preludeBuf) {
+	chainHeld := false
+	for localFailure.rescues(ctx, proxyErr, preludeBuf) {
+		dispatched := false
 		normalRes, normalErr := localFailure.normalRoute()
 		if normalErr != nil {
 			localFailure.logUnavailable(ctx, proxyErr, normalErr)
@@ -8001,6 +8017,9 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 			default:
 				localFailure.logServing(ctx, normalRes, proxyErr)
 				localFailureRan = true
+				dispatched = true
+				// A further local model in the chain still takes a failure.
+				chainHeld = planLocalFailureFallback(normalRes, nil) != nil && providers.IsLocalProvider(target.Provider)
 				// The writer was set up to translate the local model's Chat
 				// Completions and to badge it; keep translating and badge the
 				// model that serves instead.
@@ -8044,7 +8063,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 						bindings:               targetBindings,
 						attempt:                targetAttempt,
 						flushErr:               flushErrAsOpenAI,
-						deferFlushOnExhaustion: laterRescueViable,
+						deferFlushOnExhaustion: laterRescueViable || chainHeld,
 						purpose:                normalRes.dispatchPurpose(surfacePurpose),
 						origin:                 normalRes.dispatchOrigin(target),
 					})
@@ -8057,10 +8076,16 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 				localFailureUsed = proxyErr == nil
 			}
 		}
+		// A failed low-tier substitute hands the turn to the next local model,
+		// which carries its own rescue plan.
+		if !dispatched || !providers.IsLocalProvider(routeRes.Decision.Provider) {
+			break
+		}
+		localFailure = planLocalFailureFallback(routeRes, nil)
 	}
 	// The local model's error was held for this rescue; with nothing after it,
 	// surface it now.
-	if localFailureViable && !localFailureRan && !laterRescueViable && proxyErr != nil && !preludeBuf.Committed() {
+	if localFailureViable && (!localFailureRan || chainHeld) && !laterRescueViable && proxyErr != nil && !preludeBuf.Committed() {
 		flushDeferredErr()
 	}
 

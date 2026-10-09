@@ -262,6 +262,10 @@ type turnLoopResult struct {
 	// MappedDecision is the model mapping's target for this turn, kept when
 	// a later rule replaces it in Decision; zero when no mapping applied.
 	MappedDecision router.Decision
+	// LocalAlternates are the further local models, in order, that take the
+	// turn when the substitute in Decision fails before output; the router's
+	// pick follows them.
+	LocalAlternates []router.Decision
 	// LocalTurnRouted marks a decision the local turn route made.
 	LocalTurnRouted bool
 	// PlannerDecision holds the planner's verdict and EV math when the planner ran.
@@ -415,7 +419,7 @@ func (r turnLoopResult) modelSwitched() bool {
 // is not included, since its next turn returns to the original.
 func (r turnLoopResult) recordedSelection() router.Decision {
 	switch r.SubstitutionReason {
-	case reasonModelMapping, reasonMidTierSubstitute, reasonSubstitutionRule:
+	case reasonModelMapping, reasonMidTierSubstitute, reasonLowTierSubstitute, reasonSubstitutionRule:
 		return r.SubstitutedFrom
 	}
 	return r.Decision

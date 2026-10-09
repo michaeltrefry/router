@@ -37,12 +37,14 @@ func (s *Service) WithSubstitutionRules(rules []SubstitutionRule) *Service {
 // localSubstitutionReason reports whether reason names a rule that serves the
 // router's selection on a local model every turn it matches.
 func localSubstitutionReason(reason string) bool {
-	return reason == reasonSubstitutionRule || reason == reasonMidTierSubstitute
+	return reason == reasonSubstitutionRule || reason == reasonMidTierSubstitute || reason == reasonLowTierSubstitute
 }
 
 // substitutionFor returns the first rule matching the turn: the substitution
 // rules in configured order against the served (post-mapping) model, then the
-// mid-tier substitute against the tier of the router's own pick.
+// mid-tier substitute against the tier of the router's own pick. The low-tier
+// substitute, which may try several local models, is resolved by
+// substituteLocal after these.
 func (s *Service) substitutionFor(pick, served router.Decision) (provider, model, reason string, ok bool) {
 	for _, rule := range s.substitutionRules {
 		if matched, _ := path.Match(rule.Match, served.Model); matched {
@@ -62,9 +64,10 @@ func (s *Service) substitutionFor(pick, served router.Decision) (provider, model
 // rule returns it to the pinned model. Forced, hard-pinned, utility, bypassed
 // and policy-pinned turns are never substituted, and a request the matched
 // rule's local model cannot take keeps the (mapped) decision; later rules are
-// not tried.
+// not tried. A low-tier pick no rule matched goes to the first low-tier local
+// model that can take it, the rest kept as LocalAlternates.
 func (s *Service) substituteLocal(ctx context.Context, res *turnLoopResult, req router.Request) {
-	if (s.midTierModel == "" && len(s.substitutionRules) == 0) || localRoutingDisabled(ctx) || !midTierSubstitutable(*res) {
+	if (s.midTierModel == "" && len(s.substitutionRules) == 0 && len(s.lowTierTargets) == 0) || localRoutingDisabled(ctx) || !midTierSubstitutable(*res) {
 		return
 	}
 	// A mapped selection is judged by the router's own pick, which session
@@ -74,6 +77,19 @@ func (s *Service) substituteLocal(ctx context.Context, res *turnLoopResult, req 
 		original = res.SubstitutedFrom
 	}
 	provider, model, reason, ok := s.substitutionFor(original, res.Decision)
+	var alternates []router.Decision
+	if !ok && len(s.lowTierTargets) > 0 && catalog.TierFor(original.Model) == catalog.TierLow && !providers.IsLocalProvider(res.Decision.Provider) {
+		candidates := s.lowTierCandidates(res.Decision, req)
+		if len(candidates) == 0 {
+			observability.FromContext(ctx).Info("Low-tier local substitutes cannot take the turn; serving the matched model",
+				"turn_type", string(res.TurnType),
+				"matched_model", res.Decision.Model,
+			)
+			return
+		}
+		provider, model, reason, ok = candidates[0].Provider, candidates[0].Model, reasonLowTierSubstitute, true
+		alternates = candidates[1:]
+	}
 	if !ok || res.Decision.Model == model || providers.IsLocalProvider(res.Decision.Provider) {
 		return
 	}
@@ -100,6 +116,7 @@ func (s *Service) substituteLocal(ctx context.Context, res *turnLoopResult, req 
 	res.SubstitutedFrom = original
 	res.SubstitutionReason = reason
 	res.Decision = substitute
+	res.LocalAlternates = alternates
 	res.Origin = policy.OverrideSourceDeployment
 	observability.FromContext(ctx).Info("Local substitute served turn",
 		"substitution_reason", reason,
