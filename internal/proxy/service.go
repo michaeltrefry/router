@@ -8780,6 +8780,10 @@ func (s *Service) ProxyOpenAIResponses(ctx context.Context, body []byte, w http.
 	if err != nil {
 		return fmt.Errorf("strip router reasoning from Responses input: %w", err)
 	}
+	body, err = translate.UnwrapPlaintextAgentContentInResponsesInput(body)
+	if err != nil {
+		return fmt.Errorf("unwrap plaintext agent content in Responses input: %w", err)
+	}
 	ctx = context.WithValue(ctx, responsesSurfaceContextKey{}, true)
 	ctx, inputErr := s.withClassifierInput(ctx, body, router.EndpointOpenAIResponses)
 	if inputErr != nil {
