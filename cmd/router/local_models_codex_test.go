@@ -297,6 +297,41 @@ func TestLocalModel_CodexLocalReasoningNeverReachesNativeOpenAI(t *testing.T) {
 	assert.Contains(t, sent, "and now?")
 }
 
+// A sub-agent served on a local model sends its parent plaintext, which Codex
+// files as encrypted_content; OpenAI must receive it as text it can read.
+func TestLocalModel_CodexPlaintextAgentContentReachesNativeOpenAIAsText(t *testing.T) {
+	const id = "test-local-codex-agentmsg"
+	upstream := newLocalUpstream(t)
+	svc, openAIClient, _ := codexLocalService(t, id, upstream, "")
+
+	const ciphertext = "gAAAAABqwjT-9j2GajIk6rGNvhdK5WRdkaIOfGrgLi7Z"
+	body := `{
+		"model": "gpt-5.6-sol",
+		"stream": true,
+		"store": false,
+		"input": [
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+			{"type": "agent_message", "id": "amsg_local", "author": "/root/review", "recipient": "/root", "content": [
+				{"type": "input_text", "text": "Sender: /root/review"},
+				{"type": "encrypted_content", "encrypted_content": "review finished: no findings"}
+			]},
+			{"type": "agent_message", "id": "amsg_native", "author": "/root/scan", "recipient": "/root", "content": [
+				{"type": "encrypted_content", "encrypted_content": "` + ciphertext + `"}
+			]},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "and now?"}]}
+		]
+	}`
+	ctx, r := codexRequest(t, map[string]string{proxy.ForceModelHeader: "gpt-5.6-sol"})
+	require.NoError(t, svc.ProxyOpenAIResponses(ctx, []byte(body), httptest.NewRecorder(), r))
+
+	openAIClient.mu.Lock()
+	defer openAIClient.mu.Unlock()
+	require.Len(t, openAIClient.bodies, 1, "the subscription turn is served by OpenAI")
+	sent := openAIClient.bodies[0]
+	assert.JSONEq(t, `{"type":"input_text","text":"review finished: no findings"}`, gjson.GetBytes(sent, "input.1.content.1").Raw)
+	assert.JSONEq(t, `{"type":"encrypted_content","encrypted_content":"`+ciphertext+`"}`, gjson.GetBytes(sent, "input.2.content.0").Raw)
+}
+
 func TestLocalModel_CodexThinkTagModelStreamsReasoningItem(t *testing.T) {
 	const id = "test-local-codex-think"
 	upstream := newScriptedLocalUpstream(t,
@@ -372,6 +407,33 @@ func TestLocalModel_CodexTurnRoutingDispatchesTitleAndSubAgentLocally(t *testing
 		require.NotEmpty(t, events)
 		assert.Equal(t, "response.completed", events[len(events)-1].name, rec.Body.String())
 	}
+}
+
+// A spawned sub-agent whose task arrived OpenAI-encrypted can only read it on
+// OpenAI; a local model would get the envelope without the task.
+func TestLocalModel_CodexSubAgentWithEncryptedTaskStaysOnSubscription(t *testing.T) {
+	const id = "test-local-codex-enctask"
+	upstream := newLocalUpstream(t)
+	svc, openAIClient, _ := codexLocalService(t, id, upstream, turnRoutingYAML(id))
+
+	body := `{
+		"model": "gpt-5.6-sol",
+		"stream": true,
+		"store": false,
+		"input": [
+			{"type": "agent_message", "id": "amsg_task", "author": "/root", "recipient": "/root/review", "content": [
+				{"type": "input_text", "text": "Message Type: MESSAGE\nSender: /root\nPayload:\n"},
+				{"type": "encrypted_content", "encrypted_content": "gAAAAABqwjURGyU8WDIxmYYmX72YWxzgPFXhbJ8au5m5"}
+			]}
+		]
+	}`
+	ctx, r := codexRequest(t, map[string]string{"x-openai-subagent": "collab_spawn"})
+	require.NoError(t, svc.ProxyOpenAIResponses(ctx, []byte(body), httptest.NewRecorder(), r))
+
+	upstream.mu.Lock()
+	assert.Empty(t, upstream.bodies, "the local model never receives a task it cannot read")
+	upstream.mu.Unlock()
+	assert.Equal(t, 1, openAIClient.count(), "the sub-agent is served on the Codex subscription")
 }
 
 // Only a spawned sub-agent is local work: Codex's review and approval

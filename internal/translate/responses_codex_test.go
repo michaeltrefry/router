@@ -177,7 +177,7 @@ func TestConvertResponsesToChatCompletionsWithOptions_PortableCodexHistory(t *te
 	messages := gjson.GetBytes(converted.Body, "messages").Array()
 	require.Len(t, messages, 6)
 	assert.Equal(t, "assistant", messages[0].Get("role").Str)
-	assert.Equal(t, "plain update", messages[0].Get("content").Str)
+	assert.Equal(t, "plain update\nopaque-agent", messages[0].Get("content").Str)
 
 	assert.Equal(t, "assistant", messages[1].Get("role").Str)
 	require.Len(t, messages[1].Get("tool_calls").Array(), 2)
@@ -197,7 +197,6 @@ func TestConvertResponsesToChatCompletionsWithOptions_PortableCodexHistory(t *te
 	assert.Equal(t, translate.ResponsesToolMapping{Alias: "collaboration__lookup", Name: "lookup", Namespace: "collaboration"}, converted.ToolMappings["collaboration__lookup"])
 	assert.Equal(t, translate.ResponsesToolMapping{Alias: "exec", Name: "exec", Custom: true}, converted.ToolMappings["exec"])
 	assertReportCode(t, converted.Report, "responses_encrypted_reasoning_dropped")
-	assertReportCode(t, converted.Report, "responses_encrypted_agent_content_dropped")
 	assertReportCode(t, converted.Report, "responses_agent_message_projected")
 	assertReportCode(t, converted.Report, "responses_structured_tool_output_projected")
 	assertReportCode(t, converted.Report, "responses_message_phase_dropped")
@@ -353,14 +352,30 @@ func TestConvertResponsesToChatCompletionsWithOptions_PortableCodexToolOutputFil
 func TestConvertResponsesToChatCompletionsWithOptions_PortableCodexEncryptedOnlyAgentMessageFailsClosed(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-5.6-sol",
-		"input":[{"type":"agent_message","author":"child","recipient":"parent","content":[{"type":"encrypted_content","encrypted_content":"opaque"}]}]
+		"input":[{"type":"agent_message","author":"child","recipient":"parent","content":[{"type":"encrypted_content","encrypted_content":"gAAAAABqwjT-opaque"}]}]
 	}`)
 
 	converted, err := translate.ConvertResponsesToChatCompletionsWithOptions(body, translate.ResponsesConversionOptions{PortableCodex: true})
 	require.NoError(t, err)
 	assert.True(t, converted.Requirements.NativeOnly)
 	assert.Empty(t, gjson.GetBytes(converted.Body, "messages").Array())
-	assertReportCode(t, converted.Report, "responses_encrypted_agent_content_dropped")
+	assertReportCode(t, converted.Report, "responses_agent_message_native_only")
+}
+
+// Codex wraps a parent's task to a sub-agent in a plaintext envelope around
+// the OpenAI-encrypted payload; serving the envelope alone strands the child.
+func TestConvertResponsesToChatCompletionsWithOptions_PortableCodexEncryptedAgentPayloadFailsClosed(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-6.1-sol",
+		"input":[{"type":"agent_message","author":"/root","recipient":"/root/review","content":[
+			{"type":"input_text","text":"Message Type: MESSAGE\nSender: /root\nPayload:\n"},
+			{"type":"encrypted_content","encrypted_content":"gAAAAABqwjURGyU8WDIxmYYmX72Y"}
+		]}]
+	}`)
+
+	converted, err := translate.ConvertResponsesToChatCompletionsWithOptions(body, translate.ResponsesConversionOptions{PortableCodex: true})
+	require.NoError(t, err)
+	assert.True(t, converted.Requirements.NativeOnly)
 	assertReportCode(t, converted.Report, "responses_agent_message_native_only")
 }
 
