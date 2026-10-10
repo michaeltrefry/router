@@ -573,7 +573,16 @@ func (c *portableCodexResponsesConverter) convertAgentMessage(item gjson.Result,
 			textParts = append(textParts, text)
 			hasPlainText = hasPlainText || strings.TrimSpace(text) != ""
 		case "encrypted_content":
-			c.report("responses_encrypted_agent_content_dropped", "dropped", partPath)
+			// OpenAI ciphertext carries the message itself (a sub-agent's task or
+			// result), which only OpenAI can read; dropping it would hand the
+			// other model the envelope without the payload.
+			text := part.Get("encrypted_content").Str
+			if strings.HasPrefix(text, openAICiphertextPrefix) {
+				c.markNativeOnly("responses_agent_message_native_only", partPath)
+				return nil, false
+			}
+			textParts = append(textParts, text)
+			hasPlainText = hasPlainText || strings.TrimSpace(text) != ""
 		default:
 			c.markNativeOnly("responses_agent_message_native_only", partPath)
 			return nil, false
