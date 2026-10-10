@@ -1174,7 +1174,7 @@ func geminiThinkingActive(intent ReasoningIntent, opts EmitOptions) bool {
 
 // clampToModelOutputCap caps v to the model's max output token limit.
 func clampToModelOutputCap(v int64, model string) int64 {
-	outputCap := modelMaxOutputTokens[model]
+	outputCap, _ := modelOutputCap(model)
 	if outputCap == 0 {
 		outputCap = defaultMaxOutputTokenCap
 	}

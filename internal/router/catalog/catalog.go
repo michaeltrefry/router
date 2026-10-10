@@ -204,6 +204,10 @@ type Model struct {
 	// ContextWindow is the model's total input+output token budget in tokens.
 	// 0 means use catalog.DefaultContextWindow.
 	ContextWindow int
+	// MaxOutputTokens caps a request's output tokens for a model the
+	// translate package's own table does not list (local models); 0 leaves
+	// that table's default cap.
+	MaxOutputTokens int
 	// ToolUseQuality: default ToolUseUnknown; set ToolUseLow to remove the
 	// model from agentic argmax pools.
 	ToolUseQuality ToolUseQuality

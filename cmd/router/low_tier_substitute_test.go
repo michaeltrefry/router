@@ -68,7 +68,14 @@ func lowTierService(t *testing.T, first, second string, firstURL, secondURL stri
 // low-tier pick the scorer makes.
 func lowTierServiceFor(t *testing.T, first, second string, firstURL, secondURL string, normal providers.Client, pick router.Decision, extraYAML ...string) *proxy.Service {
 	t.Helper()
-	path := writeLocalModelsFile(t, lowLocalEntryYAML(first, firstURL)+localHeaderTimeoutYAML+lowLocalEntryYAML(second, secondURL)+
+	return lowTierServiceWithFirstEntry(t, first, second, firstURL, secondURL, "", normal, pick, extraYAML...)
+}
+
+// lowTierServiceWithFirstEntry is lowTierServiceFor with extra fields on the
+// first local model's entry.
+func lowTierServiceWithFirstEntry(t *testing.T, first, second string, firstURL, secondURL, firstEntryExtra string, normal providers.Client, pick router.Decision, extraYAML ...string) *proxy.Service {
+	t.Helper()
+	path := writeLocalModelsFile(t, lowLocalEntryYAML(first, firstURL)+localHeaderTimeoutYAML+firstEntryExtra+lowLocalEntryYAML(second, secondURL)+
 		"low_tier_substitute:\n  models: ["+first+", "+second+"]\n"+strings.Join(extraYAML, ""))
 	providerMap := map[string]providers.Client{pick.Provider: normal}
 	keyed := map[string]struct{}{pick.Provider: {}}
