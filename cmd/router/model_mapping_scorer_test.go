@@ -22,6 +22,7 @@ import (
 	"weave-os/router/internal/router"
 	"weave-os/router/internal/router/catalog"
 	"weave-os/router/internal/router/cluster"
+	"weave-os/router/internal/router/sessionpin"
 )
 
 // shippedScorerVersion is the trained bundle the shipped mapping targets.
@@ -94,6 +95,11 @@ type shippedStack struct {
 // through the caller's subscription.
 func newShippedStack(t *testing.T, keyed ...string) *shippedStack {
 	t.Helper()
+	return newShippedStackWithPins(t, nil, keyed...)
+}
+
+func newShippedStackWithPins(t *testing.T, pins sessionpin.Store, keyed ...string) *shippedStack {
+	t.Helper()
 	local := newLocalUpstream(t)
 	example, err := os.ReadFile(filepath.Join("..", "..", "docs", "local-models.example.yaml"))
 	require.NoError(t, err)
@@ -135,7 +141,7 @@ func newShippedStack(t *testing.T, keyed ...string) *shippedStack {
 	require.NoError(t, validateModelMappingSelectable(cfg.modelMapping, multi.Default, multi.DefaultDeployedModels()))
 
 	spy := &scorerSpy{inner: multi}
-	svc := proxy.NewService(spy, providerMap, nil, false, nil, nil, false, providers.ProviderOpenAI, "gpt-5.6-luna", nil).
+	svc := proxy.NewService(spy, providerMap, nil, false, nil, pins, false, providers.ProviderOpenAI, "gpt-5.6-luna", nil).
 		WithDeploymentKeyedProviders(keyedSet).
 		WithAvailableModels(catalog.RoutingTargetSet(available)).
 		WithLocalTurnRoute(cfg.turnRoute).
@@ -418,4 +424,32 @@ func TestShippedMapping_PreferredTargetWinsRealScorerTurn(t *testing.T) {
 		assert.Equal(t, source, decisions[0].Model)
 		assert.Equal(t, []string{preferred}, stack.anthropic.served())
 	})
+}
+
+// struckSessionPins reports every session as having struck model, as the
+// pin rows of a session whose stream died after commit do.
+type struckSessionPins struct {
+	memoryPins
+	model string
+}
+
+func (m *struckSessionPins) Get(ctx context.Context, key [sessionpin.SessionKeyLen]byte, role string) (sessionpin.Pin, bool, error) {
+	return sessionpin.Pin{SessionKey: key, Role: role, Strategy: router.StrategyFromContext(ctx), DemotedModels: []string{m.model}}, true, nil
+}
+
+// A session strike on the mapped target is soft like every other strike: when
+// nothing else can serve a Codex-subscription turn, the pick keeps its
+// mapping instead of failing with no eligible provider.
+func TestShippedMapping_CodexSubscriptionKeepsMappingWhenTargetIsOnlyStruck(t *testing.T) {
+	stack := newShippedStackWithPins(t, &struckSessionPins{memoryPins: memoryPins{pins: map[string]sessionpin.Pin{}}, model: "gpt-6.1-sol"})
+	ctx, r := codexRequest(t, nil)
+	rec := httptest.NewRecorder()
+
+	require.NoError(t, stack.svc.ProxyOpenAIResponses(ctx, []byte(codexMainTurn), rec, r))
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	_, decisions := stack.spy.routed()
+	require.NotEmpty(t, decisions)
+	assert.Equal(t, "gpt-5.5", decisions[0].Model)
+	assert.Equal(t, []string{"gpt-6.1-sol"}, stack.openAI.served(), "the struck target serves when nothing else can")
 }

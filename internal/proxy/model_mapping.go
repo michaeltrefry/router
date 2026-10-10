@@ -177,3 +177,15 @@ func unservedMappingAdmission(ctx context.Context, res turnLoopResult) map[strin
 	}
 	return admitted
 }
+
+// softlyExcludedMappingTarget returns res's mapping target when the only
+// thing refusing the mapping is an automatic exclusion on the target (a
+// session strike or the deployment-wide automatic exclusion), which every
+// other enforcement site treats as soft.
+func (s *Service) softlyExcludedMappingTarget(ctx context.Context, res turnLoopResult, req router.Request) (string, bool) {
+	mapped, ineligible, applies := s.mappingFor(ctx, res, req)
+	if !applies || ineligible != automaticRoutingDisabledReason {
+		return "", false
+	}
+	return mapped.Model, true
+}
