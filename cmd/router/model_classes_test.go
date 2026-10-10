@@ -107,6 +107,7 @@ func classOrderServiceWith(t *testing.T, o classOrderOpts) classOrderStack {
 		WithDeploymentKeyedProviders(keyed).
 		WithModelClassOrder(cfg.modelClassOrder).
 		WithClassRotation(o.rotate...).
+		WithRequestedModelClass(cfg.requestedModelClass...).
 		WithCommittedStreamArmDemotion(o.demote).
 		WithRescuedFailureArmDemotion(o.demote)
 	return classOrderStack{svc: svc, anthropic: anthropic, openAI: openAI, mimo: mimo, qwen: qwen}

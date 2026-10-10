@@ -161,6 +161,9 @@ type Service struct {
 	// classRotation names the classes served on their order list rotated
 	// per session; see WithClassRotation.
 	classRotation map[catalog.Tier]bool
+	// requestedModelClass names the tiers whose requested models are served
+	// in their own class (WithRequestedModelClass).
+	requestedModelClass map[catalog.Tier]bool
 	// substitutionRules replace automatic selections matching a model
 	// pattern, ahead of the mid-tier substitute; see WithSubstitutionRules.
 	substitutionRules []SubstitutionRule
@@ -3686,6 +3689,7 @@ func (s *Service) ProxyMessages(ctx context.Context, body []byte, w http.Respons
 			return forceErr
 		}
 	}
+	ctx = s.impliedModelClass(ctx, env.Model(), forceModel)
 
 	// Wide cyclic re-read loop (same few files, no edits, dozens of turns) on a
 	// cheap/mid model escalates the session to opus.
@@ -7011,6 +7015,7 @@ func (s *Service) ProxyOpenAIChatCompletion(ctx context.Context, body []byte, w 
 	if forceErr != nil {
 		return forceErr
 	}
+	ctx = s.impliedModelClass(ctx, env.Model(), forceModel)
 
 	// Wide cyclic re-read loop → escalate to opus (same path as the Anthropic
 	// ingress). See detectCyclicToolCallLoop / handleLoopEscalation.

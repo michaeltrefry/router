@@ -81,6 +81,9 @@ type localModelsFile struct {
 	// ClassRotation names the classes served per session on their rotated
 	// model_classes list instead of the scorer's pick.
 	ClassRotation []string `yaml:"class_rotation"`
+	// RequestedModelClass names the tiers whose requested models are served
+	// in their own class, as if the request sent x-weave-model-class.
+	RequestedModelClass []string `yaml:"requested_model_class"`
 }
 
 // localSubstitutionRuleEntry serves selections whose model matches Match, a
@@ -108,18 +111,20 @@ type localTurnRoutingEntry struct {
 // are; an empty modelMapping serves every selection as chosen; empty
 // substitutionRules substitute nothing by model pattern.
 type localModelsConfig struct {
-	models               []localModel
-	turnRoute            proxy.LocalTurnRoute
-	midTier              proxy.MidTierSubstitute
-	lowTier              proxy.LowTierSubstitute
-	subscriptionFallback proxy.SubscriptionLocalFallback
-	modelMapping         proxy.ModelMapping
-	substitutionRules    []proxy.SubstitutionRule
-	modelTiers           map[string]catalog.Tier
-	modelClasses         *localModelClassesEntry
-	modelClassOrder      proxy.ModelClassOrder
-	classRotationRaw     []string
-	classRotation        []catalog.Tier
+	models                 []localModel
+	turnRoute              proxy.LocalTurnRoute
+	midTier                proxy.MidTierSubstitute
+	lowTier                proxy.LowTierSubstitute
+	subscriptionFallback   proxy.SubscriptionLocalFallback
+	modelMapping           proxy.ModelMapping
+	substitutionRules      []proxy.SubstitutionRule
+	modelTiers             map[string]catalog.Tier
+	modelClasses           *localModelClassesEntry
+	modelClassOrder        proxy.ModelClassOrder
+	classRotationRaw       []string
+	classRotation          []catalog.Tier
+	requestedModelClassRaw []string
+	requestedModelClass    []catalog.Tier
 }
 
 type localModelEntry struct {
@@ -206,6 +211,7 @@ func parseLocalModels(r io.Reader, getenv func(string) string) (localModelsConfi
 	return localModelsConfig{
 		models: out, turnRoute: route, midTier: midTier, lowTier: lowTier, subscriptionFallback: fallback,
 		modelMapping: mapping, substitutionRules: rules, modelTiers: modelTiers, modelClasses: file.ModelClasses, classRotationRaw: file.ClassRotation,
+		requestedModelClassRaw: file.RequestedModelClass,
 	}, nil
 }
 
@@ -533,6 +539,12 @@ func loadLocalModels(
 	}
 	for _, class := range cfg.classRotation {
 		logger.Info("Model class rotates per session", "class", class.String(), "models", order[class])
+	}
+	if cfg.requestedModelClass, err = validateRequestedModelClass(cfg.requestedModelClassRaw); err != nil {
+		return localModelsConfig{}, err
+	}
+	for _, class := range cfg.requestedModelClass {
+		logger.Info("Requests for a model of this class are served in the class", "class", class.String())
 	}
 	for _, tier := range []catalog.Tier{catalog.TierHigh, catalog.TierMid, catalog.TierLow} {
 		if models := order[tier]; len(models) > 0 {

@@ -40,6 +40,56 @@ func ParseModelClass(raw string) (catalog.Tier, error) {
 	}
 }
 
+// WithModelClass restricts ctx's automatic model selection to class, and to
+// members when the class has a strict order.
+func WithModelClass(ctx context.Context, class catalog.Tier, members []string) context.Context {
+	ctx = context.WithValue(ctx, ModelClassContextKey{}, class)
+	if len(members) == 0 {
+		return ctx
+	}
+	set := make(map[string]struct{}, len(members))
+	for _, m := range members {
+		set[m] = struct{}{}
+	}
+	return context.WithValue(ctx, ModelClassMembersContextKey{}, set)
+}
+
+type modelClassImpliedContextKey struct{}
+
+// WithRequestedModelClass names the tiers whose requested models are served
+// in their own class, as if the request sent ModelClassHeader.
+func (s *Service) WithRequestedModelClass(classes ...catalog.Tier) *Service {
+	s.requestedModelClass = map[catalog.Tier]bool{}
+	for _, c := range classes {
+		s.requestedModelClass[c] = true
+	}
+	return s
+}
+
+// impliedModelClass holds a request whose requested model is of a
+// WithRequestedModelClass tier to that class, so the router never serves it
+// on a model of another tier. A request that names a class, forces a model or
+// passes the caller's model through is left alone; a saved session force
+// still outranks the implied class (modelClassImplied).
+func (s *Service) impliedModelClass(ctx context.Context, requestedModel, forceModel string) context.Context {
+	if _, classed := requestModelClass(ctx); classed || forceModel != "" || callerModelPassthroughActive(ctx) {
+		return ctx
+	}
+	class := catalog.TierFor(requestedModel)
+	if !s.requestedModelClass[class] {
+		return ctx
+	}
+	ctx = WithModelClass(ctx, class, s.ModelClassMembers(class))
+	return context.WithValue(ctx, modelClassImpliedContextKey{}, true)
+}
+
+// modelClassImplied reports whether the request's class came from its
+// requested model rather than ModelClassHeader.
+func modelClassImplied(ctx context.Context) bool {
+	implied, _ := ctx.Value(modelClassImpliedContextKey{}).(bool)
+	return implied
+}
+
 // requestModelClass returns the class the request asked for, if any.
 func requestModelClass(ctx context.Context) (catalog.Tier, bool) {
 	class, ok := ctx.Value(ModelClassContextKey{}).(catalog.Tier)
@@ -58,7 +108,7 @@ func modelInRequestedClass(ctx context.Context, model string) bool {
 // class are both explicit caller choices, so a conflict fails the request.
 func forcedModelClassConflict(ctx context.Context, model string) string {
 	class, ok := requestModelClass(ctx)
-	if !ok || catalog.TierFor(model) == class {
+	if !ok || modelClassImplied(ctx) || catalog.TierFor(model) == class {
 		return ""
 	}
 	return fmt.Sprintf("%s is a %s-class model; this request asked for %s: %s", model, catalog.TierFor(model), ModelClassHeader, class)

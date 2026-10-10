@@ -1327,6 +1327,7 @@ func main() {
 		WithLowTierSubstitute(localModels.lowTier).
 		WithModelClassOrder(localModels.modelClassOrder).
 		WithClassRotation(localModels.classRotation...).
+		WithRequestedModelClass(localModels.requestedModelClass...).
 		WithSubstitutionRules(localModels.substitutionRules).
 		WithSubscriptionLocalFallback(localModels.subscriptionFallback).
 		WithModelMapping(localModels.modelMapping).

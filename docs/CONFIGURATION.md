@@ -536,6 +536,19 @@ cluster scorer is not consulted. The rest of the rotated list is the turn's
 fallback chain as above. Each entry must name a class with a `model_classes`
 list; boot fails otherwise. `low` needs no entry: it always follows its list.
 
+An optional `requested_model_class` list serves a request without the header
+in the class of the model it names, as if it sent `x-weave-model-class`:
+
+```yaml
+requested_model_class: [low]
+```
+
+With `low` listed, a request for Luna, Terra, Sonnet or Haiku is served on the
+low list (or, with no list, on any low model) and never on a mid or high model
+the router would otherwise pick. A forced model — `x-weave-force-model`, a
+saved `/force-model`, a Codex `/model` pin — still wins, and caller-model
+passthrough keys are untouched. Entries must be `high`, `mid` or `low`.
+
 Ordered turns (low, and rotating classes) keep their session state under a
 per-class key, so a model the session struck is skipped on its later turns
 (the list serves unchanged if every entry is struck), and a cyber-refusal
