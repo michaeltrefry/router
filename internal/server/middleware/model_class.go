@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"context"
 	"net/http"
 	"strings"
 
@@ -43,15 +42,7 @@ func WithModelClass(gate ModelClassGate) gin.HandlerFunc {
 			})
 			return
 		}
-		ctx := context.WithValue(c.Request.Context(), proxy.ModelClassContextKey{}, class)
-		if members := gate.ModelClassMembers(class); len(members) > 0 {
-			set := make(map[string]struct{}, len(members))
-			for _, m := range members {
-				set[m] = struct{}{}
-			}
-			ctx = context.WithValue(ctx, proxy.ModelClassMembersContextKey{}, set)
-		}
-		c.Request = c.Request.WithContext(ctx)
+		c.Request = c.Request.WithContext(proxy.WithModelClass(c.Request.Context(), class, gate.ModelClassMembers(class)))
 		c.Next()
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -59,6 +60,7 @@ func (s *Service) anthropicRoutingRequest(
 	apiKeyID, _ := ctx.Value(APIKeyIDContextKey{}).(string)
 	var sessionKey [sessionpin.SessionKeyLen]byte
 	ctx, log, sessionKey = bindRequestLogger(ctx, env, apiKeyID, "", ingress)
+	ctx = s.impliedModelClass(ctx, env.Model(), strings.TrimSpace(headers.Get(ForceModelHeader)))
 	if removed := env.StripRouterFeedbackArtifacts(); removed > 0 {
 		log.Info("Stripped router-feedback artifacts from route preview", "removed_messages", removed)
 	}

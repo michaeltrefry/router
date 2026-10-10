@@ -13,6 +13,7 @@ var (
 	errModelClassesTier      = errors.New("model classes: entry's tier differs from its class")
 	errModelClassesDuplicate = errors.New("model classes: model listed twice")
 	errClassRotationClass    = errors.New("class rotation: entry must be a class with a model_classes list")
+	errRequestedModelClass   = errors.New("requested model class: entry must be high, mid or low")
 )
 
 // localModelClassesEntry orders, per class, the models x-weave-model-class
@@ -61,6 +62,20 @@ func validateClassRotation(entries []string, order proxy.ModelClassOrder) ([]cat
 		class, err := parseLocalTier(entry)
 		if err != nil || len(order[class]) == 0 {
 			return nil, fmt.Errorf("%w: %q", errClassRotationClass, entry)
+		}
+		out = append(out, class)
+	}
+	return out, nil
+}
+
+// validateRequestedModelClass resolves requested_model_class: every entry must
+// name a class (low, mid or high).
+func validateRequestedModelClass(entries []string) ([]catalog.Tier, error) {
+	out := make([]catalog.Tier, 0, len(entries))
+	for _, entry := range entries {
+		class, err := parseLocalTier(entry)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %q", errRequestedModelClass, entry)
 		}
 		out = append(out, class)
 	}

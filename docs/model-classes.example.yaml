@@ -53,3 +53,7 @@ model_classes:
 # slot is a hash of its key, so sessions spread across Claude and ChatGPT and
 # keep their model (and prompt cache) every turn. The scorer is not used.
 class_rotation: [high, mid]
+
+# Serve a request for a low-tier model (Luna, Terra, Sonnet, Haiku) in the low
+# class even without the header, so the router never lifts it to Sol or Opus.
+requested_model_class: [low]
