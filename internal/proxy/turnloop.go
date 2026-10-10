@@ -1806,8 +1806,25 @@ func (s *Service) runTurnLoop(
 				"selected_model", dec.Model,
 				"excluded_models", strings.Join(slices.Sorted(maps.Keys(admitted)), ","),
 			)
-			r.ExcludedModels = mergeExcludedModels(r.ExcludedModels, admitted)
-			return s.routeFor(ctx, r)
+			unadmitted := r
+			unadmitted.ExcludedModels = mergeExcludedModels(r.ExcludedModels, admitted)
+			rerouted, rerr := s.routeFor(ctx, unadmitted)
+			if rerr == nil || !errors.Is(rerr, cluster.ErrNoEligibleProvider) && !errors.Is(rerr, policy.ErrNoRoutableModels) {
+				return rerouted, rerr
+			}
+			// Nothing else can serve: a session strike or deployment-wide
+			// automatic exclusion on the mapping target is soft, so the pick
+			// keeps its mapping for this turn rather than failing it.
+			target, soft := s.softlyExcludedMappingTarget(ctx, probe, r)
+			if !soft {
+				return rerouted, rerr
+			}
+			log.Info("Mapping target is automatically excluded but nothing else can serve; keeping the mapping for this turn",
+				"selected_model", dec.Model,
+				"mapped_model", target,
+			)
+			req.AutomaticExcludedModels = withoutModels(req.AutomaticExcludedModels, []string{target})
+			return dec, nil
 		}
 		var fresh router.Decision
 		routed := false

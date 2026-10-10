@@ -91,6 +91,11 @@ func localModelServes(provider, model string, req router.Request) bool {
 	return automaticServingIneligibility(provider, model, req) == ""
 }
 
+// automaticRoutingDisabledReason is automaticServingIneligibility's reason for
+// a model under a soft automatic exclusion (session strike, deployment-wide
+// automatic disable).
+const automaticRoutingDisabledReason = "automatic_routing_disabled"
+
 // automaticServingIneligibility names why a model the router serves on its
 // own behalf may not take req, or returns "" when it may. The context check
 // uses the full-body estimate and output reserve the ingress pre-filter
@@ -111,7 +116,7 @@ func automaticServingIneligibility(provider, model string, req router.Request) s
 		return "not_image_capable"
 	}
 	if automaticallyDisabled(req, model) {
-		return "automatic_routing_disabled"
+		return automaticRoutingDisabledReason
 	}
 	fit := req.ContextFit
 	if req.EstimatedInputTokens > catalog.ContextWindowForBinding(model, provider) ||
