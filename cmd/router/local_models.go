@@ -40,6 +40,7 @@ var (
 	errLocalModelKeyEnvUnset     = errors.New("local model: api_key_env names an unset environment variable")
 	errLocalModelMissingUpstrm   = errors.New("local model: upstream_model is required")
 	errLocalModelContextWindow   = errors.New("local model: context_window must be positive")
+	errLocalModelMaxOutput       = errors.New("local model: max_output_tokens must be positive and at most context_window")
 	errLocalModelInvalidField    = errors.New("local model: invalid field value")
 	errLocalTurnRoutingModel     = errors.New("local turn routing: model must name a configured local model")
 	errLocalTurnRoutingType      = errors.New("local turn routing: turn type cannot be served locally")
@@ -122,11 +123,13 @@ type localModelsConfig struct {
 }
 
 type localModelEntry struct {
-	ID              string `yaml:"id"`
-	BaseURL         string `yaml:"base_url"`
-	APIKeyEnv       string `yaml:"api_key_env"`
-	UpstreamModel   string `yaml:"upstream_model"`
-	ContextWindow   int    `yaml:"context_window"`
+	ID            string `yaml:"id"`
+	BaseURL       string `yaml:"base_url"`
+	APIKeyEnv     string `yaml:"api_key_env"`
+	UpstreamModel string `yaml:"upstream_model"`
+	ContextWindow int    `yaml:"context_window"`
+	// MaxOutputTokens caps output per request; default half the context window.
+	MaxOutputTokens int    `yaml:"max_output_tokens"`
 	Tier            string `yaml:"tier"`
 	ToolUse         string `yaml:"tool_use"`
 	Agentic         string `yaml:"agentic"`
@@ -376,12 +379,20 @@ func validateLocalModel(entry localModelEntry, getenv func(string) string) (loca
 	if entry.ContextWindow <= 0 {
 		return localModel{}, errLocalModelContextWindow
 	}
+	maxOutput := entry.MaxOutputTokens
+	if maxOutput == 0 {
+		maxOutput = entry.ContextWindow / 2
+	}
+	if maxOutput <= 0 || maxOutput > entry.ContextWindow {
+		return localModel{}, fmt.Errorf("%w: %d", errLocalModelMaxOutput, entry.MaxOutputTokens)
+	}
 	model := catalog.Model{
 		ID: entry.ID,
 		// Weights served from the operator's own hardware are published weights.
-		Source:        catalog.SourceOpenSource,
-		ContextWindow: entry.ContextWindow,
-		Providers:     []catalog.ProviderBinding{{Provider: provider, UpstreamID: entry.UpstreamModel}},
+		Source:          catalog.SourceOpenSource,
+		ContextWindow:   entry.ContextWindow,
+		MaxOutputTokens: maxOutput,
+		Providers:       []catalog.ProviderBinding{{Provider: provider, UpstreamID: entry.UpstreamModel}},
 	}
 	if model.Tier, err = parseLocalTier(entry.Tier); err != nil {
 		return localModel{}, err

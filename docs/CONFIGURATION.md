@@ -201,6 +201,7 @@ from [`local-models.example.yaml`](local-models.example.yaml).
 | `api_key_env` | yes | Name of the env var holding the bearer key; boot fails when it is unset. |
 | `upstream_model` | yes | Model name sent in the request body. |
 | `context_window` | yes | Total token budget. |
+| `max_output_tokens` | no | Output tokens a request may ask for; larger client requests are clamped to it. Default half of `context_window` (models the router does not list are otherwise capped at 8,192). Must not exceed `context_window`. |
 | `tier` | yes | `low`, `mid` or `high`. |
 | `tool_use`, `agentic` | no | `default` or `low`; `low` keeps the model off tool-bearing / agentic turns. |
 | `image_input` | no | `true` when the model accepts images; defaults to text-only. |

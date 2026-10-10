@@ -1221,8 +1221,8 @@ func resolveOpenAIOverrides(body []byte, opts EmitOptions) EmitOverrides {
 		ov.DeleteKeys = append(ov.DeleteKeys, "max_tokens")
 	}
 
-	tokenCap := modelMaxOutputTokens[opts.TargetModel]
-	if tokenCap == 0 {
+	tokenCap, ok := modelOutputCap(opts.TargetModel)
+	if !ok || tokenCap == 0 {
 		tokenCap = defaultMaxOutputTokenCap
 	}
 	maxTokensDeleted := hasMaxTokens && supportsReasoning
@@ -1470,10 +1470,22 @@ var modelMaxOutputTokens = map[string]int{
 
 const defaultMaxOutputTokenCap = 8192
 
+// modelOutputCap returns the model's max output tokens: the table above, else
+// the catalog row's own cap (local models declare theirs), else ok=false.
+func modelOutputCap(model string) (int, bool) {
+	if tokenCap, ok := modelMaxOutputTokens[model]; ok {
+		return tokenCap, true
+	}
+	if m, ok := catalog.ByID(model); ok && m.MaxOutputTokens > 0 {
+		return m.MaxOutputTokens, true
+	}
+	return 0, false
+}
+
 // defaultOutputTokens returns the default max output tokens for a model,
 // floored by the model's own cap and globally at defaultMaxOutputTokenCap.
 func defaultOutputTokens(model string) int64 {
-	if tokenCap, ok := modelMaxOutputTokens[model]; ok && tokenCap < defaultMaxOutputTokenCap {
+	if tokenCap, ok := modelOutputCap(model); ok && tokenCap < defaultMaxOutputTokenCap {
 		return int64(tokenCap)
 	}
 	return defaultMaxOutputTokenCap
@@ -1495,7 +1507,7 @@ func defaultAnthropicOutputTokens(model string, capabilities router.ModelSpec) i
 		return defaultTokens
 	}
 	floored := reasoningOutputFloor(defaultTokens, true)
-	if tokenCap, ok := modelMaxOutputTokens[model]; ok && int64(tokenCap) < floored {
+	if tokenCap, ok := modelOutputCap(model); ok && int64(tokenCap) < floored {
 		return int64(tokenCap)
 	}
 	return floored
