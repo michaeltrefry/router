@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"weave-os/router/internal/observability/otel"
@@ -101,4 +102,37 @@ func effortResolutionFor(caps router.ModelSpec, arm, level, source string) effor
 		return effortResolution{Arm: arm}
 	}
 	return effortResolution{Arm: arm, Selected: selected, Sent: sent, Source: source}
+}
+
+// effortSourceClient marks a turn whose reasoning level is the client's own,
+// with no router override.
+const effortSourceClient = "client"
+
+// effortLogFields names, for a turn's completion log line, the reasoning
+// effort the client asked for, the level the served model received, and what
+// decided it. A router override reports its own level; otherwise the client's
+// request as the served model accepts it.
+func effortLogFields(env *translate.RequestEnvelope, served effortResolution, model string) []any {
+	intent := env.ReasoningIntent()
+	requested := describeReasoningIntent(intent)
+	sent, source := served.Sent, served.Source
+	if sent == "" && requested != "" {
+		source = effortSourceClient
+		if applied, err := translate.ApplyReasoningIntent(intent, router.Lookup(model), ""); err == nil {
+			sent = describeReasoningIntent(applied)
+		}
+	}
+	return []any{"effort_requested", requested, "effort_sent", sent, "effort_source", source}
+}
+
+func describeReasoningIntent(intent translate.ReasoningIntent) string {
+	switch intent.Kind {
+	case translate.ReasoningLevel:
+		return intent.Level
+	case translate.ReasoningBudget:
+		return fmt.Sprintf("budget:%d", intent.BudgetTokens)
+	case translate.ReasoningDisabled, translate.ReasoningAuto:
+		return string(intent.Kind)
+	}
+	return ""
 }
