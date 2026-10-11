@@ -348,8 +348,10 @@ func withSubscriptionRotationDeadline(ctx, budget context.Context) context.Conte
 }
 
 // withUncommittedRotationDeadline cancels a subscription attempt when the
-// rotation budget expires before provider output commits. The budget bounds
-// rotation, not the length of a committed stream.
+// rotation budget expires before the upstream answers. The budget rotates away
+// from an account that does not respond: once response headers arrive the
+// account has taken the request, and a slow first token (a long reasoning
+// phase on a large context) is the model working, not a reason to rotate.
 func withUncommittedRotationDeadline(ctx, budget context.Context, buf *preludeBuffer) (context.Context, func()) {
 	attemptCtx, cancel := context.WithCancelCause(ctx)
 	var attemptGeneration uint64
@@ -362,6 +364,12 @@ func withUncommittedRotationDeadline(ctx, budget context.Context, buf *preludeBu
 			return
 		}
 		buf.abortIfUncommitted(attemptGeneration, func() { cancel(budget.Err()) })
+	})
+	// ctx carries the request's own observer, so the chained call reaches it
+	// rather than this wrapper.
+	attemptCtx = providers.WithUpstreamHeaderObserver(attemptCtx, func(_ context.Context, h http.Header) {
+		stop()
+		providers.ObserveUpstreamHeaders(ctx, h)
 	})
 	return attemptCtx, func() {
 		stop()
