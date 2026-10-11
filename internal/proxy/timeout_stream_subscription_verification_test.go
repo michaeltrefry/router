@@ -248,3 +248,39 @@ func TestVerificationCommittedSubscriptionStreamOutlivesRotationBudget(t *testin
 	require.Contains(t, rec.Body.String(), "late output")
 	require.True(t, ctx.Value(ManagedSubscriptionUsageContextKey{}).(*ManagedSubscriptionUsage).Served)
 }
+
+// An account that answered with response headers took the request: a first
+// output slower than the rotation budget is the model reasoning, not a hang.
+func TestVerificationAnsweredSubscriptionAttemptOutlivesRotationBudgetBeforeOutput(t *testing.T) {
+	var bearers []string
+	var bearersMu sync.Mutex
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bearersMu.Lock()
+		bearers = append(bearers, r.Header.Get("Authorization"))
+		bearersMu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(sameBindingRetryBudget + time.Second):
+		}
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"late output\"}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"synthetic\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":11,\"output_tokens\":7}}}\n\n")
+	}))
+	defer upstream.Close()
+	client := openai.NewClient("synthetic-api-key", upstream.URL)
+	client.SetCodexBaseURL(upstream.URL)
+	leaser := &scriptedSubscriptionLeaser{leases: []subscriptions.Lease{{AccountID: "slow-account", AccessToken: "slow-seat", ProviderAccount: "slow-provider"}}}
+	svc := NewService(staticRouter{decision: router.Decision{Provider: providers.ProviderOpenAI, Model: codexCoveredModel, Reason: "test"}}, map[string]providers.Client{providers.ProviderOpenAI: client}, nil, false, nil, nil, false, providers.ProviderOpenAI, codexCoveredModel, nil).WithManagedSubscriptions(leaser).WithDeploymentKeyedProviders(map[string]struct{}{providers.ProviderOpenAI: {}})
+	body := []byte(`{"model":"auto","stream":true,"messages":[{"role":"user","content":"synthetic slow first token"}],"tools":[{"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}}]}`)
+	ctx := context.WithValue(managedSubscriptionContext(auth.SubscriptionProviderCodex), InstallationIDContextKey{}, "11111111-1111-1111-1111-111111111111")
+	rec := httptest.NewRecorder()
+	err := svc.ProxyOpenAIChatCompletion(ctx, body, rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body))))
+	require.NoError(t, err, "an attempt the account answered is not canceled for a slow first token")
+	bearersMu.Lock()
+	require.Equal(t, []string{"Bearer slow-seat"}, bearers)
+	bearersMu.Unlock()
+	require.Contains(t, rec.Body.String(), "late output")
+}

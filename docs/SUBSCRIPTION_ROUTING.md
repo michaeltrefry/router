@@ -13,6 +13,8 @@ active member; routing keys without a credential subject receive no subscription
 capacity. Enrollment keys are attribution only and do not partition
 serving pools. Refresh, quota, cooldown, and rotation use physical account identity.
 The ten-second rotation budget is shared across account and model alternatives.
+It cancels only an attempt the account has not answered: once response headers
+arrive, the attempt runs to completion however long its first output takes.
 
 Automatic alternatives reuse the existing policy's request-compatible ordering
 and preserve the selected quality tier, tool/context exclusions and provider
