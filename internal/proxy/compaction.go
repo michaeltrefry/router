@@ -123,6 +123,11 @@ func (s *Service) compactionSessionModel(ctx context.Context, sessionKey [sessio
 		model = served.Model
 	}
 	model, _ = hmm.SplitEffort(model)
+	// Pins record the router's own pick; a mapped session was served on the
+	// mapping target, which is also the only one its credentials may serve.
+	if target, mapped := s.modelMapping[model]; mapped {
+		model = target
+	}
 	model = catalog.LatestInFamily(model, func(candidate string) bool {
 		m, known := catalog.ByID(candidate)
 		if !known || m.Tier == catalog.TierLow {

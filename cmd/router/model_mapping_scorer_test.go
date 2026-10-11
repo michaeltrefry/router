@@ -453,3 +453,32 @@ func TestShippedMapping_CodexSubscriptionKeepsMappingWhenTargetIsOnlyStruck(t *t
 	assert.Equal(t, "gpt-5.5", decisions[0].Model)
 	assert.Equal(t, []string{"gpt-6.1-sol"}, stack.openAI.served(), "the struck target serves when nothing else can")
 }
+
+// A Codex session served on a mapping target compacts on that target: the
+// pin records the router's pick (gpt-5.5), which the subscription cannot
+// serve, so compacting on it left the turn with no model at all.
+func TestShippedMapping_CodexCompactionServedOnTheMappingTarget(t *testing.T) {
+	stack := newShippedStackWithPins(t, &memoryPins{pins: map[string]sessionpin.Pin{}})
+	stack.svc.WithCompactionHardPin(true)
+
+	ctx, r := codexRequest(t, nil)
+	require.NoError(t, stack.svc.ProxyOpenAIResponses(ctx, []byte(codexMainTurn), httptest.NewRecorder(), r))
+	require.Equal(t, []string{"gpt-6.1-sol"}, stack.openAI.served(), "the session is served on the mapping target")
+
+	compaction := `{
+	"model": "gpt-5.6-sol",
+	"stream": true,
+	"instructions": "You are Codex.",
+	"input": [
+		{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Explore the repository layout."}]},
+		{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "It is a Go module."}]},
+		{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "You are performing a CONTEXT CHECKPOINT COMPACTION. Summarize the conversation."}]}
+	]
+}`
+	ctx, r = codexRequest(t, nil)
+	rec := httptest.NewRecorder()
+	require.NoError(t, stack.svc.ProxyOpenAIResponses(ctx, []byte(compaction), rec, r))
+
+	assert.Equal(t, "gpt-6.1-sol", rec.Header().Get(proxy.HeaderRouterModel))
+	assert.Equal(t, []string{"gpt-6.1-sol", "gpt-6.1-sol"}, stack.openAI.served())
+}
