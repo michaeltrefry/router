@@ -51,10 +51,12 @@ var (
 // subscriptionUpstream fails every dispatch carrying a subscription OAuth
 // credential with subErr and answers the rest with paidErr or okBody.
 type subscriptionUpstream struct {
-	subErr     error
-	paidErr    error
-	preErrBody string
-	okBody     func(w http.ResponseWriter)
+	subErr error
+	// subFailures, when positive, limits subErr to that many dispatches.
+	subFailures int
+	paidErr     error
+	preErrBody  string
+	okBody      func(w http.ResponseWriter)
 
 	subDispatches  int
 	paidDispatches int
@@ -68,8 +70,9 @@ func (u *subscriptionUpstream) Proxy(ctx context.Context, _ router.Decision, _ p
 		if u.preErrBody != "" {
 			_, _ = io.WriteString(w, u.preErrBody)
 		}
-		if u.subErr == nil {
+		if u.subErr == nil || u.subFailures > 0 && u.subDispatches > u.subFailures {
 			u.okBody(w)
+			return nil
 		}
 		return u.subErr
 	}
@@ -587,4 +590,48 @@ func TestSubscriptionLocalFallback_ObservedExhaustionLocalFailureSurfacesLimit(t
 	assert.Zero(t, f.upstream.subDispatches+f.upstream.paidDispatches, "the vendor never receives the prompt")
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code, "the client sees the subscription limit, not the local failure")
 	assert.Contains(t, rec.Body.String(), "rate_limit_error")
+}
+
+// A transient ChatGPT failure on the caller's only Codex plan is not a limit:
+// the plan is retried, and with nowhere else to go the client gets the real
+// error rather than a local turn badged as a subscription limit.
+func TestSubscriptionLocalFallback_CodexTransientFailureIsNotALimit(t *testing.T) {
+	codex503 := &providers.UpstreamErrorResponse{Status: http.StatusServiceUnavailable, Body: []byte(`{"error":{"message":"upstream unavailable"}}`)}
+	body := []byte(`{"model":"` + fallbackCodexModel + `","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"fix the build"}]}]}`)
+	newFixture := func(t *testing.T, failures int) subscriptionFallbackFixture {
+		f := newSubscriptionFallbackFixture(t, "test-sub-fb-5xx", providers.ProviderOpenAI, fallbackCodexModel, false, true, nil)
+		f.upstream.subErr, f.upstream.subFailures = codex503, failures
+		f.upstream.okBody = func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"resp_sub","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"subscription"}]}]}`)
+		}
+		return f
+	}
+	serve := func(f subscriptionFallbackFixture) (*httptest.ResponseRecorder, error) {
+		rec := httptest.NewRecorder()
+		err := f.svc.ProxyOpenAIResponses(codexSubscriptionCtx(io.Discard), body, rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("")))
+		return rec, err
+	}
+
+	t.Run("recovers on retry", func(t *testing.T) {
+		f := newFixture(t, 1)
+		rec, err := serve(f)
+
+		require.NoError(t, err)
+		assert.Contains(t, rec.Body.String(), "subscription")
+		assert.Equal(t, 2, f.upstream.subDispatches, "the subscription is retried")
+		assert.Empty(t, f.local.proxyBodies)
+	})
+	t.Run("keeps failing", func(t *testing.T) {
+		f := newFixture(t, 0)
+		_, err := serve(f)
+
+		var upstream *providers.UpstreamErrorResponse
+		require.ErrorAs(t, err, &upstream)
+		assert.Equal(t, http.StatusServiceUnavailable, upstream.Status, "the client gets the real error")
+		assert.NotErrorIs(t, err, proxy.ErrSubscriptionPoolExhausted)
+		assert.Greater(t, f.upstream.subDispatches, 1, "the subscription is retried")
+		assert.Zero(t, f.upstream.paidDispatches)
+		assert.Empty(t, f.local.proxyBodies, "the local model never serves a transient failure")
+	})
 }

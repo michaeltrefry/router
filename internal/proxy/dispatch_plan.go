@@ -237,7 +237,12 @@ func (s *Service) dispatchPlanned(ctx context.Context, in failoverInputs, plan i
 			rotate := managedAttempt && (s.recordManagedSubscriptionFailure(bookkeepingCtx, decision.Provider, decision.Model, lease, attemptErr) || providers.IsRetryable(attemptErr) || canceledByRotationBudget)
 			if !managedAttempt && servedOnCodexSubscription(credentialCtx) && !committed(in.buf) {
 				_, quotaSpent := codexQuotaExhaustion(attemptErr)
-				if quotaSpent || codexOAuthCredentialRejected(attemptErr) || codexSubscriptionModelRejected(attemptErr) || providers.IsRetryable(attemptErr) || canceledByRotationBudget {
+				// A transient failure is no reason to drop the plan unless rotation
+				// reaches another account or a paid key; suppressing the only
+				// credential would read as an exhausted pool, a limit it never hit.
+				transient := providers.IsRetryable(attemptErr) || canceledByRotationBudget
+				rotatable := managedSubscriptionEnrolled(ctx, subscriptions.ProviderCodex) || s.managedProviderFallbackAvailable(ctx, subscriptions.ProviderCodex)
+				if quotaSpent || codexOAuthCredentialRejected(attemptErr) || codexSubscriptionModelRejected(attemptErr) || transient && rotatable {
 					s.recordCodexQuotaExhaustion(bookkeepingCtx, http.Header{}, attemptErr)
 					attemptCtx = resolveAndInjectCredentials(withSuppressedCodexSubscription(attemptCtx), decision.Provider, decision.Model, http.Header{})
 					rotate = true
