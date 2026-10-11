@@ -256,3 +256,27 @@ func TestTurnLoop_CompactionReadsClientIdentityBeforeHardPin(t *testing.T) {
 	assert.Equal(t, providers.ProviderOpenAI, turn.Decision.Provider)
 	assert.Equal(t, "gpt-6.1-sol", turn.Decision.Model)
 }
+
+// A mapped session was served on the mapping target: compaction follows it
+// rather than the router's own pick the pin records, which the session's
+// credentials may not be able to serve.
+func TestCompactionHardPin_CodexFollowsTheModelMapping(t *testing.T) {
+	var key [sessionpin.SessionKeyLen]byte
+	live := time.Now().Add(time.Hour)
+	pins := &rolePinStore{byRole: map[string]sessionpin.Pin{
+		sessionpin.DefaultRole: {Provider: providers.ProviderOpenAI, Model: "gpt-5.5", LastServedModel: "gpt-5.5", LastTurnEndedAt: time.Now(), PinnedUntil: live},
+	}}
+	clients := dispatch.NewClients(map[string]providers.Client{providers.ProviderOpenAI: nil, providers.ProviderAnthropic: nil})
+	codex := router.Request{ClientApp: ClientAppCodex}
+
+	mapped := &Service{compactionHardPinEnabled: true, pinStore: pins, clients: clients, modelMapping: ModelMapping{"gpt-5.5": "gpt-6.1-sol"}}
+	p, m, _, ok := mapped.compactionHardPin(context.Background(), key, sessionpin.DefaultRole, codex)
+	require.True(t, ok)
+	assert.Equal(t, providers.ProviderOpenAI, p)
+	assert.Equal(t, "gpt-6.1-sol", m)
+
+	unmapped := &Service{compactionHardPinEnabled: true, pinStore: pins, clients: clients}
+	_, m, _, ok = unmapped.compactionHardPin(context.Background(), key, sessionpin.DefaultRole, codex)
+	require.True(t, ok)
+	assert.Equal(t, "gpt-5.5", m, "without a mapping the session's own family is kept")
+}
